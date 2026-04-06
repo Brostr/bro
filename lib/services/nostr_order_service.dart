@@ -2666,8 +2666,9 @@ class NostrOrderService {
             }
           }
         }
-        // If this relay returned data, skip remaining
-        if (allEvents.isNotEmpty) break;
+        // v500: Query ALL relays, don't stop at first with data.
+        // The old behavior missed events that only exist on later relays
+        // (e.g., kind 30081 only on primal, but damus returns older events → sync stops).
       } catch (e) {
         // Relay failed, try next
       }

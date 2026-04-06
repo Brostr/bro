@@ -234,13 +234,22 @@ void main() async {
       BrixService().initCredentials().then((_) {
         BrixService().registerPushToken(token, pubkey).then((ok) {
           broLog('[FCM] BRIX push token registered: $ok');
+        }).catchError((e) {
+          broLog('[FCM] ❌ BRIX push token registration FAILED: $e');
         });
+      }).catchError((e) {
+        broLog('[FCM] ❌ BRIX initCredentials FAILED: $e');
       });
 
       // Register with main backend for order push notifications
       ApiService().registerPushToken(token).then((ok) {
         broLog('[FCM] Backend push token registered: $ok');
+      }).catchError((e) {
+        broLog('[FCM] ❌ Backend push token registration FAILED: $e');
       });
+    } else {
+      broLog('[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
+    }
 
       // Re-register when Firebase rotates the FCM token
       FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {

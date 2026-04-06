@@ -453,6 +453,11 @@ const String _brixServerUrl = String.fromEnvironment(
   defaultValue: 'https://brix.brostr.app',
 );
 
+const String _backendUrl = String.fromEnvironment(
+  'BACKEND_URL',
+  defaultValue: 'https://api.brostr.app',
+);
+
 Future<void> _refreshFcmToken() async {
   try {
     // 1. Recuperar pubkey e private key do storage seguro
@@ -511,9 +516,47 @@ Future<void> _refreshFcmToken() async {
     ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
-      broLog('[BRO-BG-FCM] Token FCM re-registrado com sucesso');
+      broLog('[BRO-BG-FCM] Token FCM re-registrado com sucesso (BRIX)');
     } else {
-      broLog('[BRO-BG-FCM] Falha ao registrar token: ${response.statusCode}');
+      broLog('[BRO-BG-FCM] Falha ao registrar token BRIX: ${response.statusCode}');
+    }
+
+    // v500: Also register with main backend for order_update push notifications
+    try {
+      final backendUrl = '$_backendUrl/push/register-token';
+      final backendNip98 = Event.from(
+        kind: 27235,
+        tags: [['u', backendUrl], ['method', 'POST']],
+        content: '',
+        privkey: privateKey,
+      );
+      final backendEventMap = {
+        'id': backendNip98.id,
+        'pubkey': backendNip98.pubkey,
+        'created_at': backendNip98.createdAt,
+        'kind': backendNip98.kind,
+        'tags': backendNip98.tags,
+        'content': backendNip98.content,
+        'sig': backendNip98.sig,
+      };
+      final backendAuth = 'Nostr ${base64Encode(utf8.encode(jsonEncode(backendEventMap)))}';
+
+      final backendResp = await http.post(
+        Uri.parse(backendUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': backendAuth,
+        },
+        body: jsonEncode({'fcm_token': fcmToken}),
+      ).timeout(const Duration(seconds: 10));
+
+      if (backendResp.statusCode == 200) {
+        broLog('[BRO-BG-FCM] Token FCM re-registrado com sucesso (backend)');
+      } else {
+        broLog('[BRO-BG-FCM] Falha ao registrar token backend: ${backendResp.statusCode}');
+      }
+    } catch (e) {
+      broLog('[BRO-BG-FCM] Erro ao registrar token backend: $e');
     }
   } catch (e) {
     broLog('[BRO-BG-FCM] Erro no refresh: $e');
