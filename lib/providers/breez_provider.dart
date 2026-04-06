@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/breez_config.dart';
 import '../extensions/breez_extensions.dart';
 import '../services/storage_service.dart';
+import '../services/brix_relay_service.dart';
 
 /// Self-custodial Lightning provider using Breez SDK Spark (Nodeless)
 class BreezProvider with ChangeNotifier {
@@ -460,26 +461,11 @@ class BreezProvider with ChangeNotifier {
 
   /// Persist BRIX payment via BrixRelayService static method
   Future<void> _persistBrixPaymentLocally(int amountSats, String description, String? paymentHash) async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('brix_received_payments') ?? '[]';
-      final List<dynamic> list = json.decode(raw);
-      if (paymentHash != null && list.any((p) => p['paymentHash'] == paymentHash)) return;
-      list.add({
-        'amountSats': amountSats,
-        'description': description,
-        'paymentHash': paymentHash,
-        'createdAt': DateTime.now().toIso8601String(),
-        'type': 'received',
-        'direction': 'incoming',
-        'status': 'Complete',
-        'isBrix': true,
-      });
-      await prefs.setString('brix_received_payments', json.encode(list));
-      broLog('💾 [BRIX] SDK event persisted: $amountSats sats');
-    } catch (e) {
-      broLog('❌ [BRIX] Failed to persist from SDK event: $e');
-    }
+    await BrixRelayService.persistBrixPayment(
+      amountSats: amountSats,
+      description: description,
+      paymentHash: paymentHash,
+    );
   }
   
   /// Persistir pagamento no SharedPreferences para nunca perder

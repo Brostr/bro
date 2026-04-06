@@ -231,21 +231,14 @@ void main() async {
     if (fcmToken != null && userPubkey != null) {
       final token = fcmToken;
       final pubkey = userPubkey!;
-      BrixService().initCredentials().then((_) {
-        BrixService().registerPushToken(token, pubkey).then((ok) {
-          broLog('[FCM] BRIX push token registered: $ok');
-        }).catchError((e) {
-          broLog('[FCM] ❌ BRIX push token registration FAILED: $e');
-        });
-      }).catchError((e) {
-        broLog('[FCM] ❌ BRIX initCredentials FAILED: $e');
+      // Fire-and-forget with retry — don't block app startup
+      _retryAsync('BRIX push', () async {
+        await BrixService().initCredentials();
+        return await BrixService().registerPushToken(token, pubkey);
       });
 
-      // Register with main backend for order push notifications
-      ApiService().registerPushToken(token).then((ok) {
-        broLog('[FCM] Backend push token registered: $ok');
-      }).catchError((e) {
-        broLog('[FCM] ❌ Backend push token registration FAILED: $e');
+      _retryAsync('Backend push', () async {
+        return await ApiService().registerPushToken(token);
       });
     } else {
       broLog('[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
@@ -311,6 +304,23 @@ void main() async {
   // Breez SDK sera inicializado no provider (lazy initialization)
 
   runApp(BroApp(isLoggedIn: isLoggedIn, userPubkey: userPubkey, hasSeenOnboarding: hasSeenOnboarding, localeProvider: localeProvider));
+}
+
+/// Retry an async action with exponential backoff (fire-and-forget safe)
+Future<bool> _retryAsync(String label, Future<bool> Function() action, {int maxRetries = 3}) async {
+  for (int attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      final ok = await action().timeout(const Duration(seconds: 10));
+      if (ok) return true;
+    } catch (e) {
+      broLog('[FCM] $label attempt $attempt/$maxRetries failed: $e');
+    }
+    if (attempt < maxRetries) {
+      await Future.delayed(Duration(seconds: 2 * attempt));
+    }
+  }
+  broLog('[FCM] ⚠️ $label failed after $maxRetries retries');
+  return false;
 }
 
 /// Restaurar chaves Nostr do armazenamento seguro

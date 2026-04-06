@@ -458,6 +458,18 @@ const String _backendUrl = String.fromEnvironment(
   defaultValue: 'https://api.brostr.app',
 );
 
+/// Validate that a URL uses HTTPS and belongs to a trusted domain
+bool _isValidSecureUrl(String url) {
+  try {
+    final uri = Uri.parse(url);
+    if (uri.scheme != 'https') return false;
+    final host = uri.host;
+    return host.endsWith('.brostr.app') || host == 'brostr.app';
+  } catch (_) {
+    return false;
+  }
+}
+
 Future<void> _refreshFcmToken() async {
   try {
     // 1. Recuperar pubkey e private key do storage seguro
@@ -486,8 +498,14 @@ Future<void> _refreshFcmToken() async {
       return;
     }
 
-    // 3. Criar NIP-98 auth header (kind 27235)
+    // 3. Validate URLs before making requests
     final url = '$_brixServerUrl/brix/register-push';
+    if (!_isValidSecureUrl(url)) {
+      broLog('[BRO-BG-FCM] REJECTED insecure BRIX URL: $url');
+      return;
+    }
+
+    // 4. Criar NIP-98 auth header (kind 27235)
     final nip98Event = Event.from(
       kind: 27235,
       tags: [['u', url], ['method', 'POST']],
@@ -524,6 +542,10 @@ Future<void> _refreshFcmToken() async {
     // v500: Also register with main backend for order_update push notifications
     try {
       final backendUrl = '$_backendUrl/push/register-token';
+      if (!_isValidSecureUrl(backendUrl)) {
+        broLog('[BRO-BG-FCM] REJECTED insecure backend URL: $backendUrl');
+        return;
+      }
       final backendNip98 = Event.from(
         kind: 27235,
         tags: [['u', backendUrl], ['method', 'POST']],

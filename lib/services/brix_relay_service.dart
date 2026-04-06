@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/widgets.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:bro_app/services/brix_service.dart';
 import 'package:bro_app/services/storage_service.dart';
@@ -304,6 +305,32 @@ class BrixRelayService {
   // Track claims in progress to prevent duplicates
   final Set<String> _claimedPayments = {};
 
+  static const _secureStorage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+  );
+  static const _brixPaymentsKey = 'brix_received_payments';
+  static bool _migrated = false;
+
+  /// One-time migration from SharedPreferences to FlutterSecureStorage
+  static Future<void> _migrateIfNeeded() async {
+    if (_migrated) return;
+    _migrated = true;
+    try {
+      final existing = await _secureStorage.read(key: _brixPaymentsKey);
+      if (existing != null) return; // already migrated
+      final prefs = await SharedPreferences.getInstance();
+      final old = prefs.getString(_brixPaymentsKey);
+      if (old != null && old != '[]') {
+        await _secureStorage.write(key: _brixPaymentsKey, value: old);
+        await prefs.remove(_brixPaymentsKey);
+        broLog('🔒 [BRIX] Migrated payments to secure storage');
+      }
+    } catch (e) {
+      broLog('⚠️ [BRIX] Migration error (non-fatal): $e');
+    }
+  }
+
   /// Persist a received BRIX payment locally so it appears in wallet history
   /// even if the Spark SDK doesn't return it in listPayments().
   static Future<void> persistBrixPayment({
@@ -313,8 +340,8 @@ class BrixRelayService {
     DateTime? timestamp,
   }) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('brix_received_payments') ?? '[]';
+      await _migrateIfNeeded();
+      final raw = await _secureStorage.read(key: _brixPaymentsKey) ?? '[]';
       final List<dynamic> list = json.decode(raw);
       // Dedup by paymentHash
       if (paymentHash != null && list.any((p) => p['paymentHash'] == paymentHash)) return;
@@ -328,7 +355,7 @@ class BrixRelayService {
         'status': 'Complete',
         'isBrix': true,
       });
-      await prefs.setString('brix_received_payments', json.encode(list));
+      await _secureStorage.write(key: _brixPaymentsKey, value: json.encode(list));
       broLog('💾 [BRIX] Persisted local: $amountSats sats, hash=${paymentHash?.substring(0, 8) ?? "N/A"}');
     } catch (e) {
       broLog('❌ [BRIX] Failed to persist: $e');
@@ -338,8 +365,8 @@ class BrixRelayService {
   /// Load locally persisted BRIX payments for wallet screen fallback.
   static Future<List<Map<String, dynamic>>> getLocalBrixPayments() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString('brix_received_payments') ?? '[]';
+      await _migrateIfNeeded();
+      final raw = await _secureStorage.read(key: _brixPaymentsKey) ?? '[]';
       final List<dynamic> list = json.decode(raw);
       return list.map((p) => Map<String, dynamic>.from(p)).toList();
     } catch (e) {
