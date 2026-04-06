@@ -106,6 +106,13 @@ class _WalletScreenState extends State<WalletScreen> {
         }
       } catch (_) {}
 
+      // v495: Log raw SDK payments before filtering to diagnose missing BRIX
+      broLog('📋 Raw SDK payments count: ${payments.length}');
+      for (int i = 0; i < payments.length && i < 10; i++) {
+        final rp = payments[i];
+        broLog('   🔍 SDK#${i+1}: type=${rp['type']} dir=${rp['direction']} amount=${rp['amountSats']} desc="${rp['description']}" payType=${rp['paymentType']}');
+      }
+
       // Usar apenas pagamentos Lightning reais, FILTRANDO taxas internas da plataforma
       List<Map<String, dynamic>> allPayments = payments.where((p) {
         final description = p['description']?.toString() ?? '';
@@ -232,7 +239,12 @@ class _WalletScreenState extends State<WalletScreen> {
       });
       
       broLog('💰 Saldo: ${balance?['balance']} sats');
-      broLog('📜 Pagamentos: ${allPayments.length} (incluindo ganhos Bro)');
+      broLog('📜 Pagamentos: ${allPayments.length} (incluindo ganhos Bro) de ${payments.length} do SDK');
+      // v494: Log top 5 para diagnosticar pagamentos faltando
+      for (int i = 0; i < allPayments.length && i < 5; i++) {
+        final pp = allPayments[i];
+        broLog('   📋 #${i+1}: ${pp['type']} ${pp['amountSats']} sats desc="${pp['description']}" status=${pp['status']}');
+      }
 
       if (mounted) {
         setState(() {

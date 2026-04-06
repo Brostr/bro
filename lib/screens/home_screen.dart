@@ -477,7 +477,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         color: const Color(0xFFFF6B6B),
         child: Consumer2<BreezProvider, OrderProvider>(
           builder: (context, breezProvider, orderProvider, child) {
-            if (breezProvider.isLoading || orderProvider.isLoading) {
+            // v495: Only show full-screen spinner during SDK initialization.
+            // orderProvider.isLoading is set by many operations (create, accept, fetch)
+            // and should NOT blank the home screen during background syncs.
+            if (breezProvider.isLoading) {
               return const Center(
                 child: CircularProgressIndicator(
                   color: Color(0xFFFF6B6B),
