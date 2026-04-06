@@ -251,41 +251,42 @@ void main() async {
       broLog('[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
     }
 
-      // Re-register when Firebase rotates the FCM token
-      FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
-        broLog('[FCM] Token refreshed, re-registering...');
+    // Re-register when Firebase rotates the FCM token
+    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+      broLog('[FCM] Token refreshed, re-registering...');
+      if (userPubkey != null) {
         BrixService().initCredentials().then((_) {
           BrixService().registerPushToken(newToken, userPubkey!).then((ok) {
             broLog('[FCM] BRIX push token re-registered after refresh: $ok');
           });
         });
-        ApiService().registerPushToken(newToken);
-        // Reset relay service FCM state so it also re-registers
-        BrixRelayService().resetFcmRegistration();
-      });
+      }
+      ApiService().registerPushToken(newToken);
+      // Reset relay service FCM state so it also re-registers
+      BrixRelayService().resetFcmRegistration();
+    });
 
-      // Listen for foreground FCM messages (BRIX wake-up + order updates)
-      FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-        broLog('[FCM] Foreground message: ${message.data}');
-        if (message.data['type'] == 'brix_invoice_request') {
-          BrixRelayService().triggerPoll();
-        } else if (message.data['type'] == 'order_update') {
-          broLog('[FCM] Order update push — triggering sync');
-          // Sync will be triggered when OrderProvider is available
-          OrderRealtimeService().onOrderEvent?.call();
-        }
-      });
+    // Listen for foreground FCM messages (BRIX wake-up + order updates)
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      broLog('[FCM] Foreground message: ${message.data}');
+      if (message.data['type'] == 'brix_invoice_request') {
+        BrixRelayService().triggerPoll();
+      } else if (message.data['type'] == 'order_update') {
+        broLog('[FCM] Order update push — triggering sync');
+        // Sync will be triggered when OrderProvider is available
+        OrderRealtimeService().onOrderEvent?.call();
+      }
+    });
 
-      // When user taps notification to open app, also trigger poll
-      FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-        broLog('[FCM] App opened from notification: ${message.data}');
-        if (message.data['type'] == 'brix_invoice_request') {
-          BrixRelayService().triggerPoll();
-        } else if (message.data['type'] == 'order_update') {
-          OrderRealtimeService().onOrderEvent?.call();
-        }
-      });
-    }
+    // When user taps notification to open app, also trigger poll
+    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
+      broLog('[FCM] App opened from notification: ${message.data}');
+      if (message.data['type'] == 'brix_invoice_request') {
+        BrixRelayService().triggerPoll();
+      } else if (message.data['type'] == 'order_update') {
+        OrderRealtimeService().onOrderEvent?.call();
+      }
+    });
     
     // v262: Iniciar background notifications (polling Nostr a cada 15min)
     await initBackgroundNotifications();
