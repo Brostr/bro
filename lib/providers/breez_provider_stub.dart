@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 class BreezProvider with ChangeNotifier {
   bool get isInitialized => false;
   bool get isLoading => false;
+  bool get isInitializing => false;
   String? get error => 'Lightning Network não disponível nesta plataforma';
   String? get mnemonic => null;
   dynamic get sdk => null;

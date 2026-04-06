@@ -18,6 +18,7 @@ class BreezProvider with ChangeNotifier {
   spark.BreezSdk? _sdk;
   bool _isInitialized = false;
   bool _isLoading = false;
+  bool _isInitializing = false;
   String? _error;
   String? _mnemonic;
   StreamSubscription<spark.SdkEvent>? _eventsSub;
@@ -42,6 +43,7 @@ class BreezProvider with ChangeNotifier {
   spark.BreezSdk? get sdk => _sdk;
   bool get isInitialized => _isInitialized;
   bool get isLoading => _isLoading;
+  bool get isInitializing => _isInitializing;
   String? get error => _error;
   String? get mnemonic => _mnemonic;
   String? get lastPaymentId => _lastPaymentId;
@@ -105,6 +107,7 @@ class BreezProvider with ChangeNotifier {
         if (waitCount >= maxWait) {
           broLog('⏰ TIMEOUT esperando inicialização! Forçando reset...');
           _isLoading = false; // Forçar reset do estado
+          _isInitializing = false;
           return false; // Sair do loop
         }
         return _isLoading && !_isInitialized;
@@ -117,6 +120,7 @@ class BreezProvider with ChangeNotifier {
       broLog('🔄 Continuando com nova inicialização após timeout...');
     }
     
+    _isInitializing = true;
     _setLoading(true);
     _setError(null);
     
@@ -233,11 +237,11 @@ class BreezProvider with ChangeNotifier {
       broLog('? Erro inicializando Breez SDK: $e');
       return false;
     } finally {
+      _isInitializing = false;
       _setLoading(false);
     }
   }
 
-  /// RESETAR SDK para novo usuário Nostr
   /// CRÍTICO: Chamado quando o usuário faz login com outra conta Nostr
   /// Isso DESCONECTA o SDK e PERMITE nova inicialização com a seed do novo usuário
   Future<void> resetForNewUser() async {
@@ -615,7 +619,6 @@ class BreezProvider with ChangeNotifier {
       return {'success': false, 'error': 'SDK não disponível'};
     }
 
-    _setLoading(true);
     _setError(null);
     
     broLog('⚡ Criando invoice de $amountSats sats...');
@@ -661,7 +664,6 @@ class BreezProvider with ChangeNotifier {
           // Continua mesmo sem payment hash - não é crítico
         }
 
-        _setLoading(false);
         return {
           'success': true,
           'bolt11': bolt11,  // Chave esperada pelo wallet_screen
@@ -686,13 +688,11 @@ class BreezProvider with ChangeNotifier {
           final errMsg = 'Erro ao criar invoice após $maxRetries tentativas: $e';
           _setError(errMsg);
           broLog('❌ $errMsg');
-          _setLoading(false);
           return {'success': false, 'error': errMsg};
         }
       }
     }
     
-    _setLoading(false);
     return {'success': false, 'error': 'Erro desconhecido ao criar invoice'};
   }
 
@@ -1055,7 +1055,6 @@ class BreezProvider with ChangeNotifier {
       return {'success': false, 'error': 'SDK não inicializado'};
     }
 
-    _setLoading(true);
     _setError(null);
     
     broLog('💸 Pagando invoice...');
@@ -1206,8 +1205,6 @@ class BreezProvider with ChangeNotifier {
       broLog('❌ Erro ao pagar: $errMsg');
       broLog('   Erro original: ${e.toString()}');
       return {'success': false, 'error': errMsg, 'originalError': e.toString()};
-    } finally {
-      _setLoading(false);
     }
   }
 
