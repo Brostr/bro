@@ -337,7 +337,11 @@ class BreezProvider with ChangeNotifier {
       String? paymentHash;
       if (payment.details is spark.PaymentDetails_Lightning) {
         paymentHash = (payment.details as spark.PaymentDetails_Lightning).paymentHash;
-        broLog('🔑 PaymentHash: $paymentHash');
+        broLog('🔑 PaymentHash (Lightning): $paymentHash');
+      } else if (payment.details is spark.PaymentDetails_Spark) {
+        final sparkDetails = payment.details as spark.PaymentDetails_Spark;
+        paymentHash = sparkDetails.htlcDetails?.paymentHash;
+        broLog('🔑 PaymentHash (Spark): $paymentHash, desc=${sparkDetails.invoiceDetails?.description ?? "null"}');
       }
       
       // Salvar último pagamento
@@ -1109,7 +1113,10 @@ class BreezProvider with ChangeNotifier {
       String? paymentHash;
       if (resp.payment.details is spark.PaymentDetails_Lightning) {
         paymentHash = (resp.payment.details as spark.PaymentDetails_Lightning).paymentHash;
+      } else if (resp.payment.details is spark.PaymentDetails_Spark) {
+        paymentHash = (resp.payment.details as spark.PaymentDetails_Spark).htlcDetails?.paymentHash;
       }
+      broLog('🔑 Payment details type: ${resp.payment.details?.runtimeType}, method: ${resp.payment.method}, hash: $paymentHash');
 
       // NOTIFICAR callback de pagamento enviado (para reconciliação automática)
       if (onPaymentSent != null) {
@@ -1209,19 +1216,31 @@ class BreezProvider with ChangeNotifier {
     try {
       broLog('📋 Buscando histórico de pagamentos...');
       final resp = await _sdk!.listPayments(
-        request: spark.ListPaymentsRequest(),
+        request: spark.ListPaymentsRequest(limit: 1000),
       );
 
       broLog('📋 Total de pagamentos no SDK: ${resp.payments.length}');
       
+      int sparkCount = 0;
+      int lightningCount = 0;
+      int otherCount = 0;
       for (final p in resp.payments) {
-        broLog('   💳 Payment: ${p.id.substring(0, 16)}... amount=${p.amount} status=${p.status}');
-        // Log dos detalhes para descobrir campos disponíveis
+        final detailType = p.details?.runtimeType.toString() ?? 'null';
+        broLog('   💳 Payment: ${p.id.substring(0, 16)}... amount=${p.amount} status=${p.status} method=${p.method} details=$detailType');
         if (p.details is spark.PaymentDetails_Lightning) {
+          lightningCount++;
           final details = p.details as spark.PaymentDetails_Lightning;
-          broLog('      ⚡ Lightning: hash=${details.paymentHash?.substring(0, 16) ?? "null"}... description=${details.description ?? "null"}');
+          broLog('      ⚡ Lightning: hash=${details.paymentHash.substring(0, 16)}... description=${details.description ?? "null"}');
+        } else if (p.details is spark.PaymentDetails_Spark) {
+          sparkCount++;
+          final details = p.details as spark.PaymentDetails_Spark;
+          broLog('      🔶 Spark: desc=${details.invoiceDetails?.description ?? "null"} hasHtlc=${details.htlcDetails != null} invoice=${details.invoiceDetails?.invoice.substring(0, 30) ?? "null"}...');
+        } else {
+          otherCount++;
+          broLog('      ❓ Other type: $detailType');
         }
       }
+      broLog('📊 Payment types: Lightning=$lightningCount, Spark=$sparkCount, Other=$otherCount');
 
       return resp.payments.map((payment) {
         String? paymentHash;
@@ -1240,11 +1259,15 @@ class BreezProvider with ChangeNotifier {
           broLog('⚠️ Erro ao converter timestamp: $e');
         }
         
-        // Extrair detalhes específicos do tipo Lightning
+        // Extrair detalhes específicos por tipo
         if (payment.details is spark.PaymentDetails_Lightning) {
           final details = payment.details as spark.PaymentDetails_Lightning;
           paymentHash = details.paymentHash;
           description = details.description;
+        } else if (payment.details is spark.PaymentDetails_Spark) {
+          final details = payment.details as spark.PaymentDetails_Spark;
+          description = details.invoiceDetails?.description;
+          paymentHash = details.htlcDetails?.paymentHash;
         }
         
         // Determinar direção (recebido ou enviado)

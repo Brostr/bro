@@ -106,11 +106,13 @@ class _WalletScreenState extends State<WalletScreen> {
         }
       } catch (_) {}
 
-      // v495: Log raw SDK payments before filtering to diagnose missing BRIX
+      // v497: Log ALL SDK payments to diagnose missing BRIX
       broLog('📋 Raw SDK payments count: ${payments.length}');
-      for (int i = 0; i < payments.length && i < 10; i++) {
+      for (int i = 0; i < payments.length; i++) {
         final rp = payments[i];
-        broLog('   🔍 SDK#${i+1}: type=${rp['type']} dir=${rp['direction']} amount=${rp['amountSats']} desc="${rp['description']}" payType=${rp['paymentType']}');
+        final h = rp['paymentHash']?.toString() ?? 'null';
+        final hShort = h.length > 16 ? h.substring(0, 16) : h;
+        broLog('   🔍 SDK#${i+1}: type=${rp['type']} dir=${rp['direction']} amount=${rp['amountSats']} desc="${rp['description']}" payType=${rp['paymentType']} hash=$hShort ts=${rp['timestamp'] ?? rp['createdAt']}');
       }
 
       // Usar apenas pagamentos Lightning reais, FILTRANDO taxas internas da plataforma
