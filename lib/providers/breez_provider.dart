@@ -353,6 +353,18 @@ class BreezProvider with ChangeNotifier {
       // CRÍTICO: Persistir pagamento IMEDIATAMENTE para não perder
       _persistPayment(payment.id, payment.amount.toInt(), paymentHash: paymentHash);
       
+      // Also persist BRIX payments locally for wallet fallback
+      String? desc;
+      if (payment.details is spark.PaymentDetails_Lightning) {
+        desc = (payment.details as spark.PaymentDetails_Lightning).description;
+      } else if (payment.details is spark.PaymentDetails_Spark) {
+        desc = (payment.details as spark.PaymentDetails_Spark).invoiceDetails?.description;
+      }
+      if (desc != null && (desc.contains('BRIX') || desc == 'BRIX Payment')) {
+        // Import not needed - use fully qualified static call
+        _persistBrixPaymentLocally(payment.amount.toInt(), desc, paymentHash);
+      }
+      
       // CRÍTICO: Chamar o callback se estiver registrado!
       // Isso permite que a tela de ordem atualize o status para "payment_received"
       if (onPaymentReceived != null) {
@@ -439,6 +451,30 @@ class BreezProvider with ChangeNotifier {
       
     } catch (e) {
       broLog('❌ Erro ao processar depósitos: $e');
+    }
+  }
+
+  /// Persist BRIX payment via BrixRelayService static method
+  Future<void> _persistBrixPaymentLocally(int amountSats, String description, String? paymentHash) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('brix_received_payments') ?? '[]';
+      final List<dynamic> list = json.decode(raw);
+      if (paymentHash != null && list.any((p) => p['paymentHash'] == paymentHash)) return;
+      list.add({
+        'amountSats': amountSats,
+        'description': description,
+        'paymentHash': paymentHash,
+        'createdAt': DateTime.now().toIso8601String(),
+        'type': 'received',
+        'direction': 'incoming',
+        'status': 'Complete',
+        'isBrix': true,
+      });
+      await prefs.setString('brix_received_payments', json.encode(list));
+      broLog('💾 [BRIX] SDK event persisted: $amountSats sats');
+    } catch (e) {
+      broLog('❌ [BRIX] Failed to persist from SDK event: $e');
     }
   }
   

@@ -37,6 +37,7 @@ class _WalletScreenState extends State<WalletScreen> {
   String? _error;
   double _btcPrice = 0;
   bool _showAllTransactions = false;
+  int _sdkPaymentsCount = 0;  // v499: diagnostic
 
   /// Total sats queued for outgoing BRIX payments (not yet deducted from wallet).
   /// Excludes expired payments (they were never sent).
@@ -212,6 +213,37 @@ class _WalletScreenState extends State<WalletScreen> {
         broLog('⚠️ Erro ao adicionar wallet payments: $e');
       }
       
+      // v499: Merge locally persisted BRIX payments (SDK may not return old ones)
+      try {
+        final localBrix = await BrixRelayService.getLocalBrixPayments();
+        if (localBrix.isNotEmpty) {
+          final existingHashes = allPayments
+              .map((p) => p['paymentHash']?.toString() ?? '')
+              .where((h) => h.isNotEmpty)
+              .toSet();
+          int added = 0;
+          for (final bp in localBrix) {
+            final bpHash = bp['paymentHash']?.toString() ?? '';
+            if (bpHash.isNotEmpty && existingHashes.contains(bpHash)) continue;
+            // Also dedup by amount+timestamp (for entries without hash)
+            final bpAmount = bp['amountSats'] ?? 0;
+            final bpTs = bp['createdAt']?.toString() ?? '';
+            final isDup = allPayments.any((p) =>
+                (p['amountSats'] ?? p['amount']) == bpAmount &&
+                (p['createdAt']?.toString() ?? p['timestamp']?.toString() ?? '') == bpTs &&
+                (p['description']?.toString() ?? '').contains('BRIX'));
+            if (isDup) continue;
+            allPayments.add(bp);
+            added++;
+          }
+          if (added > 0) {
+            broLog('📦 [BRIX] Merged $added local payments (SDK missing)');
+          }
+        }
+      } catch (e) {
+        broLog('⚠️ [BRIX] Error loading local: $e');
+      }
+
       // Ordenar por data (mais recente primeiro)
       allPayments.sort((a, b) {
         final dateA = a['createdAt'] ?? a['timestamp'];
@@ -237,6 +269,7 @@ class _WalletScreenState extends State<WalletScreen> {
         setState(() {
           _balance = balance;
           _payments = allPayments;
+          _sdkPaymentsCount = payments.length;
         });
       }
 
@@ -2563,6 +2596,11 @@ class _WalletScreenState extends State<WalletScreen> {
             fontSize: 18,
             fontWeight: FontWeight.bold,
           ),
+        ),
+        // v499: Diagnostics - SDK payment count vs displayed
+        Text(
+          'SDK: $_sdkPaymentsCount | Exibidos: ${_payments.length}',
+          style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
         ),
         const SizedBox(height: 12),
         if (_payments.isEmpty && _pendingOutgoing.isEmpty)

@@ -213,6 +213,15 @@ class BrixRelayService {
             broLog(
                 '⚡ [BRIX-RELAY] Invoice ${ok ? "submitted" : "failed"} for ${request.amountSats} sats');
 
+            // Persist locally so it appears in wallet even if SDK forgets
+            if (ok) {
+              persistBrixPayment(
+                amountSats: request.amountSats,
+                description: description,
+                paymentHash: invoiceResult['paymentHash'] as String?,
+              );
+            }
+
             // Schedule platform fee after payment settles
             if (ok) {
               final feeSats = (request.amountSats * AppConfig.brixFeePercent).round();
@@ -251,6 +260,13 @@ class BrixRelayService {
                 payment.id, bolt11, _pubkey!);
             broLog(
                 '💰 [BRIX-RELAY] Claim ${claimed ? "success" : "failed"} for ${payment.amountSats} sats');
+            if (claimed) {
+              persistBrixPayment(
+                amountSats: payment.amountSats,
+                description: offlineDesc,
+                paymentHash: invoiceResult['paymentHash'] as String?,
+              );
+            }
             if (!claimed) _claimedPayments.remove(payment.id);
           } else {
             _claimedPayments.remove(payment.id);
@@ -287,6 +303,50 @@ class BrixRelayService {
   final Set<String> _paidFees = {};
   // Track claims in progress to prevent duplicates
   final Set<String> _claimedPayments = {};
+
+  /// Persist a received BRIX payment locally so it appears in wallet history
+  /// even if the Spark SDK doesn't return it in listPayments().
+  static Future<void> persistBrixPayment({
+    required int amountSats,
+    required String description,
+    String? paymentHash,
+    DateTime? timestamp,
+  }) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('brix_received_payments') ?? '[]';
+      final List<dynamic> list = json.decode(raw);
+      // Dedup by paymentHash
+      if (paymentHash != null && list.any((p) => p['paymentHash'] == paymentHash)) return;
+      list.add({
+        'amountSats': amountSats,
+        'description': description,
+        'paymentHash': paymentHash,
+        'createdAt': (timestamp ?? DateTime.now()).toIso8601String(),
+        'type': 'received',
+        'direction': 'incoming',
+        'status': 'Complete',
+        'isBrix': true,
+      });
+      await prefs.setString('brix_received_payments', json.encode(list));
+      broLog('💾 [BRIX] Persisted local: $amountSats sats, hash=${paymentHash?.substring(0, 8) ?? "N/A"}');
+    } catch (e) {
+      broLog('❌ [BRIX] Failed to persist: $e');
+    }
+  }
+
+  /// Load locally persisted BRIX payments for wallet screen fallback.
+  static Future<List<Map<String, dynamic>>> getLocalBrixPayments() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('brix_received_payments') ?? '[]';
+      final List<dynamic> list = json.decode(raw);
+      return list.map((p) => Map<String, dynamic>.from(p)).toList();
+    } catch (e) {
+      broLog('❌ [BRIX] Failed to load local: $e');
+      return [];
+    }
+  }
 
   /// Send the 0.5% BRIX fee to the platform Lightning address
   Future<void> _sendBrixFee(String requestId, int feeSats) async {
