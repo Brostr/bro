@@ -143,21 +143,6 @@ class _WalletScreenState extends State<WalletScreen> {
           return false;
         }
         
-        // OCULTAR: Pagamentos enviados muito pequenos (≤ 10 sats) são provavelmente taxas internas
-        // Transações de 1-10 sats que são envio provavelmente são taxas de plataforma (~2%)
-        if (!isReceived && amount > 0 && amount <= 10) {
-          broLog('🔇 Ocultando pagamento pequeno (provável taxa): $amount sats');
-          return false;
-        }
-        
-        // OCULTAR: Pagamentos enviados sem descrição E pequenos (≤ 100 sats)
-        // São provavelmente taxas internas. Pagamentos BRIX via LNURL podem não ter
-        // descrição mas são valores reais do usuário — não filtrar.
-        if (!isReceived && (description.isEmpty || description == 'null') && amount <= 100) {
-          broLog('🔇 Ocultando pagamento pequeno sem descrição (provável taxa interna): $amount sats');
-          return false;
-        }
-        
         // OCULTAR: Auto-pagamentos Lightning de ordens pagas com saldo da carteira
         // Evita duplicata entre synthetic wallet entry e outgoing auto-pay SDK tx
         if (!isReceived && walletPaidOrderPrefixes.isNotEmpty) {
