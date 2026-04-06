@@ -340,8 +340,9 @@ class BreezProvider with ChangeNotifier {
         broLog('🔑 PaymentHash (Lightning): $paymentHash');
       } else if (payment.details is spark.PaymentDetails_Spark) {
         final sparkDetails = payment.details as spark.PaymentDetails_Spark;
-        paymentHash = sparkDetails.htlcDetails?.paymentHash;
-        broLog('🔑 PaymentHash (Spark): $paymentHash, desc=${sparkDetails.invoiceDetails?.description ?? "null"}');
+        // Use payment.id as hash identifier for Spark payments
+        paymentHash = payment.id;
+        broLog('🔑 PaymentHash (Spark): id=${payment.id.substring(0, 16)}..., desc=${sparkDetails.invoiceDetails?.description ?? "null"}');
       }
       
       // Salvar último pagamento
@@ -1114,7 +1115,7 @@ class BreezProvider with ChangeNotifier {
       if (resp.payment.details is spark.PaymentDetails_Lightning) {
         paymentHash = (resp.payment.details as spark.PaymentDetails_Lightning).paymentHash;
       } else if (resp.payment.details is spark.PaymentDetails_Spark) {
-        paymentHash = (resp.payment.details as spark.PaymentDetails_Spark).htlcDetails?.paymentHash;
+        paymentHash = resp.payment.id;
       }
       broLog('🔑 Payment details type: ${resp.payment.details?.runtimeType}, method: ${resp.payment.method}, hash: $paymentHash');
 
@@ -1234,7 +1235,9 @@ class BreezProvider with ChangeNotifier {
         } else if (p.details is spark.PaymentDetails_Spark) {
           sparkCount++;
           final details = p.details as spark.PaymentDetails_Spark;
-          broLog('      🔶 Spark: desc=${details.invoiceDetails?.description ?? "null"} hasHtlc=${details.htlcDetails != null} invoice=${details.invoiceDetails?.invoice.substring(0, 30) ?? "null"}...');
+          final inv = details.invoiceDetails?.invoice ?? '';
+          final invShort = inv.length > 30 ? inv.substring(0, 30) : inv;
+          broLog('      🔶 Spark: desc=${details.invoiceDetails?.description ?? "null"} invoice=$invShort...');
         } else {
           otherCount++;
           broLog('      ❓ Other type: $detailType');
@@ -1267,7 +1270,8 @@ class BreezProvider with ChangeNotifier {
         } else if (payment.details is spark.PaymentDetails_Spark) {
           final details = payment.details as spark.PaymentDetails_Spark;
           description = details.invoiceDetails?.description;
-          paymentHash = details.htlcDetails?.paymentHash;
+          // Spark payments don't have htlcDetails on all SDK versions
+          paymentHash = payment.id;
         }
         
         // Determinar direção (recebido ou enviado)
