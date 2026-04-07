@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:bro_app/services/brix_service.dart';
+import 'package:bro_app/services/api_service.dart';
 import 'package:bro_app/services/storage_service.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/lnaddress_service.dart';
@@ -30,6 +31,7 @@ class BrixRelayService {
   String? _brixUsername;
   BuildContext? _context;
   bool _fcmRegistered = false;
+  bool _backendFcmRegistered = false;
 
   /// Callback for when a queued outgoing payment is completed.
   void Function(String recipient, int amountSats)? onQueuedPaymentCompleted;
@@ -39,7 +41,7 @@ class BrixRelayService {
   /// Ensure FCM token is registered with BRIX server (idempotent).
   /// Retries automatically on failure until successful.
   Future<void> _ensureFcmRegistered() async {
-    if (_fcmRegistered) return;
+    if (_fcmRegistered && _backendFcmRegistered) return;
     try {
       _pubkey ??= await _storage.getNostrPublicKey();
       if (_pubkey == null || _pubkey!.isEmpty) return;
@@ -48,21 +50,40 @@ class BrixRelayService {
         broLog('[BRIX-RELAY] FCM token is null — cannot register');
         return;
       }
-      // Ensure NIP-98 credentials are loaded before signing the request
-      await _brixService.initCredentials();
-      final ok = await _brixService.registerPushToken(token, _pubkey!);
-      if (ok) {
-        _fcmRegistered = true;
-        _fcmRetryCount = 0;
-        broLog('[BRIX-RELAY] FCM token registered successfully');
-        // Auto-claim any web-created BRIX accounts with same email
-        final linked = await _brixService.claimWebAccounts(_pubkey!);
-        if (linked.isNotEmpty) {
-          broLog('[BRIX-RELAY] Auto-linked web accounts: ${linked.join(", ")}');
+
+      // Register with BRIX server
+      if (!_fcmRegistered) {
+        // Ensure NIP-98 credentials are loaded before signing the request
+        await _brixService.initCredentials();
+        final ok = await _brixService.registerPushToken(token, _pubkey!);
+        if (ok) {
+          _fcmRegistered = true;
+          _fcmRetryCount = 0;
+          broLog('[BRIX-RELAY] FCM token registered successfully (BRIX)');
+          // Auto-claim any web-created BRIX accounts with same email
+          final linked = await _brixService.claimWebAccounts(_pubkey!);
+          if (linked.isNotEmpty) {
+            broLog('[BRIX-RELAY] Auto-linked web accounts: ${linked.join(", ")}');
+          }
+        } else {
+          _fcmRetryCount++;
+          broLog('[BRIX-RELAY] BRIX FCM registration failed (attempt $_fcmRetryCount)');
         }
-      } else {
-        _fcmRetryCount++;
-        broLog('[BRIX-RELAY] FCM registration failed (attempt $_fcmRetryCount) — server returned false');
+      }
+
+      // Register with main backend for order_update push notifications
+      if (!_backendFcmRegistered) {
+        try {
+          final ok = await ApiService().registerPushToken(token);
+          if (ok) {
+            _backendFcmRegistered = true;
+            broLog('[BRIX-RELAY] FCM token registered successfully (backend)');
+          } else {
+            broLog('[BRIX-RELAY] Backend FCM registration returned false');
+          }
+        } catch (e) {
+          broLog('[BRIX-RELAY] Backend FCM registration error: $e');
+        }
       }
     } catch (e) {
       _fcmRetryCount++;
@@ -79,6 +100,7 @@ class BrixRelayService {
     }
     _running = true;
     _fcmRegistered = false; // Reset on start so we always try to register
+    _backendFcmRegistered = false;
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
     _poll(); // immediate first check
@@ -92,6 +114,7 @@ class BrixRelayService {
     _pollTimer?.cancel();
     _running = true;
     _fcmRegistered = false; // Force re-registration after resume (token may have rotated)
+    _backendFcmRegistered = false;
     _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
     _poll();
     _ensureFcmRegistered();
@@ -119,6 +142,7 @@ class BrixRelayService {
   /// Called when Firebase rotates the FCM token.
   void resetFcmRegistration() {
     _fcmRegistered = false;
+    _backendFcmRegistered = false;
     _fcmRetryCount = 0;
   }
 
@@ -146,7 +170,7 @@ class BrixRelayService {
     }
 
     // Retry FCM registration every ~30s (20 polls) until successful
-    if (!_fcmRegistered && _pollCount % 20 == 1) {
+    if ((!_fcmRegistered || !_backendFcmRegistered) && _pollCount % 20 == 1) {
       _ensureFcmRegistered();
     }
 
