@@ -17,6 +17,7 @@
 
 const WebSocket = require('ws');
 const pushService = require('./pushService');
+const { verifyEvent } = require('nostr-tools/pure');
 
 const RELAYS = [
   'wss://relay.damus.io',
@@ -49,7 +50,11 @@ class NostrWatchtowerService {
     this._seenEvents = new Set(); // dedup by event id
     this._reconnectTimers = new Map();
     this._running = false;
-    this._stats = { eventsProcessed: 0, pushesSent: 0, pushesFailed: 0 };
+    this._stats = { eventsProcessed: 0, pushesSent: 0, pushesFailed: 0, sigFailed: 0 };
+    // SECURITY: Rate limit pushes per target pubkey (max 10 per 5 min)
+    this._pushRateMap = new Map(); // pubkey → [timestamps]
+    this._PUSH_RATE_WINDOW = 5 * 60 * 1000; // 5 minutes
+    this._PUSH_RATE_MAX = 10; // max pushes per window per target
   }
 
   start() {
@@ -164,6 +169,18 @@ class NostrWatchtowerService {
       this._seenEvents = new Set(arr.slice(-5000));
     }
 
+    // SECURITY: Verify Nostr event signature before trusting ANY data
+    // Without this, an attacker could inject fake events to spam push notifications
+    try {
+      if (!verifyEvent(event)) {
+        this._stats.sigFailed++;
+        return; // Invalid signature — silently discard
+      }
+    } catch (_) {
+      this._stats.sigFailed++;
+      return; // Malformed event
+    }
+
     // Skip events older than 5 minutes (catch-up from subscription, already delivered)
     const eventAge = Math.floor(Date.now() / 1000) - (event.created_at || 0);
     if (eventAge > 300) return;
@@ -179,6 +196,13 @@ class NostrWatchtowerService {
     const orderId = content.orderId;
     if (!orderId) return;
 
+    // SECURITY: Validate orderId format (UUID) to prevent injection
+    if (typeof orderId !== 'string' || orderId.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(orderId)) return;
+
+    // SECURITY: Validate pubkey fields are proper 64-char hex
+    const isValidPubkey = (pk) => typeof pk === 'string' && /^[0-9a-f]{64}$/.test(pk);
+    if (!isValidPubkey(event.pubkey)) return;
+
     this._stats.eventsProcessed++;
 
     const shortId = orderId.substring(0, 8);
@@ -187,16 +211,16 @@ class NostrWatchtowerService {
     try {
       switch (eventType) {
         case 'bro_order': {
-          // New order created — notify all registered users EXCEPT the creator
+          // New order created — notify relevant users
           console.log(`🗼 [Watchtower] New order ${shortId} from ${senderPubkey.substring(0, 8)}`);
-          await this._notifyNewOrder(senderPubkey, orderId, content);
+          await this._notifyNewOrder(senderPubkey, orderId, content, event);
           break;
         }
 
         case 'bro_accept': {
           // Provider accepted — notify the order creator
           const userPubkey = content.userPubkey;
-          if (userPubkey && userPubkey !== senderPubkey) {
+          if (isValidPubkey(userPubkey) && userPubkey !== senderPubkey) {
             console.log(`🗼 [Watchtower] Order ${shortId} accepted → notify ${userPubkey.substring(0, 8)}`);
             await this._sendOrderPush(userPubkey, senderPubkey, 'accepted', orderId);
           }
@@ -213,13 +237,13 @@ class NostrWatchtowerService {
 
           // Determine who to notify (the party that DIDN'T publish this event)
           let targetPubkey = null;
-          if (senderPubkey === providerId && userPubkey) {
+          if (senderPubkey === providerId && isValidPubkey(userPubkey)) {
             targetPubkey = userPubkey; // Provider published → notify user
-          } else if (senderPubkey === userPubkey && providerId) {
+          } else if (senderPubkey === userPubkey && isValidPubkey(providerId)) {
             targetPubkey = providerId; // User published → notify provider
-          } else if (userPubkey && userPubkey !== senderPubkey) {
+          } else if (isValidPubkey(userPubkey) && userPubkey !== senderPubkey) {
             targetPubkey = userPubkey;
-          } else if (providerId && providerId !== senderPubkey) {
+          } else if (isValidPubkey(providerId) && providerId !== senderPubkey) {
             targetPubkey = providerId;
           }
 
@@ -232,10 +256,10 @@ class NostrWatchtowerService {
 
         case 'bro_complete': {
           // Provider completed — notify the order creator
-          const userPubkey = content.userPubkey;
-          if (userPubkey && userPubkey !== senderPubkey) {
-            console.log(`🗼 [Watchtower] Order ${shortId} completed → notify ${userPubkey.substring(0, 8)}`);
-            await this._sendOrderPush(userPubkey, senderPubkey, 'completed', orderId);
+          const userPubkeyC = content.userPubkey;
+          if (isValidPubkey(userPubkeyC) && userPubkeyC !== senderPubkey) {
+            console.log(`🗼 [Watchtower] Order ${shortId} completed → notify ${userPubkeyC.substring(0, 8)}`);
+            await this._sendOrderPush(userPubkeyC, senderPubkey, 'completed', orderId);
           }
           break;
         }
@@ -275,9 +299,12 @@ class NostrWatchtowerService {
   }
 
   /**
-   * Notify all registered users about a new order (except the creator)
+   * Notify registered users about a new order.
+   * SECURITY: Only notify users who have registered push tokens (not ALL relay users).
+   * Uses #p tags from the event to identify targeted providers if available,
+   * otherwise broadcasts to all registered users (limited by rate limiter).
    */
-  async _notifyNewOrder(creatorPubkey, orderId, content) {
+  async _notifyNewOrder(creatorPubkey, orderId, content, event) {
     const amount = content.amount || '?';
     const billType = content.billType || 'conta';
     const notif = {
@@ -289,11 +316,23 @@ class NostrWatchtowerService {
     const tokenCount = pushService.getTokenCount();
     if (tokenCount === 0) return;
 
-    // We need to iterate the token store — add a helper or use internal access
-    const allPubkeys = pushService.getAllPubkeys ? pushService.getAllPubkeys() : [];
+    // Check if event has #p tags (targeted providers)
+    const pTags = (event.tags || [])
+      .filter(t => t[0] === 'p' && t[1] && /^[0-9a-f]{64}$/.test(t[1]))
+      .map(t => t[1]);
+
+    let targetPubkeys;
+    if (pTags.length > 0) {
+      // Targeted: only notify specific providers mentioned in #p tags
+      targetPubkeys = pTags.filter(pk => pk !== creatorPubkey);
+    } else {
+      // Broadcast: notify all registered users (rate limiter prevents abuse)
+      targetPubkeys = (pushService.getAllPubkeys ? pushService.getAllPubkeys() : [])
+        .filter(pk => pk !== creatorPubkey);
+    }
+
     let sent = 0;
-    for (const pubkey of allPubkeys) {
-      if (pubkey === creatorPubkey) continue; // Don't notify the creator
+    for (const pubkey of targetPubkeys) {
       const ok = await this._sendPush(pubkey, {
         type: 'order_update',
         sender_pubkey: creatorPubkey,
@@ -309,9 +348,29 @@ class NostrWatchtowerService {
   }
 
   /**
-   * Wrapper around pushService.sendPush with stats tracking
+   * Wrapper around pushService.sendPush with stats tracking and rate limiting
    */
   async _sendPush(targetPubkey, data, notification) {
+    // SECURITY: Per-pubkey rate limiting to prevent push notification spam
+    const now = Date.now();
+    const history = this._pushRateMap.get(targetPubkey) || [];
+    const recent = history.filter(t => now - t < this._PUSH_RATE_WINDOW);
+    if (recent.length >= this._PUSH_RATE_MAX) {
+      // Rate limited — too many pushes to this pubkey
+      return false;
+    }
+    recent.push(now);
+    this._pushRateMap.set(targetPubkey, recent);
+
+    // Periodic cleanup of rate map (every 1000 pushes)
+    if (this._stats.pushesSent % 1000 === 0 && this._pushRateMap.size > 100) {
+      for (const [pk, times] of this._pushRateMap) {
+        const valid = times.filter(t => now - t < this._PUSH_RATE_WINDOW);
+        if (valid.length === 0) this._pushRateMap.delete(pk);
+        else this._pushRateMap.set(pk, valid);
+      }
+    }
+
     try {
       const ok = await pushService.sendPush(targetPubkey, data, notification);
       if (ok) {
