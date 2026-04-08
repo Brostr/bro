@@ -26,6 +26,7 @@ const registerLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
   message: { error: 'Too many registration requests.' },
 });
 

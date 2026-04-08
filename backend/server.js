@@ -19,6 +19,7 @@ const pushRoutes = require('./routes/push');
 const { checkExpiredOrders } = require('./services/orderExpirationService');
 const disputeAgent = require('./services/disputeAgentService');
 const pushService = require('./services/pushService');
+const watchtower = require('./services/nostrWatchtowerService');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -74,7 +75,9 @@ const createLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   // SECURITY v492: Rate limit by pubkey (not just IP) to prevent abuse from same identity
+  // v508: Use validate: false to avoid ERR_ERL_KEY_GEN_IPV6 crash on Fly.io
   keyGenerator: (req) => req.verifiedPubkey || req.ip,
+  validate: false,
   message: { error: 'Limite de criação atingido. Tente novamente em 1 minuto.' },
 });
 
@@ -102,7 +105,8 @@ app.get('/health', generalLimiter, (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    watchtower: watchtower.getStatus(),
   });
 });
 
@@ -167,6 +171,9 @@ app.listen(PORT, () => {
   
   // Inicializar serviço de push notifications
   pushService.init();
+  
+  // v508: Start Nostr Watchtower — monitors ALL order events and sends push automatically
+  watchtower.start();
+  console.log('🗼 Watchtower ativo (push automático via Nostr relay monitoring)');
   console.log('');
-
 });

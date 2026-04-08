@@ -253,6 +253,13 @@ function getTokenCount() {
 }
 
 /**
+ * Get all registered pubkeys (for watchtower broadcast)
+ */
+function getAllPubkeys() {
+  return Array.from(tokenStore.keys());
+}
+
+/**
  * Clean up stale tokens older than 90 days
  */
 function cleanupStaleTokens() {
@@ -274,4 +281,4 @@ function cleanupStaleTokens() {
 // Daily cleanup of stale tokens
 setInterval(cleanupStaleTokens, 24 * 60 * 60 * 1000);
 
-module.exports = { init, registerToken, sendPush, isEnabled, getTokenCount };
+module.exports = { init, registerToken, sendPush, isEnabled, getTokenCount, getAllPubkeys };
