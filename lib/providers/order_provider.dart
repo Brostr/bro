@@ -3225,6 +3225,12 @@ class OrderProvider with ChangeNotifier {
     _isSyncingUser = true;
     _syncUserStartedAt = DateTime.now(); // v259: track start time
     
+    // v507: When force=true (push notification or pull-to-refresh),
+    // invalidate the relay status cache so we get fresh data
+    if (force) {
+      _nostrOrderService.invalidateStatusCache();
+    }
+    
     try {
       // PERFORMANCE v1.0.129+218: Se TODAS as ordens locais s�o terminais,
       // pular fetchUserOrders (que abre 9+ WebSocket connections).

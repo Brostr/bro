@@ -1933,6 +1933,14 @@ class NostrOrderService {
     await _fetchAllOrderStatusUpdates();
   }
 
+  /// v507: Invalidate status updates cache so next fetch gets fresh data from relays.
+  /// Called when push notification arrives and triggers force sync.
+  void invalidateStatusCache() {
+    _statusUpdatesCache = null;
+    _statusUpdatesCacheTime = null;
+    broLog('📋 invalidateStatusCache: cache cleared for fresh relay fetch');
+  }
+
   /// Busca ordens de um usuário específico e retorna como List<Order>
   /// INCLUI merge com eventos de UPDATE para obter status correto
   Future<List<Order>> fetchUserOrders(String pubkey) async {
@@ -1987,8 +1995,10 @@ class NostrOrderService {
     final updates = <String, Map<String, dynamic>>{}; // orderId -> latest update
     
     
-    // v390: Sequential relay fallback — try first relay, use second only if first fails
+    // v507: Query ALL relays sequentially, deduplicating across relays
+    // v500 fix was supposed to remove the early-exit break but it remained
     final allEvents = <Map<String, dynamic>>[];
+    final seenIds = <String>{}; // v507: moved outside loop for cross-relay dedup
     final fourteenDaysAgo = DateTime.now().subtract(const Duration(days: 14));
     final statusSince = (fourteenDaysAgo.millisecondsSinceEpoch / 1000).floor();
     
@@ -2011,8 +2021,7 @@ class NostrOrderService {
           ).timeout(const Duration(seconds: 8), onTimeout: () => <Map<String, dynamic>>[]),
         ]);
         
-        // Combinar and deduplicar
-        final seenIds = <String>{};
+        // Combinar and deduplicar across ALL relays
         for (final eventList in results) {
           for (final e in eventList) {
             final id = e['id'];
@@ -2022,9 +2031,7 @@ class NostrOrderService {
             }
           }
         }
-        
-        // v390: If this relay returned data, skip remaining relays
-        if (allEvents.isNotEmpty) break;
+        // v507: NO break — query all relays to avoid missing events
       } catch (e) {
         // Relay failed, try next
       }
@@ -2641,8 +2648,9 @@ class NostrOrderService {
     // Converter para Set para filtragem O(1) no processamento
     final activeOrderIdSet = orderIds?.toSet();
 
-    // v390: Sequential relay fallback — try first relay, use next only if fails
+    // v507: seenIds moved outside loop for cross-relay deduplication
     final allEvents = <Map<String, dynamic>>[];
+    final seenIds = <String>{};
     
     for (final relay in _relays.take(3)) {
       try {
@@ -2663,7 +2671,7 @@ class NostrOrderService {
           );
         }
         final results = await Future.wait(strategies);
-        final seenIds = <String>{};
+        // v507: seenIds now shared across all relays (declared outside loop)
         for (final eventList in results) {
           for (final e in eventList) {
             final id = e['id'];
