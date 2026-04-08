@@ -537,6 +537,21 @@ Future<void> _refreshFcmToken() async {
       broLog('[BRO-BG-FCM] Token FCM re-registrado com sucesso (BRIX)');
     } else {
       broLog('[BRO-BG-FCM] Falha ao registrar token BRIX: ${response.statusCode}');
+      // Retry once after 3s
+      await Future.delayed(const Duration(seconds: 3));
+      try {
+        final retryResp = await http.post(
+          Uri.parse(url),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': authHeader,
+          },
+          body: jsonEncode({'fcm_token': fcmToken}),
+        ).timeout(const Duration(seconds: 10));
+        broLog('[BRO-BG-FCM] BRIX retry: ${retryResp.statusCode == 200 ? "OK" : "FAIL ${retryResp.statusCode}"}');
+      } catch (e2) {
+        broLog('[BRO-BG-FCM] BRIX retry error: $e2');
+      }
     }
 
     // v500: Also register with main backend for order_update push notifications
@@ -576,6 +591,21 @@ Future<void> _refreshFcmToken() async {
         broLog('[BRO-BG-FCM] Token FCM re-registrado com sucesso (backend)');
       } else {
         broLog('[BRO-BG-FCM] Falha ao registrar token backend: ${backendResp.statusCode}');
+        // Retry once after 3s
+        await Future.delayed(const Duration(seconds: 3));
+        try {
+          final retryResp = await http.post(
+            Uri.parse(backendUrl),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': backendAuth,
+            },
+            body: jsonEncode({'fcm_token': fcmToken}),
+          ).timeout(const Duration(seconds: 10));
+          broLog('[BRO-BG-FCM] Backend retry: ${retryResp.statusCode == 200 ? "OK" : "FAIL ${retryResp.statusCode}"}');
+        } catch (e2) {
+          broLog('[BRO-BG-FCM] Backend retry error: $e2');
+        }
       }
     } catch (e) {
       broLog('[BRO-BG-FCM] Erro ao registrar token backend: $e');

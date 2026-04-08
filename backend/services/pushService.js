@@ -62,7 +62,7 @@ function _saveTokens() {
       for (const [pubkey, entry] of tokenStore) {
         data[pubkey] = entry;
       }
-      fs.writeFileSync(TOKEN_FILE, JSON.stringify(data), 'utf8');
+      fs.writeFileSync(TOKEN_FILE, JSON.stringify(data), { encoding: 'utf8', mode: 0o600 });
     } catch (e) {
       console.error(`[PUSH] Could not save tokens to disk: ${e.message}`);
     }

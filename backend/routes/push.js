@@ -19,12 +19,13 @@ const notifyLimiter = rateLimit({
   message: { error: 'Too many push requests. Try again in 1 minute.' },
 });
 
-// Rate limiting: 5 token registrations per minute per IP
+// Rate limiting: 5 token registrations per minute per pubkey
 const registerLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => req.verifiedPubkey || req.ip,
   message: { error: 'Too many registration requests.' },
 });
 

@@ -8,10 +8,20 @@
 
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const disputeAgent = require('../services/disputeAgentService');
 
 // Admin pubkey from env
 const ADMIN_PUBKEY = process.env.ADMIN_PUBKEY || '';
+
+// Rate limiting: 5 analysis requests per minute (LLM API cost protection)
+const analyzeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many analysis requests. Try again in 1 minute.' },
+});
 
 // SECURITY v445: Validate ADMIN_PUBKEY format at startup
 if (ADMIN_PUBKEY && !/^[0-9a-f]{64}$/.test(ADMIN_PUBKEY)) {
@@ -133,7 +143,7 @@ router.post('/reject', requireAdmin, (req, res) => {
 /**
  * POST /agent/analyze — Manually trigger analysis for an order
  */
-router.post('/analyze', requireAdmin, (req, res) => {
+router.post('/analyze', analyzeLimiter, requireAdmin, (req, res) => {
   try {
     const { dispute } = req.body;
     if (!dispute || !dispute.orderId) {

@@ -29,8 +29,13 @@
 - Always use `#t` tag `bro-order` for orders
 - See `.github/skills/nostr/SKILL.md` for full Nostr protocol reference
 
-## Other Rules
+## FCM Push Notifications
+- See `.github/skills/fcm-push/SKILL.md` for full push notification reference
 - FCM order_update uses notification+data for guaranteed background delivery
 - FCM brix_invoice_request MUST be data-only (needs silent background processing)
+- iOS APNS requires explicit `apns-push-type: background|alert` header
+- Token registration MUST retry indefinitely (not just at startup)
+
+## Other Rules
 - NEVER change marketing version (1.0.133) without asking. Only increment build number.
 - env.json is in .gitignore — NEVER track it

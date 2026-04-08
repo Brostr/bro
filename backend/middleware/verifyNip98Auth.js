@@ -40,8 +40,7 @@ function requireAuth(req, res, next) {
   if (!result.valid) {
     console.warn(`🔒 Auth rejeitada: ${req.method} ${req.url} — ${result.reason}`);
     return res.status(401).json({ 
-      error: 'Autenticação Nostr inválida',
-      reason: result.reason 
+      error: 'Authorization failed',
     });
   }
   

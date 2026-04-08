@@ -245,18 +245,25 @@ void main() async {
     }
 
     // Re-register when Firebase rotates the FCM token
-    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) async {
       broLog('[FCM] Token refreshed, re-registering...');
-      if (userPubkey != null) {
-        BrixService().initCredentials().then((_) {
-          BrixService().registerPushToken(newToken, userPubkey!).then((ok) {
-            broLog('[FCM] BRIX push token re-registered after refresh: $ok');
-          });
-        });
-      }
-      ApiService().registerPushToken(newToken);
-      // Reset relay service FCM state so it also re-registers
+      // Reset relay service flags FIRST so next poll re-registers too
       BrixRelayService().resetFcmRegistration();
+      if (userPubkey != null) {
+        try {
+          await BrixService().initCredentials();
+          final brixOk = await BrixService().registerPushToken(newToken, userPubkey!);
+          broLog('[FCM] BRIX push token re-registered after refresh: $brixOk');
+        } catch (e) {
+          broLog('[FCM] BRIX re-registration failed: $e');
+        }
+        try {
+          final backendOk = await ApiService().registerPushToken(newToken);
+          broLog('[FCM] Backend push token re-registered after refresh: $backendOk');
+        } catch (e) {
+          broLog('[FCM] Backend re-registration failed: $e');
+        }
+      }
     });
 
     // Listen for foreground FCM messages (BRIX wake-up + order updates)
