@@ -2309,6 +2309,7 @@ class NostrOrderService {
     final proofImageNip44 = update['proofImage_nip44'] as String?;
     final encryption = update['encryption'] as String?;
     final completedAt = update['completedAt'] as String?;
+    final eventCreatedAt = update['created_at'] as int?; // Nostr event timestamp (Unix seconds)
     final providerInvoice = update['providerInvoice'] as String?; // CRÍTICO: Invoice do provedor
     
     // NIP-44: Descriptografar proofImage se criptografado
@@ -2392,6 +2393,12 @@ class NostrOrderService {
       if (completedAt != null) {
         updatedMetadata['proofReceivedAt'] = completedAt;
         updatedMetadata['receipt_submitted_at'] = completedAt; // Compatibilidade com auto-liquidação
+      } else if (eventCreatedAt != null && eventCreatedAt > 0) {
+        // v504: Fallback to Nostr event's created_at when completedAt is missing
+        // This is the actual time the proof event was published, NOT discovery time
+        final eventTime = DateTime.fromMillisecondsSinceEpoch(eventCreatedAt * 1000).toIso8601String();
+        updatedMetadata['proofReceivedAt'] ??= eventTime;
+        updatedMetadata['receipt_submitted_at'] ??= eventTime;
       }
       // CRÍTICO: Incluir providerInvoice para pagamento automático
       if (providerInvoice != null && providerInvoice.isNotEmpty) {

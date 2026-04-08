@@ -184,6 +184,7 @@ async function sendPush(targetPubkey, data, notification = null) {
       apns: {
         headers: {
           'apns-priority': '10',
+          'apns-push-type': 'background',
         },
         payload: {
           aps: {
@@ -196,6 +197,7 @@ async function sendPush(targetPubkey, data, notification = null) {
     // Add notification field for guaranteed background delivery (order_update)
     // BRIX invoice requests stay data-only for silent background processing
     if (notification && notification.title) {
+      // Use ONLY apns.payload.aps for iOS (avoid conflict with message.notification)
       message.notification = {
         title: notification.title,
         body: notification.body || '',
@@ -205,6 +207,8 @@ async function sendPush(targetPubkey, data, notification = null) {
         priority: 'high',
         defaultSound: true,
       };
+      // iOS: explicit alert payload with push-type: alert
+      message.apns.headers['apns-push-type'] = 'alert';
       message.apns.payload.aps = {
         alert: {
           title: notification.title,
