@@ -125,6 +125,7 @@ class NostrWatchtowerService {
       ws.on('close', () => {
         console.log(`⚠️  [Watchtower] Disconnected from ${relayUrl}`);
         this._connections.delete(relayUrl);
+        this._eoseReceived.delete(relayUrl); // Clear EOSE so reconnect skips historical events
         this._scheduleReconnect(relayUrl);
       });
 
@@ -199,9 +200,9 @@ class NostrWatchtowerService {
 
     // CRITICAL FIX v509: Only process events that arrive AFTER EOSE (real-time)
     // Before EOSE, relays send historical events — these are old orders that should NOT trigger pushes
-    // This prevents the "monte de notificação de ordens antigas" bug on server restart
-    const anyRelayReady = this._eoseReceived.size > 0;
-    if (!anyRelayReady) return; // Still in catch-up phase on all relays
+    // v509b: Per-relay EOSE check — on reconnect, a relay resends historical events before EOSE.
+    // Must check THIS relay's EOSE status, not just any relay.
+    if (!this._eoseReceived.has(relayUrl)) return; // This relay still in catch-up phase
 
     let content;
     try {
