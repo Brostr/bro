@@ -49,6 +49,7 @@ class NostrWatchtowerService {
     this._subscriptions = new Map(); // relay → subId
     this._seenEvents = new Set(); // dedup by event id
     this._reconnectTimers = new Map();
+    this._eoseReceived = new Set(); // relays that finished historical catch-up
     this._running = false;
     this._stats = { eventsProcessed: 0, pushesSent: 0, pushesFailed: 0, sigFailed: 0 };
     // SECURITY: Rate limit pushes per target pubkey (max 10 per 5 min)
@@ -78,6 +79,7 @@ class NostrWatchtowerService {
     this._connections.clear();
     this._subscriptions.clear();
     this._reconnectTimers.clear();
+    this._eoseReceived.clear();
     console.log('🛑 [Watchtower] Stopped');
   }
 
@@ -94,9 +96,9 @@ class NostrWatchtowerService {
         const subId = `bro-wt-${Date.now().toString(36)}`;
         this._subscriptions.set(relayUrl, subId);
 
-        // Subscribe to ALL bro-order tagged events from the last 2 hours
-        // After initial catch-up, we get real-time events via the subscription
-        const since = Math.floor(Date.now() / 1000) - 2 * 3600;
+        // Subscribe to ALL bro-order tagged events from the last 10 minutes
+        // Short window to minimize stale events; real-time events arrive after EOSE
+        const since = Math.floor(Date.now() / 1000) - 600;
 
         const req = JSON.stringify(['REQ', subId,
           {
@@ -150,7 +152,17 @@ class NostrWatchtowerService {
 
   _handleMessage(relayUrl, msg) {
     if (!Array.isArray(msg)) return;
-    const [type, , event] = msg;
+    const [type, subId, event] = msg;
+    
+    if (type === 'EOSE') {
+      // End of stored events — from now on, events are real-time
+      if (!this._eoseReceived.has(relayUrl)) {
+        this._eoseReceived.add(relayUrl);
+        console.log(`\u2705 [Watchtower] EOSE from ${relayUrl} \u2014 now processing real-time events only`);
+      }
+      return;
+    }
+    
     if (type === 'EVENT' && event) {
       this._handleEvent(relayUrl, event);
     }
@@ -184,6 +196,12 @@ class NostrWatchtowerService {
     // Skip events older than 5 minutes (catch-up from subscription, already delivered)
     const eventAge = Math.floor(Date.now() / 1000) - (event.created_at || 0);
     if (eventAge > 300) return;
+
+    // CRITICAL FIX v509: Only process events that arrive AFTER EOSE (real-time)
+    // Before EOSE, relays send historical events — these are old orders that should NOT trigger pushes
+    // This prevents the "monte de notificação de ordens antigas" bug on server restart
+    const anyRelayReady = this._eoseReceived.size > 0;
+    if (!anyRelayReady) return; // Still in catch-up phase on all relays
 
     let content;
     try {
