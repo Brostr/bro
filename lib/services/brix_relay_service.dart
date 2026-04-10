@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/widgets.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -45,6 +46,17 @@ class BrixRelayService {
     try {
       _pubkey ??= await _storage.getNostrPublicKey();
       if (_pubkey == null || _pubkey!.isEmpty) return;
+      // iOS: APNS token must be ready before FCM can provide a token
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        final apns = await FirebaseMessaging.instance.getAPNSToken();
+        if (apns == null) {
+          if (_fcmRetryCount % 5 == 0) {
+            broLog('[BRIX-RELAY] iOS: APNS token not ready — cannot get FCM token (retry $_fcmRetryCount)');
+          }
+          _fcmRetryCount++;
+          return;
+        }
+      }
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null) {
         broLog('[BRIX-RELAY] FCM token is null — cannot register');
