@@ -51,7 +51,7 @@ class BrixRelayService {
         final apns = await FirebaseMessaging.instance.getAPNSToken();
         if (apns == null) {
           if (_fcmRetryCount % 5 == 0) {
-            broLog('[BRIX-RELAY] iOS: APNS token not ready — cannot get FCM token (retry $_fcmRetryCount)');
+            broLog('[BRIX-RELAY] iOS: APNS not ready, cannot get FCM token (retry $_fcmRetryCount)');
           }
           _fcmRetryCount++;
           return;

@@ -48,6 +48,7 @@ class NostrWatchtowerService {
     this._connections = new Map(); // relay → ws
     this._subscriptions = new Map(); // relay → subId
     this._seenEvents = new Set(); // dedup by event id
+    this._seenPushes = new Set(); // dedup by orderId+status+target — prevents duplicate pushes across relays
     this._reconnectTimers = new Map();
     this._eoseReceived = new Set(); // relays that finished historical catch-up
     this._running = false;
@@ -293,9 +294,22 @@ class NostrWatchtowerService {
   }
 
   /**
-   * Send push notification for an order status change
+   * Send push notification for an order status change.
+   * Deduplicates by orderId+status+target to prevent the same notification
+   * arriving from multiple relays (replaceable events have different event IDs).
    */
   async _sendOrderPush(targetPubkey, senderPubkey, status, orderId) {
+    // Dedup: same order + status + target = same push, skip duplicate
+    const pushKey = `${orderId}:${status}:${targetPubkey}`;
+    if (this._seenPushes.has(pushKey)) return false;
+    this._seenPushes.add(pushKey);
+
+    // Memory management — keep last 2K push keys
+    if (this._seenPushes.size > 4000) {
+      const arr = Array.from(this._seenPushes);
+      this._seenPushes = new Set(arr.slice(-2000));
+    }
+
     const notif = NOTIFICATION_MAP[status];
     if (!notif) {
       // Unknown status, send generic
@@ -324,6 +338,11 @@ class NostrWatchtowerService {
    * otherwise broadcasts to all registered users (limited by rate limiter).
    */
   async _notifyNewOrder(creatorPubkey, orderId, content, event) {
+    // Dedup: skip if we already notified about this order
+    const pushKey = `${orderId}:new_order:broadcast`;
+    if (this._seenPushes.has(pushKey)) return;
+    this._seenPushes.add(pushKey);
+
     const amount = content.amount || '?';
     const billType = content.billType || 'conta';
     const notif = {

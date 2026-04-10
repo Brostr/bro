@@ -196,8 +196,24 @@ void main() async {
     );
     // Get FCM token (avoid deleteToken on iOS — it invalidates APNs mapping
     // and can cause a gap where pushes are lost)
+    // iOS: APNS token must be available before FCM can map it to an FCM token.
+    // Without this wait, getToken() returns null on iOS cold start.
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      String? apnsToken = await messaging.getAPNSToken();
+      if (apnsToken == null) {
+        broLog('[FCM] iOS: APNS token not ready, waiting 3s...');
+        await Future.delayed(const Duration(seconds: 3));
+        apnsToken = await messaging.getAPNSToken();
+      }
+      if (apnsToken == null) {
+        broLog('[FCM] iOS: APNS still null, waiting 5s more...');
+        await Future.delayed(const Duration(seconds: 5));
+        apnsToken = await messaging.getAPNSToken();
+      }
+      broLog('[FCM] iOS APNS: ${apnsToken != null ? "ready" : "STILL NULL — push may fail"}');
+    }
     fcmToken = await messaging.getToken();
-    broLog('[FCM] Push token: $fcmToken');
+    broLog('[FCM] Push token: ${fcmToken != null ? "present (${fcmToken!.length} chars)" : "NULL"}');
   } catch (e) {
     broLog('[FCM] Firebase init failed (push disabled): $e');
   }
