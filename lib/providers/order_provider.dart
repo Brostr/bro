@@ -1,4 +1,5 @@
 ﻿import 'dart:async';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import 'package:bro_app/services/log_utils.dart';
@@ -2451,11 +2452,6 @@ class OrderProvider with ChangeNotifier {
     }
     
     try {
-      // iOS: APNS must be ready before FCM can provide a token
-      if (defaultTargetPlatform == TargetPlatform.iOS) {
-        final apns = await FirebaseMessaging.instance.getAPNSToken();
-        if (apns == null) return; // APNS not ready yet, retry next sync
-      }
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null || token.isEmpty) return;
       
