@@ -253,8 +253,7 @@ class NostrWatchtowerService {
           // v512: Fallback to cached userPubkey (provider's accept event may omit userPubkey from content)
           const userPubkeyA = content.userPubkey || this._orderUsers.get(orderId);
           if (isValidPubkey(userPubkeyA) && userPubkeyA !== senderPubkey) {
-            console.log(`🗼 [Watchtower] Order ${shortId} accepted → notify ${userPubkeyA.substring(0, 8)}`);
-            await this._sendOrderPush(userPubkeyA, senderPubkey, 'accepted', orderId);
+            await this._sendOrderPush(userPubkeyA, senderPubkey, 'accepted', orderId, shortId);
           } else {
             console.log(`⚠️ [Watchtower] Order ${shortId} accepted but no userPubkey found (content: ${content.userPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
@@ -306,8 +305,7 @@ class NostrWatchtowerService {
           }
 
           if (targetPubkey) {
-            console.log(`🗼 [Watchtower] Order ${shortId} → ${status} → notify ${targetPubkey.substring(0, 8)} (route=${routing})`);
-            await this._sendOrderPush(targetPubkey, senderPubkey, status, orderId);
+            await this._sendOrderPush(targetPubkey, senderPubkey, status, orderId, shortId, routing);
           }
           break;
         }
@@ -317,8 +315,7 @@ class NostrWatchtowerService {
           // v512: Fallback chain: content.userPubkey → content.recipientPubkey → cached orderUsers
           const userPubkeyC = content.userPubkey || content.recipientPubkey || this._orderUsers.get(orderId);
           if (isValidPubkey(userPubkeyC) && userPubkeyC !== senderPubkey) {
-            console.log(`🗼 [Watchtower] Order ${shortId} completed → notify ${userPubkeyC.substring(0, 8)}`);
-            await this._sendOrderPush(userPubkeyC, senderPubkey, 'completed', orderId);
+            await this._sendOrderPush(userPubkeyC, senderPubkey, 'completed', orderId, shortId);
           } else {
             console.log(`⚠️ [Watchtower] Order ${shortId} completed but no userPubkey found (content: ${content.userPubkey || 'empty'}, recipient: ${content.recipientPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
@@ -339,13 +336,17 @@ class NostrWatchtowerService {
    * v512: Deduplicates by orderId+status (without target) — ONE push per status per order.
    * Both parties publish the same status for sync; only the first event triggers a push.
    */
-  async _sendOrderPush(targetPubkey, senderPubkey, status, orderId) {
+  async _sendOrderPush(targetPubkey, senderPubkey, status, orderId, shortId, routing) {
     // v512: Dedup by orderId+status ONLY (no targetPubkey).
     // Both parties publish the same status for sync — only ONE push per status per order.
     // First event to arrive wins; echoes from the other party are suppressed.
     const pushKey = `${orderId}:${status}`;
     if (this._seenPushes.has(pushKey)) return false;
     this._seenPushes.add(pushKey);
+
+    // v514: Log AFTER dedup check so logs reflect actual pushes sent
+    const sid = shortId || orderId.substring(0, 8);
+    console.log(`🗼 [Watchtower] Order ${sid} → ${status} → PUSH to ${targetPubkey.substring(0, 8)}${routing ? ` (route=${routing})` : ''}`);
 
     // Memory management — keep last 2K push keys
     if (this._seenPushes.size > 4000) {
