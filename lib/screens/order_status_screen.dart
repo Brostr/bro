@@ -4176,7 +4176,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
           ],
         ),
         backgroundColor: const Color(0xFFFF6B6B),
-        duration: Duration(seconds: 10),
+        duration: Duration(seconds: 120), // v512: Match payment timeout
       ),
     );
 
@@ -4423,14 +4423,14 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
               if (breezProvider.isInitialized) {
                 broLog('⚡ Tentativa $attempt/3: Pagando via Breez Spark...');
                 payResult = await breezProvider.payInvoice(providerInvoice).timeout(
-                  const Duration(seconds: 30),
+                  const Duration(seconds: 120), // v512: Must exceed internal timeouts (30s prepare + 60s send)
                   onTimeout: () => {'success': false, 'error': 'timeout'},
                 );
                 usedBackend = 'Spark';
               } else if (liquidProvider.isInitialized) {
                 broLog('⚡ Tentativa $attempt/3: Pagando via Liquid...');
                 payResult = await liquidProvider.payInvoice(providerInvoice).timeout(
-                  const Duration(seconds: 30),
+                  const Duration(seconds: 120), // v512: Must exceed internal timeouts
                   onTimeout: () => {'success': false, 'error': 'timeout'},
                 );
                 usedBackend = 'Liquid';
