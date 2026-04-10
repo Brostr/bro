@@ -1326,6 +1326,7 @@ class NostrOrderService {
         'orderId': order.id,
         'orderEventId': order.eventId,
         'providerId': keychain.public,
+        'userPubkey': order.userPubkey ?? '', // v512: Include for watchtower routing
         'acceptedAt': DateTime.now().toIso8601String(),
       });
 
@@ -1447,6 +1448,7 @@ class NostrOrderService {
         'orderId': order.id,
         'orderEventId': order.eventId,
         'providerId': keychain.public,
+        'userPubkey': order.userPubkey ?? '', // v512: Include for watchtower routing
         'recipientPubkey': order.userPubkey, // Para quem é destinado
         'completedAt': DateTime.now().toIso8601String(),
       };

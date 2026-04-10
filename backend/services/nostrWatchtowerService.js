@@ -48,9 +48,10 @@ class NostrWatchtowerService {
     this._connections = new Map(); // relay → ws
     this._subscriptions = new Map(); // relay → subId
     this._seenEvents = new Set(); // dedup by event id
-    this._seenPushes = new Set(); // dedup by orderId+status+target — prevents duplicate pushes across relays
+    this._seenPushes = new Set(); // dedup by orderId+status — ONE push per status per order
     this._reconnectTimers = new Map();
     this._eoseReceived = new Set(); // relays that finished historical catch-up
+    this._orderUsers = new Map(); // orderId → userPubkey cache (from bro_order events)
     this._running = false;
     this._stats = { eventsProcessed: 0, pushesSent: 0, pushesFailed: 0, sigFailed: 0 };
     // SECURITY: Rate limit pushes per target pubkey (max 10 per 5 min)
@@ -231,6 +232,16 @@ class NostrWatchtowerService {
     try {
       switch (eventType) {
         case 'bro_order': {
+          // Cache userPubkey for this order (for later accept/complete events that may omit it)
+          const orderUserPubkey = content.userPubkey || senderPubkey;
+          if (isValidPubkey(orderUserPubkey)) {
+            this._orderUsers.set(orderId, orderUserPubkey);
+            // Memory management — keep last 2K orders
+            if (this._orderUsers.size > 4000) {
+              const entries = Array.from(this._orderUsers.entries());
+              this._orderUsers = new Map(entries.slice(-2000));
+            }
+          }
           // New order created — notify relevant users
           console.log(`🗼 [Watchtower] New order ${shortId} from ${senderPubkey.substring(0, 8)}`);
           await this._notifyNewOrder(senderPubkey, orderId, content, event);
@@ -239,36 +250,63 @@ class NostrWatchtowerService {
 
         case 'bro_accept': {
           // Provider accepted — notify the order creator
-          const userPubkey = content.userPubkey;
-          if (isValidPubkey(userPubkey) && userPubkey !== senderPubkey) {
-            console.log(`🗼 [Watchtower] Order ${shortId} accepted → notify ${userPubkey.substring(0, 8)}`);
-            await this._sendOrderPush(userPubkey, senderPubkey, 'accepted', orderId);
+          // v512: Fallback to cached userPubkey (provider's accept event may omit userPubkey from content)
+          const userPubkeyA = content.userPubkey || this._orderUsers.get(orderId);
+          if (isValidPubkey(userPubkeyA) && userPubkeyA !== senderPubkey) {
+            console.log(`🗼 [Watchtower] Order ${shortId} accepted → notify ${userPubkeyA.substring(0, 8)}`);
+            await this._sendOrderPush(userPubkeyA, senderPubkey, 'accepted', orderId);
+          } else {
+            console.log(`⚠️ [Watchtower] Order ${shortId} accepted but no userPubkey found (content: ${content.userPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
           break;
         }
 
         case 'bro_order_update': {
-          // Status update — notify the OTHER party
+          // v512: Status-based routing — route by what the status MEANS, not who published.
+          // Both parties publish the same status for sync. Old "notify the other" logic
+          // caused BOTH to get notified (echo problem). Now we route by semantics:
+          //   - Statuses the USER cares about → always notify user
+          //   - Statuses the PROVIDER cares about → always notify provider
+          //   - Cancel/dispute → notify the party that didn't initiate
           const status = content.status;
-          const userPubkey = content.userPubkey;
+          const userPubkey = content.userPubkey || this._orderUsers.get(orderId);
           const providerId = content.providerId;
 
           if (!status) break;
 
-          // Determine who to notify (the party that DIDN'T publish this event)
+          // Cache userPubkey if we see it for the first time
+          if (isValidPubkey(userPubkey) && !this._orderUsers.has(orderId)) {
+            this._orderUsers.set(orderId, userPubkey);
+          }
+
+          const STATUS_NOTIFY = {
+            'accepted': 'user',              // provider accepted → tell user
+            'payment_submitted': 'provider', // user submitted payment → tell provider to verify
+            'awaiting_confirmation': 'provider', // payment proof uploaded → provider should verify
+            'completed': 'user',             // provider confirmed → tell user
+            'liquidated': 'user',            // auto-liquidation → tell user
+            'cancelled': 'other',            // tell the party that didn't cancel
+            'disputed': 'other',             // tell the party that didn't dispute
+          };
+
+          const routing = STATUS_NOTIFY[status] || 'other';
           let targetPubkey = null;
-          if (senderPubkey === providerId && isValidPubkey(userPubkey)) {
-            targetPubkey = userPubkey; // Provider published → notify user
-          } else if (senderPubkey === userPubkey && isValidPubkey(providerId)) {
-            targetPubkey = providerId; // User published → notify provider
-          } else if (isValidPubkey(userPubkey) && userPubkey !== senderPubkey) {
+
+          if (routing === 'user' && isValidPubkey(userPubkey)) {
             targetPubkey = userPubkey;
-          } else if (isValidPubkey(providerId) && providerId !== senderPubkey) {
+          } else if (routing === 'provider' && isValidPubkey(providerId)) {
             targetPubkey = providerId;
+          } else if (routing === 'other') {
+            // Notify the party that DIDN'T publish (for cancel/dispute)
+            if (senderPubkey === providerId && isValidPubkey(userPubkey)) {
+              targetPubkey = userPubkey;
+            } else if (senderPubkey === userPubkey && isValidPubkey(providerId)) {
+              targetPubkey = providerId;
+            }
           }
 
           if (targetPubkey) {
-            console.log(`🗼 [Watchtower] Order ${shortId} → ${status} → notify ${targetPubkey.substring(0, 8)}`);
+            console.log(`🗼 [Watchtower] Order ${shortId} → ${status} → notify ${targetPubkey.substring(0, 8)} (route=${routing})`);
             await this._sendOrderPush(targetPubkey, senderPubkey, status, orderId);
           }
           break;
@@ -276,10 +314,13 @@ class NostrWatchtowerService {
 
         case 'bro_complete': {
           // Provider completed — notify the order creator
-          const userPubkeyC = content.userPubkey;
+          // v512: Fallback chain: content.userPubkey → content.recipientPubkey → cached orderUsers
+          const userPubkeyC = content.userPubkey || content.recipientPubkey || this._orderUsers.get(orderId);
           if (isValidPubkey(userPubkeyC) && userPubkeyC !== senderPubkey) {
             console.log(`🗼 [Watchtower] Order ${shortId} completed → notify ${userPubkeyC.substring(0, 8)}`);
             await this._sendOrderPush(userPubkeyC, senderPubkey, 'completed', orderId);
+          } else {
+            console.log(`⚠️ [Watchtower] Order ${shortId} completed but no userPubkey found (content: ${content.userPubkey || 'empty'}, recipient: ${content.recipientPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
           break;
         }
@@ -295,12 +336,14 @@ class NostrWatchtowerService {
 
   /**
    * Send push notification for an order status change.
-   * Deduplicates by orderId+status+target to prevent the same notification
-   * arriving from multiple relays (replaceable events have different event IDs).
+   * v512: Deduplicates by orderId+status (without target) — ONE push per status per order.
+   * Both parties publish the same status for sync; only the first event triggers a push.
    */
   async _sendOrderPush(targetPubkey, senderPubkey, status, orderId) {
-    // Dedup: same order + status + target = same push, skip duplicate
-    const pushKey = `${orderId}:${status}:${targetPubkey}`;
+    // v512: Dedup by orderId+status ONLY (no targetPubkey).
+    // Both parties publish the same status for sync — only ONE push per status per order.
+    // First event to arrive wins; echoes from the other party are suppressed.
+    const pushKey = `${orderId}:${status}`;
     if (this._seenPushes.has(pushKey)) return false;
     this._seenPushes.add(pushKey);
 
