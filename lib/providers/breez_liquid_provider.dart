@@ -415,10 +415,16 @@ class BreezLiquidProvider with ChangeNotifier {
       };
     } catch (e) {
       final errMsg = 'Erro ao pagar invoice via Liquid: $e';
+      final isTimeout = errMsg.contains('TimeoutException') || errMsg.contains('timeout') || errMsg.contains('Timeout');
       _setError(errMsg);
       broLog('❌ $errMsg');
       _setLoading(false);
-      return {'success': false, 'error': errMsg};
+      return {
+        'success': false,
+        'error': errMsg,
+        'errorType': isTimeout ? 'TIMEOUT_PENDING' : null,
+        'mayStillSucceed': isTimeout,
+      };
     }
   }
 

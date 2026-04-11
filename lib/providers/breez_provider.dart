@@ -1157,12 +1157,16 @@ class BreezProvider with ChangeNotifier {
       };
     } catch (e) {
       String errMsg = e.toString();
+      String? errorType;
+      bool mayStillSucceed = false;
       
       // Detectar erros comuns e traduzir
       if (errMsg.contains('insufficient') || errMsg.contains('Insufficient') || 
           errMsg.contains('balance') || errMsg.contains('Balance')) {
         errMsg = 'Saldo insuficiente para este pagamento';
       } else if (errMsg.contains('TimeoutException') || errMsg.contains('timeout') || errMsg.contains('Timeout')) {
+        errorType = 'TIMEOUT_PENDING';
+        mayStillSucceed = true;
         errMsg = 'O pagamento está demorando mais do que o esperado. Verifique se você tem saldo suficiente e se a carteira de destino está online. A transação pode ainda completar em alguns minutos.';
       } else if (errMsg.contains('route') || errMsg.contains('Route') || errMsg.contains('path') || errMsg.contains('Path')) {
         errMsg = 'Não foi possível encontrar rota para pagamento. Isso pode acontecer se o destino está offline ou sem liquidez.';
@@ -1190,7 +1194,13 @@ class BreezProvider with ChangeNotifier {
       _setError(errMsg);
       broLog('❌ Erro ao pagar: $errMsg');
       broLog('   Erro original: ${e.toString()}');
-      return {'success': false, 'error': errMsg, 'originalError': e.toString()};
+      return {
+        'success': false,
+        'error': errMsg,
+        'originalError': e.toString(),
+        'errorType': errorType,
+        'mayStillSucceed': mayStillSucceed,
+      };
     }
   }
 

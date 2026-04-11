@@ -4263,6 +4263,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       // CRÍTICO: Pagamento DEVE ocorrer ANTES de marcar como completed
       // Se o pagamento falhar, a ordem permanece em awaiting_confirmation
       String? providerInvoice;
+      String? providerInvoicePaymentHash;
       if (orderDetails != null) {
         providerInvoice = orderDetails['metadata']?['providerInvoice'] as String?;
         providerInvoice ??= orderDetails['providerInvoice'] as String?;
@@ -4315,6 +4316,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         if (breezForDecode.isInitialized) {
           final decoded = await breezForDecode.decodeInvoice(providerInvoice);
           if (decoded != null && decoded['success'] == true) {
+            providerInvoicePaymentHash = decoded['invoice']?['paymentHash']?.toString();
             final invoiceAmountSats = int.tryParse(
               decoded['invoice']?['amountSats']?.toString() ?? '0'
             ) ?? 0;
@@ -4406,6 +4408,31 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       try {
         final breezProvider = context.read<BreezProvider>();
         final liquidProvider = context.read<BreezLiquidProvider>();
+
+        Future<bool> verifyPendingSparkPayment() async {
+          if (!breezProvider.isInitialized || providerInvoicePaymentHash == null || providerInvoicePaymentHash!.isEmpty) {
+            return false;
+          }
+
+          for (int check = 1; check <= 6; check++) {
+            try {
+              broLog('🔎 Verificando pagamento pendente no Breez ($check/6)...');
+              final status = await breezProvider.checkPaymentStatus(providerInvoicePaymentHash!);
+              if (status['paid'] == true) {
+                broLog('✅ Pagamento confirmado via paymentHash após timeout');
+                return true;
+              }
+            } catch (e) {
+              broLog('⚠️ Erro ao verificar pagamento pendente: $e');
+            }
+
+            if (check < 6) {
+              await Future.delayed(const Duration(seconds: 5));
+            }
+          }
+
+          return false;
+        }
         
         broLog('🔍 DEBUG PAY INVOICE:');
         broLog('   breezProvider.isInitialized: ${breezProvider.isInitialized}');
@@ -4438,6 +4465,8 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                 break;
               } else {
                 paymentError = payResult?['error']?.toString() ?? l.t('order_unknown_failure');
+                final errorType = payResult?['errorType']?.toString();
+                final mayStillSucceed = payResult?['mayStillSucceed'] == true || errorType == 'TIMEOUT_PENDING';
                 // Detectar invoice já pago — tratar como sucesso
                 if (paymentError.toLowerCase().contains('already paid') ||
                     paymentError.toLowerCase().contains('already settled') ||
@@ -4446,6 +4475,10 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                     paymentError.toLowerCase().contains('alreadyexists') ||
                     paymentError.toLowerCase().contains('preimage request already exists')) {
                   broLog('✅ Invoice já foi pago anteriormente — tratando como sucesso');
+                  paymentSuccess = true;
+                  break;
+                }
+                if (mayStillSucceed && await verifyPendingSparkPayment()) {
                   paymentSuccess = true;
                   break;
                 }
@@ -4464,6 +4497,11 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                 paymentSuccess = true;
                 break;
               }
+              if ((paymentError.contains('timeout') || paymentError.contains('Timeout')) &&
+                  await verifyPendingSparkPayment()) {
+                paymentSuccess = true;
+                break;
+              }
               broLog('⚠️ Tentativa $attempt erro: $paymentError');
             }
             
@@ -4479,6 +4517,23 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       }
       
       // Se o pagamento falhou, NÃO marcar como completed
+      if (!paymentSuccess) {
+        if (providerInvoicePaymentHash != null && providerInvoicePaymentHash!.isNotEmpty) {
+          try {
+            final breezProvider = context.read<BreezProvider>();
+            if (breezProvider.isInitialized) {
+              final status = await breezProvider.checkPaymentStatus(providerInvoicePaymentHash!);
+              if (status['paid'] == true) {
+                broLog('✅ Pagamento confirmado na checagem final por paymentHash');
+                paymentSuccess = true;
+              }
+            }
+          } catch (e) {
+            broLog('⚠️ Erro na checagem final de paymentHash: $e');
+          }
+        }
+      }
+
       if (!paymentSuccess) {
         broLog('❌ Pagamento ao provedor FALHOU após 3 tentativas: $paymentError');
         if (mounted) {

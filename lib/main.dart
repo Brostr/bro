@@ -556,15 +556,9 @@ class BroApp extends StatelessWidget {
                 Map<String, dynamic>? payResult;
                 
                 if (breezProvider.isInitialized) {
-                  payResult = await breezProvider.payInvoice(providerInvoice).timeout(
-                    const Duration(seconds: 30),
-                    onTimeout: () => {'success': false, 'error': 'timeout'},
-                  );
+                  payResult = await breezProvider.payInvoice(providerInvoice);
                 } else if (liquidProvider.isInitialized) {
-                  payResult = await liquidProvider.payInvoice(providerInvoice).timeout(
-                    const Duration(seconds: 30),
-                    onTimeout: () => {'success': false, 'error': 'timeout'},
-                  );
+                  payResult = await liquidProvider.payInvoice(providerInvoice);
                 } else {
                   broLog('⚠️ [AutoPay-Main] Nenhuma carteira inicializada');
                   return false;
