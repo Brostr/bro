@@ -2678,7 +2678,15 @@ class OrderProvider with ChangeNotifier {
         if (order.status != 'liquidated' && order.status != 'awaiting_confirmation') return false;
         final providerId = order.providerId ?? order.metadata?['providerId'] ?? order.metadata?['provider_id'] ?? '';
         if (providerId != _currentUserPubkey) return false;
-        if (order.metadata?['invoiceRefreshed'] == true) return false;
+        // v516: Allow re-refresh every 2h instead of one-shot. If the first refreshed
+        // invoice also fails (buyer kept timing out), next sync will publish a new one.
+        final refreshedAtStr = order.metadata?['invoiceRefreshedAt']?.toString();
+        if (refreshedAtStr != null) {
+          try {
+            final refreshedAt = DateTime.parse(refreshedAtStr);
+            if (DateTime.now().difference(refreshedAt).inHours < 2) return false;
+          } catch (_) {}
+        }
         if (order.metadata?['providerPaymentReceived'] == true) return false;
         if (order.metadata?['autoPaymentCompleted'] == true) return false;
         // For awaiting_confirmation, only refresh if completed >2h ago (invoice likely expired)

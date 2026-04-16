@@ -4443,6 +4443,31 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         } else {
           // Retry: tentar até 3 vezes com intervalo de 2s
           for (int attempt = 1; attempt <= 3; attempt++) {
+            // v516: Before retry 2 and 3, refetch the latest invoice from Nostr.
+            // If the provider published a newer invoice_refresh (e.g. because the first
+            // one is stuck/expired on his SDK), use it for the next attempt.
+            if (attempt > 1) {
+              try {
+                final nostrService = NostrOrderService();
+                final latest = await nostrService.fetchOrderCompleteEvent(widget.orderId)
+                    .timeout(const Duration(seconds: 8), onTimeout: () => null);
+                final freshInvoice = latest?['providerInvoice'] as String?;
+                if (freshInvoice != null && freshInvoice.isNotEmpty && freshInvoice != providerInvoice) {
+                  broLog('🔄 Invoice atualizada recebida do Nostr — usando nova para tentativa $attempt');
+                  providerInvoice = freshInvoice;
+                  // Redecode to update paymentHash so verifyPendingSparkPayment checa o hash certo
+                  try {
+                    final decoded = await breezProvider.decodeInvoice(freshInvoice);
+                    final newHash = decoded?['invoice']?['paymentHash']?.toString();
+                    if (newHash != null && newHash.isNotEmpty) {
+                      providerInvoicePaymentHash = newHash;
+                    }
+                  } catch (_) {}
+                }
+              } catch (e) {
+                broLog('⚠️ Falha ao refetch invoice antes da tentativa $attempt: $e');
+              }
+            }
             try {
               Map<String, dynamic>? payResult;
               String usedBackend = 'none';
