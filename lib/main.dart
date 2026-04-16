@@ -578,8 +578,25 @@ class BroApp extends StatelessWidget {
                   return true;
                 }
                 
+                // v515: Detect AlreadyExists → invoice was already paid, treat as success
+                final payError = payResult?['error']?.toString().toLowerCase() ?? '';
+                if (payError.contains('alreadyexists') ||
+                    payError.contains('already paid') ||
+                    payError.contains('already settled') ||
+                    payError.contains('preimage request already exists')) {
+                  broLog('✅ [AutoPay-Main] Invoice já pago (AlreadyExists) — marcando como sucesso');
+                  return true;
+                }
+                
                 broLog('⚠️ [AutoPay-Main] Tentativa $attempt falhou: ${payResult?['error']}');
               } catch (e) {
+                final errStr = e.toString().toLowerCase();
+                if (errStr.contains('alreadyexists') ||
+                    errStr.contains('already paid') ||
+                    errStr.contains('preimage request already exists')) {
+                  broLog('✅ [AutoPay-Main] Invoice já pago (AlreadyExists exception) — marcando como sucesso');
+                  return true;
+                }
                 broLog('⚠️ [AutoPay-Main] Tentativa $attempt erro: $e');
               }
               

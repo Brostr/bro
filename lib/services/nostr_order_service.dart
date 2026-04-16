@@ -512,17 +512,15 @@ class NostrOrderService {
           try {
             final content = event['parsedContent'] ?? jsonDecode(event['content']);
             final eventType = content['type'] as String?;
-            if (eventType == 'bro_dispute_resolution' || eventType == 'bro_admin_reimbursement') continue;
-            // v516: Skip bro_order_update events where the signer is NOT the real provider.
-            // This prevents dispute resolutions (admin publishes order_update) from making the
-            // admin's app think it provider'd the order. If providerId in content doesn't match
-            // the pubkey we're querying for, it's not actually one of our provider orders.
-            if (eventType == 'bro_order_update') {
-              final contentProviderId = content['providerId'] as String?;
-              if (contentProviderId != null && contentProviderId.isNotEmpty && contentProviderId != providerPubkey) {
-                continue;
-              }
-            }
+            // v519: WHITELIST — only events that prove THIS pubkey is the real provider of the
+            // order should contribute. This blocks ghost orders from dispute resolutions,
+            // admin reimbursements, mediator messages, evidence, etc., which are authored by
+            // admin but don't mean admin is the provider.
+            const providerEventTypes = {'bro_accept', 'bro_complete'};
+            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+                (eventType == 'bro_order_update' &&
+                    (content['providerId'] as String?) == providerPubkey);
+            if (!isProviderEvidence) continue;
             final orderId = content['orderId'] as String?;
             if (orderId != null) orderIdsFromAccepts.add(orderId);
           } catch (_) {}
@@ -1124,6 +1122,8 @@ class NostrOrderService {
   Future<Map<String, dynamic>?> fetchOrderCompleteEvent(String orderId) async {
     
     // PERFORMANCE: Buscar em todos os relays EM PARALELO
+    // v519: cada relay retorna (data, timestamp) para que possamos pegar o mais recente
+    // entre TODOS os relays, não apenas o primeiro que responder.
     final results = await Future.wait(
       _relays.take(3).map((relay) async {
         try {
@@ -1157,6 +1157,7 @@ class NostrOrderService {
                     'providerId': content['providerId'] as String?,
                     'providerInvoice': invoice,
                     'completedAt': content['completedAt'],
+                    '_ts': ts,
                   };
                 }
               }
@@ -1169,14 +1170,20 @@ class NostrOrderService {
       }),
     );
     
-    // Usar o resultado com invoice mais recente
+    // v519: Escolher entre todos os relays o evento com maior timestamp.
+    // O bug antigo (pick-first-non-null) fazia Carol pegar uma invoice antiga
+    // de um relay enquanto o invoice_refresh mais novo estava em outro relay.
     Map<String, dynamic>? best;
+    int bestTs = 0;
     for (final result in results) {
-      if (result != null) {
+      if (result == null) continue;
+      final ts = result['_ts'] as int? ?? 0;
+      if (ts >= bestTs) {
+        bestTs = ts;
         best = result;
-        break;
       }
     }
+    best?.remove('_ts');
     
     return best;
   }

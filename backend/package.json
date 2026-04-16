@@ -21,12 +21,13 @@
     "cors": "2.8.6",
     "express": "4.22.1",
     "express-rate-limit": "8.3.1",
+    "firebase-admin": "^13.0.0",
     "helmet": "8.1.0",
+    "light-bolt11-decoder": "^3.2.0",
     "node-cron": "3.0.3",
     "nostr-tools": "2.23.3",
     "uuid": "9.0.1",
-    "ws": "8.20.0",
-    "firebase-admin": "^13.0.0"
+    "ws": "8.20.0"
   },
   "devDependencies": {
     "nodemon": "3.1.14"

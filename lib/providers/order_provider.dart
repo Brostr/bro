@@ -467,33 +467,11 @@ class OrderProvider with ChangeNotifier {
       await _saveOrders(); // Salvar lista limpa
     }
 
-    // v516: CLEANUP — Remove ghost provider orders from dispute-resolution bug.
-    // When the admin resolved a dispute, updateOrderStatus (kind 30080 bro_order_update
-    // authored by admin) made fetchProviderOrders wrongly attribute those orders to the
-    // admin as provider. A REAL provider always has providerInvoice in metadata (required
-    // by the flow). If providerId==me but no providerInvoice AND no proof AND someone
-    // else is the customer → it's a ghost from the dispute attribution bug.
-    final ghostCount = _orders.length;
-    _orders = _orders.where((order) {
-      final isMeAsProvider = order.providerId == userPubkey;
-      final someoneElseIsCustomer = order.userPubkey != null && order.userPubkey!.isNotEmpty && order.userPubkey != userPubkey;
-      final hasProviderInvoice = (order.metadata?['providerInvoice'] as String?)?.isNotEmpty == true;
-      final hasProof = (order.metadata?['proofImage'] as String?)?.isNotEmpty == true ||
-          (order.metadata?['paymentProof'] as String?)?.isNotEmpty == true;
-      if (isMeAsProvider && someoneElseIsCustomer && !hasProviderInvoice && !hasProof) {
-        // Only remove if status is terminal — keep legit in-flight orders where
-        // invoice hasn't been generated yet.
-        const ghostStatuses = ['cancelled', 'completed', 'liquidated'];
-        if (ghostStatuses.contains(order.status)) {
-          broLog('🧹 Ghost order removida (providerId=me mas sem invoice/proof, status ${order.status}): ${order.id.substring(0, 8)}');
-          return false;
-        }
-      }
-      return true;
-    }).toList();
-    if (_orders.length < ghostCount) {
-      await _saveOrders();
-    }
+    // v519: CLEANUP — Remove ghost provider orders from dispute-resolution bug.
+    // Runs BEFORE AND AFTER syncOrdersFromNostr so both cached and re-synced ghosts
+    // are removed. A REAL provider always has providerInvoice in metadata — without it,
+    // you can't have accepted any order.
+    _removeGhostProviderOrders(userPubkey);
     
     
     _isInitialized = true;
@@ -502,7 +480,32 @@ class OrderProvider with ChangeNotifier {
     // Sincronizar do Nostr IMEDIATAMENTE (n�?£o em background)
     try {
       await syncOrdersFromNostr();
+      // v519: second cleanup pass after sync re-adds from Nostr
+      _removeGhostProviderOrders(userPubkey);
     } catch (e) {
+    }
+  }
+
+  /// v519: Remove ghost provider orders — providerId==me but no invoice/proof.
+  /// Runs both on local load and after Nostr sync to prevent re-addition.
+  void _removeGhostProviderOrders(String userPubkey) {
+    final before = _orders.length;
+    _orders = _orders.where((order) {
+      final isMeAsProvider = order.providerId == userPubkey;
+      final someoneElseIsCustomer = order.userPubkey != null &&
+          order.userPubkey!.isNotEmpty &&
+          order.userPubkey != userPubkey;
+      final hasProviderInvoice = (order.metadata?['providerInvoice'] as String?)?.isNotEmpty == true;
+      final hasProof = (order.metadata?['proofImage'] as String?)?.isNotEmpty == true ||
+          (order.metadata?['paymentProof'] as String?)?.isNotEmpty == true;
+      if (isMeAsProvider && someoneElseIsCustomer && !hasProviderInvoice && !hasProof) {
+        broLog('🧹 Ghost order removida (providerId=me sem invoice/proof, status ${order.status}): ${order.id.substring(0, 8)}');
+        return false;
+      }
+      return true;
+    }).toList();
+    if (_orders.length < before) {
+      _saveOrders();
     }
   }
   

@@ -1188,7 +1188,19 @@ class BreezProvider with ChangeNotifier {
         // Tratar como "already paid" para que o fluxo de confirmação reconheça
         errMsg = 'Invoice already paid (AlreadyExists)';
       } else if (errMsg.contains('sparkError') || errMsg.contains('SdkError')) {
-        errMsg = 'Erro na rede Lightning. Verifique sua conexão e tente novamente.';
+        // v519: NÃO mascarar o erro — devolver uma string com detalhe para o usuário
+        // poder reportar o problema real. "Erro na rede Lightning" genérico escondia
+        // a causa (ex: route not found, no liquidity, peer offline, etc).
+        final orig = e.toString();
+        // Extrair parte relevante: procurar após "generic(" ou "field0:" ou similar
+        String snippet = orig;
+        final fieldMatch = RegExp(r'field0:\s*([^)]+)').firstMatch(orig);
+        if (fieldMatch != null) {
+          snippet = fieldMatch.group(1)!.trim();
+        } else if (orig.length > 200) {
+          snippet = orig.substring(0, 200);
+        }
+        errMsg = 'Falha Spark SDK: $snippet';
       }
       
       _setError(errMsg);
