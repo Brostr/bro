@@ -4441,6 +4441,8 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         if (!breezProvider.isInitialized && !liquidProvider.isInitialized) {
           paymentError = l.t('order_wallet_not_initialized');
         } else {
+          // v516: Mutable local holding the latest invoice (may be refreshed between retries)
+          String currentInvoice = providerInvoice;
           // Retry: tentar até 3 vezes com intervalo de 2s
           for (int attempt = 1; attempt <= 3; attempt++) {
             // v516: Before retry 2 and 3, refetch the latest invoice from Nostr.
@@ -4452,9 +4454,9 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                 final latest = await nostrService.fetchOrderCompleteEvent(widget.orderId)
                     .timeout(const Duration(seconds: 8), onTimeout: () => null);
                 final freshInvoice = latest?['providerInvoice'] as String?;
-                if (freshInvoice != null && freshInvoice.isNotEmpty && freshInvoice != providerInvoice) {
+                if (freshInvoice != null && freshInvoice.isNotEmpty && freshInvoice != currentInvoice) {
                   broLog('🔄 Invoice atualizada recebida do Nostr — usando nova para tentativa $attempt');
-                  providerInvoice = freshInvoice;
+                  currentInvoice = freshInvoice;
                   // Redecode to update paymentHash so verifyPendingSparkPayment checa o hash certo
                   try {
                     final decoded = await breezProvider.decodeInvoice(freshInvoice);
@@ -4476,11 +4478,11 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                 broLog('⚡ Tentativa $attempt/3: Pagando via Breez Spark...');
                 // v514: NO outer timeout — payInvoice() has internal 30s prepare + 60s send timeouts.
                 // Outer timeout was killing payments mid-flight, causing "timeout" errors.
-                payResult = await breezProvider.payInvoice(providerInvoice);
+                payResult = await breezProvider.payInvoice(currentInvoice);
                 usedBackend = 'Spark';
               } else if (liquidProvider.isInitialized) {
                 broLog('⚡ Tentativa $attempt/3: Pagando via Liquid...');
-                payResult = await liquidProvider.payInvoice(providerInvoice);
+                payResult = await liquidProvider.payInvoice(currentInvoice);
                 usedBackend = 'Liquid';
               }
               

@@ -466,6 +466,29 @@ class OrderProvider with ChangeNotifier {
     if (_orders.length < originalCount) {
       await _saveOrders(); // Salvar lista limpa
     }
+
+    // v516: CLEANUP — Remove ghost provider orders from dispute-resolution bug.
+    // When the admin resolved a dispute, updateOrderStatus (kind 30080 bro_order_update
+    // authored by admin) made fetchProviderOrders wrongly attribute those orders to the
+    // admin as provider. Signature: providerId == me, wasDisputed=true, no proofImage,
+    // AND userPubkey is someone else (real customer). Admin never produced any proof.
+    final ghostCount = _orders.length;
+    _orders = _orders.where((order) {
+      final isMeAsProvider = order.providerId == userPubkey;
+      final someoneElseIsCustomer = order.userPubkey != null && order.userPubkey!.isNotEmpty && order.userPubkey != userPubkey;
+      final wasDisputed = order.metadata?['wasDisputed'] == true || order.metadata?['disputeResolvedAt'] != null;
+      final hasProof = (order.metadata?['proofImage'] as String?)?.isNotEmpty == true ||
+          (order.metadata?['paymentProof'] as String?)?.isNotEmpty == true;
+      final hasProviderInvoice = (order.metadata?['providerInvoice'] as String?)?.isNotEmpty == true;
+      if (isMeAsProvider && someoneElseIsCustomer && wasDisputed && !hasProof && !hasProviderInvoice) {
+        broLog('🧹 Ghost order removida (admin resolveu disputa, não é provider real): ${order.id.substring(0, 8)}');
+        return false;
+      }
+      return true;
+    }).toList();
+    if (_orders.length < ghostCount) {
+      await _saveOrders();
+    }
     
     
     _isInitialized = true;

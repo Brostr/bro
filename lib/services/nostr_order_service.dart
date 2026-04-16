@@ -513,6 +513,16 @@ class NostrOrderService {
             final content = event['parsedContent'] ?? jsonDecode(event['content']);
             final eventType = content['type'] as String?;
             if (eventType == 'bro_dispute_resolution' || eventType == 'bro_admin_reimbursement') continue;
+            // v516: Skip bro_order_update events where the signer is NOT the real provider.
+            // This prevents dispute resolutions (admin publishes order_update) from making the
+            // admin's app think it provider'd the order. If providerId in content doesn't match
+            // the pubkey we're querying for, it's not actually one of our provider orders.
+            if (eventType == 'bro_order_update') {
+              final contentProviderId = content['providerId'] as String?;
+              if (contentProviderId != null && contentProviderId.isNotEmpty && contentProviderId != providerPubkey) {
+                continue;
+              }
+            }
             final orderId = content['orderId'] as String?;
             if (orderId != null) orderIdsFromAccepts.add(orderId);
           } catch (_) {}
