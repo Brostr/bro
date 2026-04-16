@@ -470,19 +470,24 @@ class OrderProvider with ChangeNotifier {
     // v516: CLEANUP — Remove ghost provider orders from dispute-resolution bug.
     // When the admin resolved a dispute, updateOrderStatus (kind 30080 bro_order_update
     // authored by admin) made fetchProviderOrders wrongly attribute those orders to the
-    // admin as provider. Signature: providerId == me, wasDisputed=true, no proofImage,
-    // AND userPubkey is someone else (real customer). Admin never produced any proof.
+    // admin as provider. A REAL provider always has providerInvoice in metadata (required
+    // by the flow). If providerId==me but no providerInvoice AND no proof AND someone
+    // else is the customer → it's a ghost from the dispute attribution bug.
     final ghostCount = _orders.length;
     _orders = _orders.where((order) {
       final isMeAsProvider = order.providerId == userPubkey;
       final someoneElseIsCustomer = order.userPubkey != null && order.userPubkey!.isNotEmpty && order.userPubkey != userPubkey;
-      final wasDisputed = order.metadata?['wasDisputed'] == true || order.metadata?['disputeResolvedAt'] != null;
+      final hasProviderInvoice = (order.metadata?['providerInvoice'] as String?)?.isNotEmpty == true;
       final hasProof = (order.metadata?['proofImage'] as String?)?.isNotEmpty == true ||
           (order.metadata?['paymentProof'] as String?)?.isNotEmpty == true;
-      final hasProviderInvoice = (order.metadata?['providerInvoice'] as String?)?.isNotEmpty == true;
-      if (isMeAsProvider && someoneElseIsCustomer && wasDisputed && !hasProof && !hasProviderInvoice) {
-        broLog('🧹 Ghost order removida (admin resolveu disputa, não é provider real): ${order.id.substring(0, 8)}');
-        return false;
+      if (isMeAsProvider && someoneElseIsCustomer && !hasProviderInvoice && !hasProof) {
+        // Only remove if status is terminal — keep legit in-flight orders where
+        // invoice hasn't been generated yet.
+        const ghostStatuses = ['cancelled', 'completed', 'liquidated'];
+        if (ghostStatuses.contains(order.status)) {
+          broLog('🧹 Ghost order removida (providerId=me mas sem invoice/proof, status ${order.status}): ${order.id.substring(0, 8)}');
+          return false;
+        }
       }
       return true;
     }).toList();
