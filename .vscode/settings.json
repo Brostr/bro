@@ -100,5 +100,27 @@
             "matchCommandLine": true
         },
         "git checkout": true
+    },
+    "files.exclude": {
+        "**/build": true,
+        "**/.dart_tool": true,
+        "**/.gradle": true,
+        "**/node_modules": true,
+        "**/ios/Pods": true,
+        "**/ios/.symlinks": true
+    },
+    "files.watcherExclude": {
+        "**/build/**": true,
+        "**/.dart_tool/**": true,
+        "**/.gradle/**": true,
+        "**/node_modules/**": true,
+        "**/ios/Pods/**": true,
+        "**/ios/.symlinks/**": true
+    },
+    "search.exclude": {
+        "**/build": true,
+        "**/.dart_tool": true,
+        "**/node_modules": true,
+        "**/ios/Pods": true
     }
 }

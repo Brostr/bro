@@ -2238,6 +2238,9 @@ class OrderProvider with ChangeNotifier {
             'paymentProof': proof,
             'proofImage': proof,
             'proofSentAt': DateTime.now().toIso8601String(),
+            // v517: MUST set completedAt locally so _renewInvoicesForLiquidatedAsProvider
+            // can tell if the order is >30min old and needs a fresh invoice.
+            'completedAt': DateTime.now().toIso8601String(),
             if (e2eId != null && e2eId.isNotEmpty) 'e2eId': e2eId,
             if (providerInvoice != null) 'providerInvoice': providerInvoice,
           },
@@ -2706,24 +2709,26 @@ class OrderProvider with ChangeNotifier {
         if (order.status != 'liquidated' && order.status != 'awaiting_confirmation') return false;
         final providerId = order.providerId ?? order.metadata?['providerId'] ?? order.metadata?['provider_id'] ?? '';
         if (providerId != _currentUserPubkey) return false;
-        // v516: Allow re-refresh every 2h instead of one-shot. If the first refreshed
+        // v517: Allow re-refresh every 30min instead of 2h. If the first refreshed
         // invoice also fails (buyer kept timing out), next sync will publish a new one.
         final refreshedAtStr = order.metadata?['invoiceRefreshedAt']?.toString();
         if (refreshedAtStr != null) {
           try {
             final refreshedAt = DateTime.parse(refreshedAtStr);
-            if (DateTime.now().difference(refreshedAt).inHours < 2) return false;
+            if (DateTime.now().difference(refreshedAt).inMinutes < 30) return false;
           } catch (_) {}
         }
         if (order.metadata?['providerPaymentReceived'] == true) return false;
         if (order.metadata?['autoPaymentCompleted'] == true) return false;
-        // For awaiting_confirmation, only refresh if completed >2h ago (invoice likely expired)
+        // v517: Refresh much faster (30min) and fall back to proofSentAt/createdAt
+        // when completedAt is missing (older local orders that predate v517 fix).
         if (order.status == 'awaiting_confirmation') {
-          final completedAt = order.metadata?['completedAt']?.toString();
-          if (completedAt == null) return false;
+          final completedAtStr = order.metadata?['completedAt']?.toString()
+              ?? order.metadata?['proofSentAt']?.toString()
+              ?? order.createdAt.toIso8601String();
           try {
-            final completedTime = DateTime.parse(completedAt);
-            if (DateTime.now().difference(completedTime).inHours < 2) return false;
+            final completedTime = DateTime.parse(completedAtStr);
+            if (DateTime.now().difference(completedTime).inMinutes < 30) return false;
           } catch (_) { return false; }
         }
         return true;
