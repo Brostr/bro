@@ -285,12 +285,19 @@ class NostrWatchtowerService {
           // proof arrived — the screen-level local notification only fired if the
           // app was open and polling. This bug is why "comprovante recebido" only
           // appeared AFTER the user manually released funds.
+          //
+          // v528: FIX — `completed` is published by the USER (when releasing escrow).
+          // It must notify the PROVIDER so they know the payment was released.
+          // Previous mapping ('user') caused the self-push guard to block it and
+          // the provider silently never got notified via watchtower; only the
+          // direct notifyUser() call worked, and that failed too on iOS with the
+          // stale backend URL bug. Routing change restores redundancy.
           const STATUS_NOTIFY = {
             'accepted': 'user',              // provider accepted → tell user
             'payment_submitted': 'provider', // user paid Spark invoice → tell provider to execute bill
             'awaiting_confirmation': 'user', // provider uploaded proof → tell user to verify & release
-            'completed': 'user',             // provider confirmed → tell user
-            'liquidated': 'user',            // auto-liquidation → tell user
+            'completed': 'provider',         // user released escrow → tell provider
+            'liquidated': 'user',            // auto-liquidation → tell user (refund)
             'cancelled': 'other',            // tell the party that didn't cancel
             'disputed': 'other',             // tell the party that didn't dispute
           };
@@ -318,11 +325,17 @@ class NostrWatchtowerService {
         }
 
         case 'bro_complete': {
-          // Provider completed — notify the order creator
-          // v512: Fallback chain: content.userPubkey → content.recipientPubkey → cached orderUsers
+          // v528: Provider uploaded proof — semantically this is "awaiting_confirmation"
+          // (provider finished their part, user now needs to verify & release).
+          // Previously this sent label='completed', which:
+          //   (a) Showed WRONG message ('Ordem concluída' instead of 'Comprovante recebido')
+          //   (b) Set dedup key `orderId:completed` that LATER blocked the real
+          //       completed push when the user released escrow.
+          // Now uses 'awaiting_confirmation' to match the kind 30080 status semantics
+          // and avoid colliding with the user's later completion event.
           const userPubkeyC = content.userPubkey || content.recipientPubkey || this._orderUsers.get(orderId);
           if (isValidPubkey(userPubkeyC) && userPubkeyC !== senderPubkey) {
-            await this._sendOrderPush(userPubkeyC, senderPubkey, 'completed', orderId, shortId);
+            await this._sendOrderPush(userPubkeyC, senderPubkey, 'awaiting_confirmation', orderId, shortId);
           } else {
             console.log(`⚠️ [Watchtower] Order ${shortId} completed but no userPubkey found (content: ${content.userPubkey || 'empty'}, recipient: ${content.recipientPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
