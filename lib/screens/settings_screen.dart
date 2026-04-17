@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/push_diag.dart';
 import 'package:crypto/crypto.dart';
 import '../services/storage_service.dart';
 import '../services/version_check_service.dart';
@@ -55,6 +56,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _showAdminPasswordDialog();
     }
     // Sem feedback visual - acesso admin totalmente oculto
+  }
+
+  void _showPushDiagnostic(BuildContext context) async {
+    final events = await PushDiag.readAll();
+    final text = events.isEmpty ? '(sem eventos)' : events.join('\n');
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        title: const Text('Diagnóstico de Push', style: TextStyle(color: Colors.white, fontSize: 16)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text,
+              style: const TextStyle(color: Colors.white70, fontFamily: 'monospace', fontSize: 11),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: text));
+              if (ctx.mounted) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Copiado'), duration: Duration(seconds: 1)),
+                );
+              }
+            },
+            child: const Text('Copiar', style: TextStyle(color: Colors.orange)),
+          ),
+          TextButton(
+            onPressed: () async {
+              await PushDiag.clear();
+              if (ctx.mounted) Navigator.pop(ctx);
+            },
+            child: const Text('Limpar', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Fechar', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showNotificationGuide(BuildContext context) {
@@ -1180,6 +1228,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                     child: Column(
                       children: [
+                        ListTile(
+                          leading: const Icon(Icons.notifications_active, color: Colors.orange),
+                          title: const Text('Diagnóstico de Push', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('Estado das notificações push', style: TextStyle(color: Colors.white54)),
+                          trailing: const Icon(Icons.chevron_right, color: Colors.orange, size: 20),
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                          onTap: () => _showPushDiagnostic(context),
+                        ),
+                        const Divider(color: Color(0xFF2A2A3E), height: 1),
                         ListTile(
                           leading: const Icon(Icons.info_outline, color: Colors.orange),
                           title: Text(AppLocalizations.of(context).t('settings_version'), style: const TextStyle(color: Colors.white)),

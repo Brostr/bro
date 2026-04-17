@@ -56,6 +56,7 @@ import 'services/nostr_order_service.dart';
 import 'services/order_realtime_service.dart';
 import 'services/brix_service.dart';
 import 'services/brix_relay_service.dart';
+import 'services/push_diag.dart';
 import 'config.dart';
 import 'config/breez_config.dart';
 
@@ -181,11 +182,14 @@ void main() async {
 
   // Initialize Firebase (optional — app works without it, just no push notifications)
   String? fcmToken;
+  PushDiag.log('main: starting FCM init');
   try {
     await Firebase.initializeApp();
+    PushDiag.log('main: Firebase.initializeApp OK');
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
     final messaging = FirebaseMessaging.instance;
-    await messaging.requestPermission();
+    final settings = await messaging.requestPermission();
+    PushDiag.log('main: permission=${settings.authorizationStatus.name}');
     // iOS: Permitir exibição de notificações em foreground
     // Sem isso, firebase_messaging suprime alertas quando o app está aberto
     await messaging.setForegroundNotificationPresentationOptions(
@@ -201,20 +205,25 @@ void main() async {
       String? apnsToken = await messaging.getAPNSToken();
       if (apnsToken == null) {
         broLog('[FCM] iOS: APNS token not ready, waiting 3s...');
+        PushDiag.log('main: APNS null, waiting 3s');
         await Future.delayed(const Duration(seconds: 3));
         apnsToken = await messaging.getAPNSToken();
       }
       if (apnsToken == null) {
         broLog('[FCM] iOS: APNS still null, waiting 5s more...');
+        PushDiag.log('main: APNS null, waiting 5s');
         await Future.delayed(const Duration(seconds: 5));
         apnsToken = await messaging.getAPNSToken();
       }
       broLog('[FCM] iOS APNS: ${apnsToken != null ? "ready" : "STILL NULL — push may fail"}');
+      PushDiag.log('main: APNS=${apnsToken != null ? "ready(${apnsToken.length})" : "NULL"}');
     }
     fcmToken = await messaging.getToken();
     broLog('[FCM] Push token: ${fcmToken != null ? "present (${fcmToken!.length} chars)" : "NULL"}');
+    PushDiag.log('main: FCM token=${fcmToken != null ? "ok(${fcmToken.length})" : "NULL"}');
   } catch (e) {
     broLog('[FCM] Firebase init failed (push disabled): $e');
+    PushDiag.log('main: Firebase init FAILED: $e');
   }
 
   // Inicializar notificacoes
@@ -239,17 +248,23 @@ void main() async {
   
   // Se já está logado, restaurar chaves Nostr
   if (isLoggedIn) {
-    await _restoreNostrKeys(storage);
-    userPubkey = await storage.getNostrPublicKey();
-    broLog('📦 Pubkey para OrderProvider: ${userPubkey?.substring(0, 16) ?? "null"}...');
-    
-    // Register FCM token with BRIX server for offline push notifications
-    if (fcmToken != null && userPubkey != null) {
-      final token = fcmToken;
-      final pubkey = userPubkey!;
+    awPushDiag.log('main: registering token pk=${pubkey.substring(0, 8)}');
       // Fire-and-forget with retry — don't block app startup
       _retryAsync('BRIX push', () async {
         await BrixService().initCredentials();
+        final ok = await BrixService().registerPushToken(token, pubkey);
+        PushDiag.log('main: BRIX register=$ok');
+        return ok;
+      });
+
+      _retryAsync('Backend push', () async {
+        final ok = await ApiService().registerPushToken(token);
+        PushDiag.log('main: backend register=$ok');
+        return ok;
+      });
+    } else {
+      broLog('[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
+      PushDiag.log('main: SKIP register (fcm=${fcmToken != null} pk=${userPubkey != null})
         return await BrixService().registerPushToken(token, pubkey);
       });
 

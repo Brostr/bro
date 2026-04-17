@@ -10,6 +10,7 @@ import 'package:bro_app/services/brix_service.dart';
 import 'package:bro_app/services/api_service.dart';
 import 'package:bro_app/services/storage_service.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/push_diag.dart';
 import 'package:bro_app/services/lnaddress_service.dart';
 import 'package:bro_app/providers/breez_provider.dart';
 import 'package:bro_app/config.dart';
@@ -45,7 +46,10 @@ class BrixRelayService {
     if (_fcmRegistered && _backendFcmRegistered) return;
     try {
       _pubkey ??= await _storage.getNostrPublicKey();
-      if (_pubkey == null || _pubkey!.isEmpty) return;
+      if (_pubkey == null || _pubkey!.isEmpty) {
+        PushDiag.log('relay: no pubkey');
+        return;
+      }
       // iOS: APNS token must be ready before FCM can provide a token
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         String? apns = await FirebaseMessaging.instance.getAPNSToken();
@@ -60,6 +64,7 @@ class BrixRelayService {
         if (apns == null) {
           if (_fcmRetryCount % 5 == 0) {
             broLog('[BRIX-RELAY] iOS: APNS still not ready after 8s (retry $_fcmRetryCount)');
+            PushDiag.log('relay: APNS null retry=$_fcmRetryCount');
           }
           _fcmRetryCount++;
           return;
@@ -69,6 +74,7 @@ class BrixRelayService {
       if (token == null) {
         _fcmRetryCount++;
         broLog('[BRIX-RELAY] FCM token is null (retry $_fcmRetryCount) — cannot register');
+        PushDiag.log('relay: FCM token NULL retry=$_fcmRetryCount');
         return;
       }
 
@@ -99,11 +105,14 @@ class BrixRelayService {
           if (ok) {
             _backendFcmRegistered = true;
             broLog('[BRIX-RELAY] FCM token registered successfully (backend)');
+            PushDiag.log('relay: backend register OK');
           } else {
             broLog('[BRIX-RELAY] Backend FCM registration returned false');
+            PushDiag.log('relay: backend register FALSE');
           }
         } catch (e) {
           broLog('[BRIX-RELAY] Backend FCM registration error: $e');
+          PushDiag.log('relay: backend register ERR ${e.toString().substring(0, e.toString().length > 60 ? 60 : e.toString().length)}');
         }
       }
     } catch (e) {
@@ -117,11 +126,14 @@ class BrixRelayService {
   Future<void> _verifyBackendRegistration() async {
     try {
       final registered = await ApiService().diagnosePushToken();
+      PushDiag.log('relay: diagnose=${registered ?? "null"}');
       if (registered == false) {
         broLog('[BRIX-RELAY] Backend says NOT registered — forcing re-registration');
         _backendFcmRegistered = false;
       }
-    } catch (_) {}
+    } catch (e) {
+      PushDiag.log('relay: diagnose ERR $e');
+    }
   }
 
   /// Start the relay service. Call from main app after login.
