@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/push_diag.dart';
 import 'package:dio/dio.dart';
 import 'storage_service.dart';
 import 'nostr_service.dart';
@@ -879,14 +880,22 @@ class ApiService {
   /// Register FCM token with the backend for order push notifications
   Future<bool> registerPushToken(String fcmToken) async {
     try {
+      PushDiag.log('api: POST /push/register-token base=$_baseUrl');
       final response = await _dio.post('/push/register-token', data: {
         'fcm_token': fcmToken,
       });
       final ok = response.data?['ok'] == true;
       broLog('[PUSH] Backend token registered: $ok (push_enabled=${response.data?['push_enabled']})');
+      PushDiag.log('api: register response status=${response.statusCode} ok=$ok body=${response.data}');
       return ok;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message} body=${e.response?.data}';
+      broLog('[PUSH] Backend token registration failed: $msg');
+      PushDiag.log('api: register FAIL $msg');
+      return false;
     } catch (e) {
       broLog('[PUSH] Backend token registration failed: $e');
+      PushDiag.log('api: register EXC $e');
       return false;
     }
   }
@@ -899,6 +908,11 @@ class ApiService {
     try {
       final response = await _dio.get('/push/diagnose');
       return response.data?['registered'] == true;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message}';
+      broLog('[PUSH] Backend diagnose failed: $msg');
+      PushDiag.log('api: diagnose FAIL $msg');
+      return null;
     } catch (e) {
       broLog('[PUSH] Backend diagnose failed: $e');
       return null;
