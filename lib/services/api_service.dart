@@ -37,6 +37,21 @@ class ApiService {
   Future<void> init() async {
     _baseUrl = await _storage.getBackendUrl();
 
+    // v527: Auto-heal stale dev URLs. A local/emulator URL saved on a dev
+    // device propagates via secure storage backup and bricks push on real
+    // iOS devices. Reset to production default if detected.
+    final lower = _baseUrl.toLowerCase();
+    if (lower.contains('10.0.2.2') ||
+        lower.contains('localhost') ||
+        lower.contains('127.0.0.1') ||
+        lower.contains('192.168.') ||
+        lower.contains('10.0.0.')) {
+      broLog('[API] Stale dev URL detected: $_baseUrl → resetting to default');
+      PushDiag.log('api: stale URL $_baseUrl → reset');
+      _baseUrl = AppConfig.defaultBackendUrl;
+      await _storage.saveBackendUrl(_baseUrl);
+    }
+
     _dio = Dio(BaseOptions(
       baseUrl: _baseUrl,
       connectTimeout: const Duration(seconds: 10),
