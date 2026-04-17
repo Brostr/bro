@@ -248,7 +248,15 @@ void main() async {
   
   // Se já está logado, restaurar chaves Nostr
   if (isLoggedIn) {
-    awPushDiag.log('main: registering token pk=${pubkey.substring(0, 8)}');
+    await _restoreNostrKeys(storage);
+    userPubkey = await storage.getNostrPublicKey();
+    broLog('📦 Pubkey para OrderProvider: ${userPubkey?.substring(0, 16) ?? "null"}...');
+
+    // Register FCM token with BRIX server for offline push notifications
+    if (fcmToken != null && userPubkey != null) {
+      final token = fcmToken;
+      final pubkey = userPubkey!;
+      PushDiag.log('main: registering token pk=${pubkey.substring(0, 8)}');
       // Fire-and-forget with retry — don't block app startup
       _retryAsync('BRIX push', () async {
         await BrixService().initCredentials();
@@ -264,15 +272,7 @@ void main() async {
       });
     } else {
       broLog('[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
-      PushDiag.log('main: SKIP register (fcm=${fcmToken != null} pk=${userPubkey != null})
-        return await BrixService().registerPushToken(token, pubkey);
-      });
-
-      _retryAsync('Backend push', () async {
-        return await ApiService().registerPushToken(token);
-      });
-    } else {
-      broLog('[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
+      PushDiag.log('main: SKIP register (fcm=${fcmToken != null} pk=${userPubkey != null})');
     }
 
     // Re-register when Firebase rotates the FCM token
