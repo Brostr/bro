@@ -891,6 +891,20 @@ class ApiService {
     }
   }
 
+  /// v524: Ask backend whether our FCM token is registered.
+  /// Used to detect silent registration failures on iOS
+  /// (where getToken() may return null intermittently).
+  /// Returns null on network error so callers can distinguish from a real "not registered" answer.
+  Future<bool?> diagnosePushToken() async {
+    try {
+      final response = await _dio.get('/push/diagnose');
+      return response.data?['registered'] == true;
+    } catch (e) {
+      broLog('[PUSH] Backend diagnose failed: $e');
+      return null;
+    }
+  }
+
   /// Send a push notification to another user via the backend
   Future<bool> notifyUser({
     required String targetPubkey,

@@ -137,6 +137,24 @@ router.get('/status', (req, res) => {
   });
 });
 
+/**
+ * GET /push/diagnose
+ * Auth: NIP-98 (req.verifiedPubkey)
+ * Returns whether THIS pubkey has a token registered.
+ * Used by the app to detect silent registration failures on iOS.
+ */
+router.get('/diagnose', (req, res) => {
+  const pubkey = req.verifiedPubkey;
+  const state = pushService.hasToken(pubkey);
+  // Log so we can see iOS devices calling in for diagnosis
+  console.log(`[PUSH] /diagnose pubkey=${pubkey.substring(0, 16)}... registered=${state.registered}${state.registered ? ` age=${state.ageSeconds}s` : ''}`);
+  res.json({
+    pubkey_short: pubkey.substring(0, 8),
+    push_enabled: pushService.isEnabled(),
+    ...state,
+  });
+});
+
 // Admin pubkey from env
 const ADMIN_PUBKEY = process.env.ADMIN_PUBKEY || '';
 

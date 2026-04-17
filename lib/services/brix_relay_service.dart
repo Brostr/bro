@@ -48,10 +48,18 @@ class BrixRelayService {
       if (_pubkey == null || _pubkey!.isEmpty) return;
       // iOS: APNS token must be ready before FCM can provide a token
       if (defaultTargetPlatform == TargetPlatform.iOS) {
-        final apns = await FirebaseMessaging.instance.getAPNSToken();
+        String? apns = await FirebaseMessaging.instance.getAPNSToken();
+        // v524: aggressive APNS wait within a single attempt (up to 8s).
+        // On iOS, APNS can take 10-30s on cold starts and the old code bailed immediately.
+        if (apns == null) {
+          for (int i = 0; i < 4 && apns == null; i++) {
+            await Future.delayed(const Duration(seconds: 2));
+            apns = await FirebaseMessaging.instance.getAPNSToken();
+          }
+        }
         if (apns == null) {
           if (_fcmRetryCount % 5 == 0) {
-            broLog('[BRIX-RELAY] iOS: APNS not ready, cannot get FCM token (retry $_fcmRetryCount)');
+            broLog('[BRIX-RELAY] iOS: APNS still not ready after 8s (retry $_fcmRetryCount)');
           }
           _fcmRetryCount++;
           return;
@@ -59,7 +67,8 @@ class BrixRelayService {
       }
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null) {
-        broLog('[BRIX-RELAY] FCM token is null — cannot register');
+        _fcmRetryCount++;
+        broLog('[BRIX-RELAY] FCM token is null (retry $_fcmRetryCount) — cannot register');
         return;
       }
 
@@ -101,6 +110,18 @@ class BrixRelayService {
       _fcmRetryCount++;
       broLog('[BRIX-RELAY] FCM registration error (attempt $_fcmRetryCount): $e');
     }
+  }
+
+  /// v524: Ask the backend whether our token is actually stored.
+  /// If not, flip the flag so the next poll re-registers.
+  Future<void> _verifyBackendRegistration() async {
+    try {
+      final registered = await ApiService().diagnosePushToken();
+      if (registered == false) {
+        broLog('[BRIX-RELAY] Backend says NOT registered — forcing re-registration');
+        _backendFcmRegistered = false;
+      }
+    } catch (_) {}
   }
 
   /// Start the relay service. Call from main app after login.
@@ -184,6 +205,13 @@ class BrixRelayService {
     // Retry FCM registration every ~30s (20 polls) until successful
     if ((!_fcmRegistered || !_backendFcmRegistered) && _pollCount % 20 == 1) {
       _ensureFcmRegistered();
+    }
+
+    // v524: Every ~2min, verify the backend ACTUALLY has our token.
+    // Protects against silent deregistration (e.g. FCM rotates token without
+    // firing onTokenRefresh, or server evicts stale tokens).
+    if (_backendFcmRegistered && _pollCount % 80 == 1) {
+      unawaited(_verifyBackendRegistration());
     }
 
     try {

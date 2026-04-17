@@ -281,4 +281,17 @@ function cleanupStaleTokens() {
 // Daily cleanup of stale tokens
 setInterval(cleanupStaleTokens, 24 * 60 * 60 * 1000);
 
-module.exports = { init, registerToken, sendPush, isEnabled, getTokenCount, getAllPubkeys };
+/**
+ * Check if a pubkey has a registered token (for diagnostics)
+ */
+function hasToken(pubkey) {
+  const entry = tokenStore.get(pubkey);
+  if (!entry) return { registered: false };
+  return {
+    registered: true,
+    updatedAt: entry.updatedAt,
+    ageSeconds: Math.floor((Date.now() - entry.updatedAt) / 1000),
+  };
+}
+
+module.exports = { init, registerToken, sendPush, isEnabled, getTokenCount, getAllPubkeys, hasToken };
