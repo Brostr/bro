@@ -278,10 +278,17 @@ class NostrWatchtowerService {
             this._orderUsers.set(orderId, userPubkey);
           }
 
+          // v523: FIX — in Bro's flow, the PROVIDER pays the bill and uploads proof,
+          // then the USER verifies proof and releases escrow. So `awaiting_confirmation`
+          // (= proof uploaded by provider) MUST notify the USER, not the provider.
+          // The old mapping caused background pushes to never reach the user when
+          // proof arrived — the screen-level local notification only fired if the
+          // app was open and polling. This bug is why "comprovante recebido" only
+          // appeared AFTER the user manually released funds.
           const STATUS_NOTIFY = {
             'accepted': 'user',              // provider accepted → tell user
-            'payment_submitted': 'provider', // user submitted payment → tell provider to verify
-            'awaiting_confirmation': 'provider', // payment proof uploaded → provider should verify
+            'payment_submitted': 'provider', // user paid Spark invoice → tell provider to execute bill
+            'awaiting_confirmation': 'user', // provider uploaded proof → tell user to verify & release
             'completed': 'user',             // provider confirmed → tell user
             'liquidated': 'user',            // auto-liquidation → tell user
             'cancelled': 'other',            // tell the party that didn't cancel
@@ -337,6 +344,9 @@ class NostrWatchtowerService {
    * Both parties publish the same status for sync; only the first event triggers a push.
    */
   async _sendOrderPush(targetPubkey, senderPubkey, status, orderId, shortId, routing) {
+    // v523: Never push back to the event's own publisher.
+    if (targetPubkey === senderPubkey) return false;
+
     // v512: Dedup by orderId+status ONLY (no targetPubkey).
     // Both parties publish the same status for sync — only ONE push per status per order.
     // First event to arrive wins; echoes from the other party are suppressed.
