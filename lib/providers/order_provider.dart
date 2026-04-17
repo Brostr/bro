@@ -3786,6 +3786,13 @@ class OrderProvider with ChangeNotifier {
       _isSyncingUser = false;
       _syncUserStartedAt = null; // v259: clear stale tracker
     }
+
+    // v521: authoritative ghost-order cleanup runs AFTER every sync, not only on login.
+    // Fire-and-forget so it doesn't block the UI.
+    if (_currentUserPubkey != null && _currentUserPubkey!.isNotEmpty) {
+      final me = _currentUserPubkey!;
+      unawaited(_removeGhostsAgainstNostr(me));
+    }
   }
 
   /// v437: Provider auto-nudge — detecta ordens presas em awaiting_confirmation
