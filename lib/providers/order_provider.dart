@@ -482,6 +482,10 @@ class OrderProvider with ChangeNotifier {
       await syncOrdersFromNostr();
       // v519: second cleanup pass after sync re-adds from Nostr
       _removeGhostProviderOrders(userPubkey);
+      // v520: authoritative pass — cross-check cached provider orders against
+      // actual Nostr accept/complete events from this pubkey. Any provider
+      // order that cannot be proven by a real accept event is a ghost.
+      await _removeGhostsAgainstNostr(userPubkey);
     } catch (e) {
     }
   }
@@ -506,6 +510,42 @@ class OrderProvider with ChangeNotifier {
     }).toList();
     if (_orders.length < before) {
       _saveOrders();
+    }
+  }
+
+  /// v520: Authoritative ghost-removal against Nostr.
+  /// If the cache says I'm the provider for an order, but Nostr has no
+  /// bro_accept/bro_complete event from me for that order, it's a ghost
+  /// (e.g. stamped by a buggy sync when this device acted as admin/mediator).
+  /// Safe: if the Nostr fetch fails or returns empty, keep the cache as-is.
+  Future<void> _removeGhostsAgainstNostr(String userPubkey) async {
+    try {
+      final providerOrdersInCache = _orders
+          .where((o) => o.providerId == userPubkey && o.userPubkey != userPubkey)
+          .toList();
+      if (providerOrdersInCache.isEmpty) return;
+      final acceptedIds = await _nostrOrderService
+          .fetchAcceptedOrderIdsForProvider(userPubkey)
+          .timeout(const Duration(seconds: 10), onTimeout: () => <String>{});
+      if (acceptedIds.isEmpty) return; // can't prove anything, don't touch cache
+      final before = _orders.length;
+      _orders = _orders.where((order) {
+        final isMeAsProvider = order.providerId == userPubkey;
+        final someoneElseIsCustomer = order.userPubkey != null &&
+            order.userPubkey!.isNotEmpty &&
+            order.userPubkey != userPubkey;
+        if (isMeAsProvider && someoneElseIsCustomer && !acceptedIds.contains(order.id)) {
+          broLog('🧹 Ghost order removida via Nostr cross-check (sem bro_accept meu): ${order.id.substring(0, 8)}');
+          return false;
+        }
+        return true;
+      }).toList();
+      if (_orders.length < before) {
+        await _saveOrders();
+        _immediateNotify();
+      }
+    } catch (e) {
+      broLog('⚠️ _removeGhostsAgainstNostr error: $e');
     }
   }
   

@@ -73,24 +73,15 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.1.2"
-  breez_liquid:
-    dependency: "direct main"
-    description:
-      path: "."
-      ref: HEAD
-      resolved-ref: "4f3bd47ff1c0a17eb0877f760037d7065b496976"
-      url: "https://github.com/breez/breez-sdk-liquid-dart"
-    source: git
-    version: "0.11.3"
   breez_sdk_spark_flutter:
     dependency: "direct main"
     description:
       path: "."
       ref: HEAD
-      resolved-ref: bca05bc9085f778e95916d55e9a75133c27755a2
+      resolved-ref: f8d98077a44587cca2260559515dcd5f5f35c2fa
       url: "https://github.com/breez/breez-sdk-spark-flutter"
     source: git
-    version: "0.3.5-rc1"
+    version: "0.13.2-dev1"
   build_cli_annotations:
     dependency: transitive
     description:
@@ -333,10 +324,10 @@ packages:
     description:
       path: "."
       ref: HEAD
-      resolved-ref: b60066e1eba080c795ab990febc2c33642039ee0
+      resolved-ref: a899921107d42c657b5556d1771927230b2c1d89
       url: "https://github.com/breez/breez-sdk-liquid-flutter"
     source: git
-    version: "0.11.13"
+    version: "0.12.3-dev1"
   flutter_launcher_icons:
     dependency: "direct dev"
     description:
@@ -402,10 +393,10 @@ packages:
     dependency: transitive
     description:
       name: flutter_rust_bridge
-      sha256: "5a5c7a5deeef2cc2ffe6076a33b0429f4a20ceac22a397297aed2b1eb067e611"
+      sha256: "37ef40bc6f863652e865f0b2563ea07f0d3c58d8efad803cc01933a4b2ee067e"
       url: "https://pub.dev"
     source: hosted
-    version: "2.9.0"
+    version: "2.11.1"
   flutter_secure_storage:
     dependency: "direct main"
     description:

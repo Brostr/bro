@@ -58,7 +58,6 @@ import 'services/brix_service.dart';
 import 'services/brix_relay_service.dart';
 import 'config.dart';
 import 'config/breez_config.dart';
-import 'extensions/breez_extensions.dart';
 
 /// Top-level handler for background FCM messages (required by Firebase).
 /// When the app is killed, this tries to generate invoices for BRIX payments.

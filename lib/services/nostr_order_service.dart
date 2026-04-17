@@ -560,6 +560,42 @@ class NostrOrderService {
     return orders;
   }
 
+  /// v520: Return the Set of orderIds for which [providerPubkey] has a genuine
+  /// provider-evidence event on Nostr (bro_accept, bro_complete, or a
+  /// bro_order_update whose content.providerId matches).
+  /// Used to purge ghost provider orders from local cache when the same
+  /// device has also acted as admin/mediator for other orders.
+  Future<Set<String>> fetchAcceptedOrderIdsForProvider(String providerPubkey) async {
+    final acceptedIds = <String>{};
+    for (final relay in _relays.take(3)) {
+      try {
+        final events = await _fetchFromRelay(
+          relay,
+          kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
+          authors: [providerPubkey],
+          limit: 300,
+        ).catchError((_) => <Map<String, dynamic>>[]);
+        for (final event in events) {
+          try {
+            final content = event['parsedContent'] ?? jsonDecode(event['content']);
+            final eventType = content['type'] as String?;
+            const providerEventTypes = {'bro_accept', 'bro_complete'};
+            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+                (eventType == 'bro_order_update' &&
+                    (content['providerId'] as String?) == providerPubkey);
+            if (!isProviderEvidence) continue;
+            final orderId = content['orderId'] as String?;
+            if (orderId != null) acceptedIds.add(orderId);
+          } catch (_) {}
+        }
+        if (events.isNotEmpty) break;
+      } catch (_) {
+        // try next relay
+      }
+    }
+    return acceptedIds;
+  }
+
   /// Busca ordens aceitas por um provedor e retorna como List<Order>
   /// CORREÇÃO: Agora também busca eventos de UPDATE para obter status correto
   Future<List<Order>> fetchProviderOrders(String providerPubkey) async {

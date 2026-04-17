@@ -248,7 +248,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
             final receivedAmount = payment.amount.toInt();
             
             // Validações: payment hash deve bater E valor deve ser >= 95% do esperado
-            final isCorrectHash = details.paymentHash == paymentHash;
+            final isCorrectHash = details.htlcDetails.paymentHash == paymentHash;
             final isCorrectAmount = receivedAmount >= (amountSats * 0.95).round();
             
             if (isCorrectHash && isCorrectAmount) {
