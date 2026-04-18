@@ -1074,17 +1074,32 @@ class OrderProvider with ChangeNotifier {
         // entao quando catch roda, o loop esta suspenso em algum await.
         // Ao retomar, verifica cancelled e para.)
         cancelled = true;
+        // v529: Se a ordem CHEGOU a ser publicada em algum relay antes do timeout,
+        // publicar cancel para impedir que provedores vejam ordem órfã.
+        // Ver: /memories/repo/relay-sync-bug.md — ordens órfãs causam duplicatas.
+        final idx = _orders.indexWhere((o) => o.id == orderId);
+        final wasPublished = idx != -1 && _orders[idx].eventId != null;
         _orders.removeWhere((o) => o.id == orderId);
         await _saveOrders();
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} timeout/erro: $e');
+        if (wasPublished) {
+          unawaited(_publishOrphanCancel(orderId, order.userPubkey));
+        }
+        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} timeout/erro (published=$wasPublished): $e');
         _error = 'Falha ao publicar ordem nos relays Nostr';
         return null;
       }
       
       if (!published) {
+        // v529: mesmo caso — _publishOrderToNostr pode ter conseguido em 1 relay
+        // mas não setou eventId (race). Melhor prevenir com cancel best-effort.
+        final idx = _orders.indexWhere((o) => o.id == orderId);
+        final wasPublished = idx != -1 && _orders[idx].eventId != null;
         _orders.removeWhere((o) => o.id == orderId);
         await _saveOrders();
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} falhou apos 3 tentativas');
+        if (wasPublished) {
+          unawaited(_publishOrphanCancel(orderId, order.userPubkey));
+        }
+        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} falhou apos 3 tentativas (published=$wasPublished)');
         _error = 'Falha ao publicar ordem nos relays Nostr';
         return null;
       }
@@ -1103,7 +1118,25 @@ class OrderProvider with ChangeNotifier {
       _immediateNotify();
     }
   }
-  
+
+  /// v529: Publica cancel best-effort para ordem orfa (publicada em algum relay
+  /// mas cujo createOrder falhou/timed out). Sem isso provedores veem duplicatas.
+  Future<void> _publishOrphanCancel(String orderId, String? userPubkey) async {
+    try {
+      final privateKey = _nostrService.privateKey;
+      if (privateKey == null) return;
+      await _nostrOrderService.updateOrderStatus(
+        privateKey: privateKey,
+        orderId: orderId,
+        newStatus: 'cancelled',
+        orderUserPubkey: userPubkey ?? _currentUserPubkey,
+      ).timeout(const Duration(seconds: 6));
+      broLog('[createOrder] cancel publicado para ordem orfa ' + orderId.substring(0, 8));
+    } catch (e) {
+      broLog('[createOrder] falha ao publicar cancel orfao ' + orderId.substring(0, 8) + ': ' + e.toString());
+    }
+  }
+
   /// CR�?TICO: Publicar ordem no Nostr SOMENTE AP�?�??S pagamento confirmado
   /// Este m�?©todo transforma a ordem de 'draft' para 'pending' e publica no Nostr
   /// para que os Bros possam v�?ª-la e aceitar
