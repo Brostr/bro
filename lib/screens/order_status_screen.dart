@@ -59,13 +59,6 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
   bool _isLoading = true;
   String? _error;
   DateTime? _expiresAt;
-
-  // v533: Flag para suprimir notificacoes no sync inicial (catch-up).
-  // So disparar notificacao para transicoes REAIS (em tempo real) enquanto
-  // a tela esta aberta. Sem isso, abrir a tela com status ja em
-  // awaiting_confirmation dispara "Comprovante Recebido!" imediatamente
-  // porque _currentStatus='pending' (init) != status sincronizado.
-  bool _hasCompletedInitialSync = false;
   
   // Dados da disputa para exibição no relatório
   String? _disputeReason;
@@ -176,7 +169,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
     if (newStatus == 'disputed') return true;
     const statusOrder = [
       'draft', 'pending', 'payment_received', 'accepted', 
-      'processing', 'awaiting_confirmation', 'completed', 'liquidated',
+      'processing', 'awaiting_confirmation', 'completing', 'completed', 'liquidated',
     ];
     final currentIndex = statusOrder.indexOf(currentStatus);
     final newIndex = statusOrder.indexOf(newStatus);
@@ -547,19 +540,22 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       }
       
       if (status != _currentStatus) {
-        // v533: Nao disparar notificacao no sync inicial (catch-up).
-        // Se a tela acabou de abrir e o status ja estava em
-        // awaiting_confirmation/completed, o usuario nao precisa de
-        // notificacao — ele abriu a tela justamente para ver isso.
-        // So notificar em transicoes reais (em tempo real).
-        if (_hasCompletedInitialSync) {
+        // v533: So disparar notificacao em transicoes para FRENTE no fluxo.
+        // Quando a usuaria toca Confirmar, _currentStatus vira 'completing'
+        // (estado transitorio local) e o sync seguinte traz 'awaiting_confirmation'
+        // do relay — isso NAO eh uma transicao real, eh o sync reconciliando.
+        // Sem esse check, 'completing' -> 'awaiting_confirmation' dispara
+        // "Comprovante Recebido!" no momento errado (quando ela confirma).
+        final isForward = _isStatusMoreRecent(status, _currentStatus);
+        if (isForward) {
           _handleStatusChange(status);
         } else {
-          broLog('[ORDER] Sync inicial: $_currentStatus -> $status (sem notificacao)');
+          broLog('[ORDER] Transicao para tras ignorada: $_currentStatus -> $status (sem notificacao)');
         }
         if (!mounted) return;
         setState(() {
-          _currentStatus = status;
+          // So atualizar _currentStatus se for forward, senao manter o local ('completing')
+          if (isForward) _currentStatus = status;
         });
 
         // Iniciar countdown timer quando chega em awaiting_confirmation
@@ -589,12 +585,6 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       if (_currentStatus == 'awaiting_confirmation' && _expiresAt != null && _orderService.isOrderExpired(_expiresAt!)) {
         timer.cancel();
         _showExpiredDialog();
-      }
-
-      // v533: Marcar sync inicial como concluido ao final da primeira passada.
-      // A partir daqui, transicoes detectadas sao em tempo real e devem notificar.
-      if (!_hasCompletedInitialSync) {
-        _hasCompletedInitialSync = true;
       }
       
     });
