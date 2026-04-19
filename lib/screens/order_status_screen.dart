@@ -59,6 +59,13 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
   bool _isLoading = true;
   String? _error;
   DateTime? _expiresAt;
+
+  // v533: Flag para suprimir notificacoes no sync inicial (catch-up).
+  // So disparar notificacao para transicoes REAIS (em tempo real) enquanto
+  // a tela esta aberta. Sem isso, abrir a tela com status ja em
+  // awaiting_confirmation dispara "Comprovante Recebido!" imediatamente
+  // porque _currentStatus='pending' (init) != status sincronizado.
+  bool _hasCompletedInitialSync = false;
   
   // Dados da disputa para exibição no relatório
   String? _disputeReason;
@@ -540,8 +547,16 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       }
       
       if (status != _currentStatus) {
-        // Notificar sobre mudanca de status
-        _handleStatusChange(status);
+        // v533: Nao disparar notificacao no sync inicial (catch-up).
+        // Se a tela acabou de abrir e o status ja estava em
+        // awaiting_confirmation/completed, o usuario nao precisa de
+        // notificacao — ele abriu a tela justamente para ver isso.
+        // So notificar em transicoes reais (em tempo real).
+        if (_hasCompletedInitialSync) {
+          _handleStatusChange(status);
+        } else {
+          broLog('[ORDER] Sync inicial: $_currentStatus -> $status (sem notificacao)');
+        }
         if (!mounted) return;
         setState(() {
           _currentStatus = status;
@@ -574,6 +589,12 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       if (_currentStatus == 'awaiting_confirmation' && _expiresAt != null && _orderService.isOrderExpired(_expiresAt!)) {
         timer.cancel();
         _showExpiredDialog();
+      }
+
+      // v533: Marcar sync inicial como concluido ao final da primeira passada.
+      // A partir daqui, transicoes detectadas sao em tempo real e devem notificar.
+      if (!_hasCompletedInitialSync) {
+        _hasCompletedInitialSync = true;
       }
       
     });
