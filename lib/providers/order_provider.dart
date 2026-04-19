@@ -1074,32 +1074,26 @@ class OrderProvider with ChangeNotifier {
         // entao quando catch roda, o loop esta suspenso em algum await.
         // Ao retomar, verifica cancelled e para.)
         cancelled = true;
-        // v529: Se a ordem CHEGOU a ser publicada em algum relay antes do timeout,
-        // publicar cancel para impedir que provedores vejam ordem órfã.
-        // Ver: /memories/repo/relay-sync-bug.md — ordens órfãs causam duplicatas.
-        final idx = _orders.indexWhere((o) => o.id == orderId);
-        final wasPublished = idx != -1 && _orders[idx].eventId != null;
+        // v530: SEMPRE publicar cancel best-effort em qualquer falha.
+        // ANTES (v529) so publicava cancel se eventId estivesse setado, mas
+        // o timeout mata _publishOrderToNostr ANTES dele setar eventId mesmo
+        // se 1 relay ja aceitou o evento (Future.wait espera todos). Resultado:
+        // ordem orfa no relay, provedor ve duplicata. Cancel e idempotente
+        // e filtrado por fetchPendingOrders, entao nao ha custo em publicar a toa.
         _orders.removeWhere((o) => o.id == orderId);
         await _saveOrders();
-        if (wasPublished) {
-          unawaited(_publishOrphanCancel(orderId, order.userPubkey));
-        }
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} timeout/erro (published=$wasPublished): $e');
+        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
+        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} timeout/erro: $e');
         _error = 'Falha ao publicar ordem nos relays Nostr';
         return null;
       }
       
       if (!published) {
-        // v529: mesmo caso — _publishOrderToNostr pode ter conseguido em 1 relay
-        // mas não setou eventId (race). Melhor prevenir com cancel best-effort.
-        final idx = _orders.indexWhere((o) => o.id == orderId);
-        final wasPublished = idx != -1 && _orders[idx].eventId != null;
+        // v530: SEMPRE publicar cancel best-effort em qualquer falha (ver comentario acima).
         _orders.removeWhere((o) => o.id == orderId);
         await _saveOrders();
-        if (wasPublished) {
-          unawaited(_publishOrphanCancel(orderId, order.userPubkey));
-        }
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} falhou apos 3 tentativas (published=$wasPublished)');
+        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
+        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} falhou apos 3 tentativas');
         _error = 'Falha ao publicar ordem nos relays Nostr';
         return null;
       }
