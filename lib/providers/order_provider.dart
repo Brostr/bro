@@ -2175,6 +2175,28 @@ class OrderProvider with ChangeNotifier {
       final providerPubkey = _nostrService.publicKey;
       broLog('ðŸ�?�µ [acceptOrderAsProvider] Publicando aceita�?§�?£o no Nostr (providerPubkey=${providerPubkey?.substring(0, 8)}...)');
 
+      // v531: RACE CHECK — antes de publicar, verificar se outro provedor já aceitou.
+      // Sem isso, 2 provedores podem aceitar simultaneamente, ambos pagarem,
+      // e só um ser reconhecido (o evento 30079 mais recente "vence" nos relays).
+      // Kind 30079 é replaceable por #d=${orderId}_accept, então o último
+      // provedor a publicar sobrescreve o primeiro, fazendo a ordem "sumir"
+      // do dashboard do primeiro após sync.
+      try {
+        final existingProvider = await _nostrOrderService
+            .fetchOrderProviderPubkey(orderId)
+            .timeout(const Duration(seconds: 6), onTimeout: () => null);
+        if (existingProvider != null && existingProvider != providerPubkey) {
+          _error = 'Ordem já foi aceita por outro bro';
+          broLog('🚫 [acceptOrderAsProvider] RACE: ordem já aceita por ${existingProvider.substring(0, 8)}');
+          _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
+          _isLoading = false;
+          _immediateNotify();
+          return false;
+        }
+      } catch (e) {
+        broLog('⚠️ [acceptOrderAsProvider] race check falhou (seguindo mesmo assim): $e');
+      }
+
       // Publicar aceita�?§�?£o no Nostr
       final success = await _nostrOrderService.acceptOrderOnNostr(
         order: order,
@@ -2188,6 +2210,33 @@ class OrderProvider with ChangeNotifier {
         _isLoading = false;
         _immediateNotify();
         return false;
+      }
+
+      // v531: VERIFICAÇÃO PÓS-PUBLICAÇÃO. Aguardar 1.5s e checar de novo se
+      // o accept winning (mais recente por created_at) é o nosso. Se outro
+      // provedor publicou logo antes, o relay vai retornar o accept dele
+      // (kind 30079 é replaceable — só 1 sobrevive por #d tag).
+      await Future.delayed(const Duration(milliseconds: 1500));
+      try {
+        final winner = await _nostrOrderService
+            .fetchOrderProviderPubkey(orderId)
+            .timeout(const Duration(seconds: 6), onTimeout: () => providerPubkey);
+        if (winner != null && winner != providerPubkey) {
+          _error = 'Outro bro aceitou primeiro';
+          broLog('🚫 [acceptOrderAsProvider] PERDEU RACE: winner=${winner.substring(0, 8)} eu=${providerPubkey?.substring(0, 8)}');
+          _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
+          // Remover qualquer estado "accepted" que já tenhamos inserido local
+          final idx = _orders.indexWhere((o) => o.id == orderId);
+          if (idx != -1 && _orders[idx].providerId == providerPubkey) {
+            _orders.removeAt(idx);
+            await _saveOnlyUserOrders();
+          }
+          _isLoading = false;
+          _immediateNotify();
+          return false;
+        }
+      } catch (e) {
+        broLog('⚠️ [acceptOrderAsProvider] post-check falhou: $e');
       }
 
       // CORREÇÃO v1.0.129+223: Remover da lista de disponíveis IMEDIATAMENTE
