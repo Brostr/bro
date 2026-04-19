@@ -208,6 +208,10 @@ async function sendPush(targetPubkey, data, notification = null) {
         defaultSound: true,
       };
       // iOS: explicit alert payload with push-type: alert
+      // v534: NAO incluir content-available: 1 aqui. content-available eh para
+      // silent pushes (BRIX) e requer Background Modes entitlement. Com alert+content-available,
+      // iOS pode silenciosamente descartar o push se o entitlement nao estiver exatamente
+      // configurado. Para alert visivel, so precisamos de alert+sound+push-type=alert.
       message.apns.headers['apns-push-type'] = 'alert';
       message.apns.payload.aps = {
         alert: {
@@ -215,7 +219,6 @@ async function sendPush(targetPubkey, data, notification = null) {
           body: notification.body || '',
         },
         sound: 'default',
-        'content-available': 1,
       };
     }
 
