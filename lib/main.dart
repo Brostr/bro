@@ -310,6 +310,22 @@ void main() async {
         broLog('[FCM] Order update push — triggering sync');
         // Sync will be triggered when OrderProvider is available
         OrderRealtimeService().onOrderEvent?.call();
+
+        // v545: Android nao exibe automaticamente o campo 'notification' do FCM
+        // quando o app esta em foreground. Mostra local notification aqui (o
+        // dedup em NotificationService via bro_notified_transitions impede que
+        // seja exibida duas vezes para a mesma ordem quando o sistema ja
+        // mostrou em background).
+        final notif = message.notification;
+        if (notif != null && (notif.title?.isNotEmpty ?? false)) {
+          final subtype = message.data['subtype']?.toString() ?? '';
+          final orderId = message.data['order_id']?.toString() ?? '';
+          NotificationService().showGeneric(
+            title: notif.title!,
+            body: notif.body ?? '',
+            dedupKey: orderId.isNotEmpty ? '$subtype:$orderId' : null,
+          );
+        }
       }
     });
 
