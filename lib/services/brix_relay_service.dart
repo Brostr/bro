@@ -147,7 +147,11 @@ class BrixRelayService {
     _fcmRegistered = false; // Reset on start so we always try to register
     _backendFcmRegistered = false;
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
+    // v535: intervalo de 5s (antes 1.5s). 1.5s era excessivo e causava
+    // lentidao na UI por fazer 2 chamadas HTTP a cada polling (invoice requests
+    // + pending payments). FCM push faz triggerPoll() imediato quando chega
+    // pagamento, entao 5s de fallback eh suficiente.
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
     _poll(); // immediate first check
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service started');
@@ -160,7 +164,7 @@ class BrixRelayService {
     _running = true;
     _fcmRegistered = false; // Force re-registration after resume (token may have rotated)
     _backendFcmRegistered = false;
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
     _poll();
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service restarted (resume)');

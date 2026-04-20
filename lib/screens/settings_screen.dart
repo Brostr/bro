@@ -12,6 +12,7 @@ import '../services/version_check_service.dart';
 import '../providers/breez_provider.dart';
 import '../l10n/app_localizations.dart';
 import '../providers/locale_provider.dart';
+import 'push_diag_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
@@ -1241,6 +1242,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 ),
                               );
                             }
+                          },
+                        ),
+                        Divider(height: 1, color: Colors.white12),
+                        ListTile(
+                          leading: const Icon(Icons.notifications_active, color: Colors.orange),
+                          title: const Text('Diagnóstico de Push', style: TextStyle(color: Colors.white)),
+                          subtitle: const Text('Verificar notificações', style: TextStyle(color: Colors.white54)),
+                          trailing: const Icon(Icons.chevron_right, color: Colors.white54),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 20,
+                            vertical: 10,
+                          ),
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(builder: (_) => const PushDiagScreen()),
+                            );
                           },
                         ),
                         Divider(height: 1, color: Colors.white12),
