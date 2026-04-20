@@ -58,6 +58,11 @@ class NostrWatchtowerService {
     this._pushRateMap = new Map(); // pubkey → [timestamps]
     this._PUSH_RATE_WINDOW = 5 * 60 * 1000; // 5 minutes
     this._PUSH_RATE_MAX = 10; // max pushes per window per target
+    // v540: Dedup persistente por pubkey+orderId+status com TTL 24h.
+    // Protege contra flood quando o app estava offline e backend reinicia:
+    // evita reenviar para mesma combo ja entregue.
+    this._deliveredPushes = new Map(); // key → timestamp
+    this._DELIVERED_TTL = 24 * 60 * 60 * 1000; // 24h
   }
 
   start() {
@@ -278,12 +283,26 @@ class NostrWatchtowerService {
             this._orderUsers.set(orderId, userPubkey);
           }
 
+          // v523: FIX — in Bro's flow, the PROVIDER pays the bill and uploads proof,
+          // then the USER verifies proof and releases escrow. So `awaiting_confirmation`
+          // (= proof uploaded by provider) MUST notify the USER, not the provider.
+          // The old mapping caused background pushes to never reach the user when
+          // proof arrived — the screen-level local notification only fired if the
+          // app was open and polling. This bug is why "comprovante recebido" only
+          // appeared AFTER the user manually released funds.
+          //
+          // v528: FIX — `completed` is published by the USER (when releasing escrow).
+          // It must notify the PROVIDER so they know the payment was released.
+          // Previous mapping ('user') caused the self-push guard to block it and
+          // the provider silently never got notified via watchtower; only the
+          // direct notifyUser() call worked, and that failed too on iOS with the
+          // stale backend URL bug. Routing change restores redundancy.
           const STATUS_NOTIFY = {
             'accepted': 'user',              // provider accepted → tell user
-            'payment_submitted': 'provider', // user submitted payment → tell provider to verify
-            'awaiting_confirmation': 'provider', // payment proof uploaded → provider should verify
-            'completed': 'user',             // provider confirmed → tell user
-            'liquidated': 'user',            // auto-liquidation → tell user
+            'payment_submitted': 'provider', // user paid Spark invoice → tell provider to execute bill
+            'awaiting_confirmation': 'user', // provider uploaded proof → tell user to verify & release
+            'completed': 'provider',         // user released escrow → tell provider
+            'liquidated': 'user',            // auto-liquidation → tell user (refund)
             'cancelled': 'other',            // tell the party that didn't cancel
             'disputed': 'other',             // tell the party that didn't dispute
           };
@@ -311,11 +330,17 @@ class NostrWatchtowerService {
         }
 
         case 'bro_complete': {
-          // Provider completed — notify the order creator
-          // v512: Fallback chain: content.userPubkey → content.recipientPubkey → cached orderUsers
+          // v528: Provider uploaded proof — semantically this is "awaiting_confirmation"
+          // (provider finished their part, user now needs to verify & release).
+          // Previously this sent label='completed', which:
+          //   (a) Showed WRONG message ('Ordem concluída' instead of 'Comprovante recebido')
+          //   (b) Set dedup key `orderId:completed` that LATER blocked the real
+          //       completed push when the user released escrow.
+          // Now uses 'awaiting_confirmation' to match the kind 30080 status semantics
+          // and avoid colliding with the user's later completion event.
           const userPubkeyC = content.userPubkey || content.recipientPubkey || this._orderUsers.get(orderId);
           if (isValidPubkey(userPubkeyC) && userPubkeyC !== senderPubkey) {
-            await this._sendOrderPush(userPubkeyC, senderPubkey, 'completed', orderId, shortId);
+            await this._sendOrderPush(userPubkeyC, senderPubkey, 'awaiting_confirmation', orderId, shortId);
           } else {
             console.log(`⚠️ [Watchtower] Order ${shortId} completed but no userPubkey found (content: ${content.userPubkey || 'empty'}, recipient: ${content.recipientPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
@@ -337,6 +362,9 @@ class NostrWatchtowerService {
    * Both parties publish the same status for sync; only the first event triggers a push.
    */
   async _sendOrderPush(targetPubkey, senderPubkey, status, orderId, shortId, routing) {
+    // v523: Never push back to the event's own publisher.
+    if (targetPubkey === senderPubkey) return false;
+
     // v512: Dedup by orderId+status ONLY (no targetPubkey).
     // Both parties publish the same status for sync — only ONE push per status per order.
     // First event to arrive wins; echoes from the other party are suppressed.
@@ -433,8 +461,17 @@ class NostrWatchtowerService {
    * Wrapper around pushService.sendPush with stats tracking and rate limiting
    */
   async _sendPush(targetPubkey, data, notification) {
-    // SECURITY: Per-pubkey rate limiting to prevent push notification spam
+    // v540: Dedup persistente 24h por pubkey+orderId+subtype.
+    // Protege contra flood quando backend reinicia ou Nostr republica eventos.
     const now = Date.now();
+    const dedupKey = `${targetPubkey}:${data.order_id || 'no-order'}:${data.subtype || data.type}`;
+    const lastSent = this._deliveredPushes.get(dedupKey);
+    if (lastSent && (now - lastSent) < this._DELIVERED_TTL) {
+      // Ja enviado nas ultimas 24h — skip
+      return false;
+    }
+
+    // SECURITY: Per-pubkey rate limiting to prevent push notification spam
     const history = this._pushRateMap.get(targetPubkey) || [];
     const recent = history.filter(t => now - t < this._PUSH_RATE_WINDOW);
     if (recent.length >= this._PUSH_RATE_MAX) {
@@ -444,12 +481,16 @@ class NostrWatchtowerService {
     recent.push(now);
     this._pushRateMap.set(targetPubkey, recent);
 
-    // Periodic cleanup of rate map (every 1000 pushes)
+    // Periodic cleanup of rate map + delivered pushes (every 1000 pushes)
     if (this._stats.pushesSent % 1000 === 0 && this._pushRateMap.size > 100) {
       for (const [pk, times] of this._pushRateMap) {
         const valid = times.filter(t => now - t < this._PUSH_RATE_WINDOW);
         if (valid.length === 0) this._pushRateMap.delete(pk);
         else this._pushRateMap.set(pk, valid);
+      }
+      // v540: cleanup delivered pushes older than TTL
+      for (const [k, ts] of this._deliveredPushes) {
+        if (now - ts > this._DELIVERED_TTL) this._deliveredPushes.delete(k);
       }
     }
 
@@ -457,6 +498,7 @@ class NostrWatchtowerService {
       const ok = await pushService.sendPush(targetPubkey, data, notification);
       if (ok) {
         this._stats.pushesSent++;
+        this._deliveredPushes.set(dedupKey, now);
       } else {
         this._stats.pushesFailed++;
       }

@@ -9,7 +9,6 @@ import 'package:bip39/bip39.dart' as bip39;
 import 'package:bro_app/services/log_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/breez_config.dart';
-import '../extensions/breez_extensions.dart';
 import '../services/storage_service.dart';
 import '../services/brix_relay_service.dart';
 
@@ -341,7 +340,7 @@ class BreezProvider with ChangeNotifier {
       // Extrair paymentHash do pagamento para identificação precisa
       String? paymentHash;
       if (payment.details is spark.PaymentDetails_Lightning) {
-        paymentHash = (payment.details as spark.PaymentDetails_Lightning).paymentHash;
+        paymentHash = (payment.details as spark.PaymentDetails_Lightning).htlcDetails.paymentHash;
         broLog('🔑 PaymentHash (Lightning): $paymentHash');
       } else if (payment.details is spark.PaymentDetails_Spark) {
         final sparkDetails = payment.details as spark.PaymentDetails_Spark;
@@ -437,7 +436,7 @@ class BreezProvider with ChangeNotifier {
             request: spark.ClaimDepositRequest(
               txid: deposit.txid,
               vout: deposit.vout,
-              maxFee: spark.Fee.fixed(amount: feeLimit),
+              maxFee: spark.MaxFee.fixed(amount: feeLimit),
             ),
           );
           
@@ -701,7 +700,7 @@ class BreezProvider with ChangeNotifier {
       // Find payment by hash from lightning details
       final payment = payments.firstWhere(
         (p) => p.details is spark.PaymentDetails_Lightning &&
-            (p.details as spark.PaymentDetails_Lightning).paymentHash == paymentHash,
+            (p.details as spark.PaymentDetails_Lightning).htlcDetails.paymentHash == paymentHash,
         orElse: () => throw Exception('Payment not found'),
       );
 
@@ -743,7 +742,7 @@ class BreezProvider with ChangeNotifier {
         
         if (p.details is spark.PaymentDetails_Lightning) {
           final details = p.details as spark.PaymentDetails_Lightning;
-          paymentHash = details.paymentHash;
+          paymentHash = details.htlcDetails.paymentHash;
         }
         
         payments.add({
@@ -782,7 +781,7 @@ class BreezProvider with ChangeNotifier {
       final walletHashes = <String>{};
       for (var p in resp.payments) {
         if (p.details is spark.PaymentDetails_Lightning) {
-          final hash = (p.details as spark.PaymentDetails_Lightning).paymentHash;
+          final hash = (p.details as spark.PaymentDetails_Lightning).htlcDetails.paymentHash;
           if (p.status == spark.PaymentStatus.completed) {
             walletHashes.add(hash);
           }
@@ -808,36 +807,51 @@ class BreezProvider with ChangeNotifier {
     }
   }
   
-  /// Wait for payment to be received (blocking call with timeout)
+  /// Wait for payment to be received (polling fallback).
+  /// The Spark SDK no longer exposes waitForPayment; callers should prefer
+  /// the event listener (SdkEvent_PaymentSucceeded). This method polls
+  /// listPayments every 2s as a compatibility fallback.
   Future<Map<String, dynamic>> waitForPayment({
     required String paymentHash,
     int timeoutSeconds = 300, // 5 minutos
   }) async {
     if (!_isInitialized || _sdk == null) {
-      return {'paid': false, 'error': 'SDK n�o inicializado'};
+      return {'paid': false, 'error': 'SDK não inicializado'};
     }
 
+    broLog('⏳ Aguardando pagamento $paymentHash via polling...');
+    final deadline = DateTime.now().add(Duration(seconds: timeoutSeconds));
     try {
-      broLog('? Aguardando pagamento $paymentHash...');
-      
-      // Use WaitForPaymentIdentifier.paymentRequest with invoice/payment hash
-      final resp = await _sdk!.waitForPayment(
-        request: spark.WaitForPaymentRequest(
-          identifier: spark.WaitForPaymentIdentifier.paymentRequest(paymentHash),
-        ),
-      );
-
-      final isPaid = resp.payment.status == spark.PaymentStatus.completed;
-      broLog('? Pagamento recebido! Status: ${resp.payment.status}');
-
-      return {
-        'paid': isPaid,
-        'status': resp.payment.status.toString(),
-        'amountSats': resp.payment.amount.toString(),
-        'payment': resp.payment,
-      };
+      while (DateTime.now().isBefore(deadline)) {
+        try {
+          final resp = await _sdk!.listPayments(
+            request: spark.ListPaymentsRequest(limit: 100),
+          );
+          for (final p in resp.payments) {
+            if (p.details is spark.PaymentDetails_Lightning) {
+              final hash = (p.details as spark.PaymentDetails_Lightning)
+                  .htlcDetails
+                  .paymentHash;
+              if (hash == paymentHash &&
+                  p.status == spark.PaymentStatus.completed) {
+                broLog('✅ Pagamento recebido! Status: ${p.status}');
+                return {
+                  'paid': true,
+                  'status': p.status.toString(),
+                  'amountSats': p.amount.toString(),
+                  'payment': p,
+                };
+              }
+            }
+          }
+        } catch (_) {
+          // ignore transient errors during polling
+        }
+        await Future.delayed(const Duration(seconds: 2));
+      }
+      return {'paid': false, 'error': 'timeout'};
     } catch (e) {
-      broLog('? Erro aguardando pagamento: $e');
+      broLog('❌ Erro aguardando pagamento: $e');
       return {'paid': false, 'error': e.toString()};
     }
   }
@@ -979,7 +993,7 @@ class BreezProvider with ChangeNotifier {
             request: spark.ClaimDepositRequest(
               txid: deposit.txid,
               vout: deposit.vout,
-              maxFee: spark.Fee.fixed(amount: feeLimit),
+              maxFee: spark.MaxFee.fixed(amount: feeLimit),
             ),
           );
           
@@ -1134,7 +1148,7 @@ class BreezProvider with ChangeNotifier {
 
       String? paymentHash;
       if (resp.payment.details is spark.PaymentDetails_Lightning) {
-        paymentHash = (resp.payment.details as spark.PaymentDetails_Lightning).paymentHash;
+        paymentHash = (resp.payment.details as spark.PaymentDetails_Lightning).htlcDetails.paymentHash;
       } else if (resp.payment.details is spark.PaymentDetails_Spark) {
         paymentHash = resp.payment.id;
       }
@@ -1188,7 +1202,19 @@ class BreezProvider with ChangeNotifier {
         // Tratar como "already paid" para que o fluxo de confirmação reconheça
         errMsg = 'Invoice already paid (AlreadyExists)';
       } else if (errMsg.contains('sparkError') || errMsg.contains('SdkError')) {
-        errMsg = 'Erro na rede Lightning. Verifique sua conexão e tente novamente.';
+        // v519: NÃO mascarar o erro — devolver uma string com detalhe para o usuário
+        // poder reportar o problema real. "Erro na rede Lightning" genérico escondia
+        // a causa (ex: route not found, no liquidity, peer offline, etc).
+        final orig = e.toString();
+        // Extrair parte relevante: procurar após "generic(" ou "field0:" ou similar
+        String snippet = orig;
+        final fieldMatch = RegExp(r'field0:\s*([^)]+)').firstMatch(orig);
+        if (fieldMatch != null) {
+          snippet = fieldMatch.group(1)!.trim();
+        } else if (orig.length > 200) {
+          snippet = orig.substring(0, 200);
+        }
+        errMsg = 'Falha Spark SDK: $snippet';
       }
       
       _setError(errMsg);
@@ -1260,7 +1286,7 @@ class BreezProvider with ChangeNotifier {
         if (p.details is spark.PaymentDetails_Lightning) {
           lightningCount++;
           final details = p.details as spark.PaymentDetails_Lightning;
-          broLog('      ⚡ Lightning: hash=${details.paymentHash.substring(0, 16)}... description=${details.description ?? "null"}');
+          broLog('      ⚡ Lightning: hash=${details.htlcDetails.paymentHash.substring(0, 16)}... description=${details.description ?? "null"}');
         } else if (p.details is spark.PaymentDetails_Spark) {
           sparkCount++;
           final details = p.details as spark.PaymentDetails_Spark;
@@ -1294,7 +1320,7 @@ class BreezProvider with ChangeNotifier {
         // Extrair detalhes específicos por tipo
         if (payment.details is spark.PaymentDetails_Lightning) {
           final details = payment.details as spark.PaymentDetails_Lightning;
-          paymentHash = details.paymentHash;
+          paymentHash = details.htlcDetails.paymentHash;
           description = details.description;
         } else if (payment.details is spark.PaymentDetails_Spark) {
           final details = payment.details as spark.PaymentDetails_Spark;

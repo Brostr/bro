@@ -6,7 +6,6 @@ import 'package:bro_app/services/log_utils.dart';
 import 'package:bip39/bip39.dart' as bip39;
 import '../config/breez_config.dart';
 import '../config.dart';
-import '../extensions/breez_extensions.dart';
 
 /// Carteira Master da Plataforma para Escrow e Split de Taxas
 /// 
@@ -228,7 +227,7 @@ class PlatformWalletService {
       for (final payment in resp.payments) {
         if (payment.details is spark.PaymentDetails_Lightning) {
           final details = payment.details as spark.PaymentDetails_Lightning;
-          if (details.paymentHash == paymentHash &&
+          if (details.htlcDetails.paymentHash == paymentHash &&
               payment.status == spark.PaymentStatus.completed) {
             return {
               'received': true,

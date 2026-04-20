@@ -512,7 +512,15 @@ class NostrOrderService {
           try {
             final content = event['parsedContent'] ?? jsonDecode(event['content']);
             final eventType = content['type'] as String?;
-            if (eventType == 'bro_dispute_resolution' || eventType == 'bro_admin_reimbursement') continue;
+            // v519: WHITELIST — only events that prove THIS pubkey is the real provider of the
+            // order should contribute. This blocks ghost orders from dispute resolutions,
+            // admin reimbursements, mediator messages, evidence, etc., which are authored by
+            // admin but don't mean admin is the provider.
+            const providerEventTypes = {'bro_accept', 'bro_complete'};
+            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+                (eventType == 'bro_order_update' &&
+                    (content['providerId'] as String?) == providerPubkey);
+            if (!isProviderEvidence) continue;
             final orderId = content['orderId'] as String?;
             if (orderId != null) orderIdsFromAccepts.add(orderId);
           } catch (_) {}
@@ -550,6 +558,78 @@ class NostrOrderService {
     }
 
     return orders;
+  }
+
+  /// v520: Return the Set of orderIds for which [providerPubkey] has a genuine
+  /// provider-evidence event on Nostr (bro_accept, bro_complete, or a
+  /// bro_order_update whose content.providerId matches).
+  /// Used to purge ghost provider orders from local cache when the same
+  /// device has also acted as admin/mediator for other orders.
+  Future<Set<String>> fetchAcceptedOrderIdsForProvider(String providerPubkey) async {
+    final acceptedIds = <String>{};
+    for (final relay in _relays.take(3)) {
+      try {
+        final events = await _fetchFromRelay(
+          relay,
+          kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
+          authors: [providerPubkey],
+          limit: 300,
+        ).catchError((_) => <Map<String, dynamic>>[]);
+        for (final event in events) {
+          try {
+            final content = event['parsedContent'] ?? jsonDecode(event['content']);
+            final eventType = content['type'] as String?;
+            const providerEventTypes = {'bro_accept', 'bro_complete'};
+            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+                (eventType == 'bro_order_update' &&
+                    (content['providerId'] as String?) == providerPubkey);
+            if (!isProviderEvidence) continue;
+            final orderId = content['orderId'] as String?;
+            if (orderId != null) acceptedIds.add(orderId);
+          } catch (_) {}
+        }
+        if (events.isNotEmpty) break;
+      } catch (_) {
+        // try next relay
+      }
+    }
+    return acceptedIds;
+  }
+
+  /// v541: Busca TODOS os provedores que aceitaram uma ordem (kind 30079).
+  /// Retorna lista de pubkeys dos provedores que publicaram bro_accept para
+  /// esta ordem, ordenados pelo created_at (primeiro = mais antigo).
+  /// Usado para detectar e bloquear double-accept ANTES de revelar o billCode.
+  Future<List<String>> fetchAllAcceptsForOrder(String orderId) async {
+    final accepts = <Map<String, dynamic>>[]; // {pubkey, created_at}
+    final seenPubkeys = <String>{};
+    for (final relay in _relays.take(3)) {
+      try {
+        final events = await _fetchFromRelay(
+          relay,
+          kinds: [kindBroAccept],
+          tags: {'#d': ['${orderId}_accept']},
+          limit: 20,
+        ).timeout(const Duration(seconds: 8), onTimeout: () => <Map<String, dynamic>>[]);
+        for (final event in events) {
+          try {
+            final content = event['parsedContent'] ?? jsonDecode(event['content']);
+            if (content['orderId'] != orderId) continue;
+            if (content['type'] != 'bro_accept') continue;
+            final pubkey = event['pubkey'] as String?;
+            final createdAt = event['created_at'] as int?;
+            if (pubkey == null || pubkey.isEmpty || createdAt == null) continue;
+            if (seenPubkeys.contains(pubkey)) continue;
+            seenPubkeys.add(pubkey);
+            accepts.add({'pubkey': pubkey, 'created_at': createdAt});
+          } catch (_) {}
+        }
+      } catch (_) {
+        // try next relay
+      }
+    }
+    accepts.sort((a, b) => (a['created_at'] as int).compareTo(b['created_at'] as int));
+    return accepts.map((e) => e['pubkey'] as String).toList();
   }
 
   /// Busca ordens aceitas por um provedor e retorna como List<Order>
@@ -1114,6 +1194,8 @@ class NostrOrderService {
   Future<Map<String, dynamic>?> fetchOrderCompleteEvent(String orderId) async {
     
     // PERFORMANCE: Buscar em todos os relays EM PARALELO
+    // v519: cada relay retorna (data, timestamp) para que possamos pegar o mais recente
+    // entre TODOS os relays, não apenas o primeiro que responder.
     final results = await Future.wait(
       _relays.take(3).map((relay) async {
         try {
@@ -1147,6 +1229,7 @@ class NostrOrderService {
                     'providerId': content['providerId'] as String?,
                     'providerInvoice': invoice,
                     'completedAt': content['completedAt'],
+                    '_ts': ts,
                   };
                 }
               }
@@ -1159,14 +1242,20 @@ class NostrOrderService {
       }),
     );
     
-    // Usar o resultado com invoice mais recente
+    // v519: Escolher entre todos os relays o evento com maior timestamp.
+    // O bug antigo (pick-first-non-null) fazia Carol pegar uma invoice antiga
+    // de um relay enquanto o invoice_refresh mais novo estava em outro relay.
     Map<String, dynamic>? best;
+    int bestTs = 0;
     for (final result in results) {
-      if (result != null) {
+      if (result == null) continue;
+      final ts = result['_ts'] as int? ?? 0;
+      if (ts >= bestTs) {
+        bestTs = ts;
         best = result;
-        break;
       }
     }
+    best?.remove('_ts');
     
     return best;
   }

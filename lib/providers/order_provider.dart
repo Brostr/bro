@@ -466,15 +466,93 @@ class OrderProvider with ChangeNotifier {
     if (_orders.length < originalCount) {
       await _saveOrders(); // Salvar lista limpa
     }
+
+    // v519: CLEANUP — Remove ghost provider orders from dispute-resolution bug.
+    // Runs BEFORE AND AFTER syncOrdersFromNostr so both cached and re-synced ghosts
+    // are removed. A REAL provider always has providerInvoice in metadata — without it,
+    // you can't have accepted any order.
+    _removeGhostProviderOrders(userPubkey);
     
     
     _isInitialized = true;
     _immediateNotify();
     
-    // Sincronizar do Nostr IMEDIATAMENTE (n�?£o em background)
+    // v540: Sync com timeout de 15s para nao travar login se relays estiverem lentos.
+    // Se o timeout disparar, a tela home abre com ordens do cache local e
+    // o sync continua em background (proxima refresh completa).
     try {
-      await syncOrdersFromNostr();
+      await syncOrdersFromNostr().timeout(
+        const Duration(seconds: 15),
+        onTimeout: () {
+          broLog('[OrderProvider] syncOrdersFromNostr timeout — continuing with cache');
+        },
+      );
+      _removeGhostProviderOrders(userPubkey);
+      await _removeGhostsAgainstNostr(userPubkey).timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {},
+      );
     } catch (e) {
+      broLog('[OrderProvider] sync error (continuing): $e');
+    }
+  }
+
+  /// v519: Remove ghost provider orders — providerId==me but no invoice/proof.
+  /// Runs both on local load and after Nostr sync to prevent re-addition.
+  void _removeGhostProviderOrders(String userPubkey) {
+    final before = _orders.length;
+    _orders = _orders.where((order) {
+      final isMeAsProvider = order.providerId == userPubkey;
+      final someoneElseIsCustomer = order.userPubkey != null &&
+          order.userPubkey!.isNotEmpty &&
+          order.userPubkey != userPubkey;
+      final hasProviderInvoice = (order.metadata?['providerInvoice'] as String?)?.isNotEmpty == true;
+      final hasProof = (order.metadata?['proofImage'] as String?)?.isNotEmpty == true ||
+          (order.metadata?['paymentProof'] as String?)?.isNotEmpty == true;
+      if (isMeAsProvider && someoneElseIsCustomer && !hasProviderInvoice && !hasProof) {
+        broLog('🧹 Ghost order removida (providerId=me sem invoice/proof, status ${order.status}): ${order.id.substring(0, 8)}');
+        return false;
+      }
+      return true;
+    }).toList();
+    if (_orders.length < before) {
+      _saveOrders();
+    }
+  }
+
+  /// v520: Authoritative ghost-removal against Nostr.
+  /// If the cache says I'm the provider for an order, but Nostr has no
+  /// bro_accept/bro_complete event from me for that order, it's a ghost
+  /// (e.g. stamped by a buggy sync when this device acted as admin/mediator).
+  /// Safe: if the Nostr fetch fails or returns empty, keep the cache as-is.
+  Future<void> _removeGhostsAgainstNostr(String userPubkey) async {
+    try {
+      final providerOrdersInCache = _orders
+          .where((o) => o.providerId == userPubkey && o.userPubkey != userPubkey)
+          .toList();
+      if (providerOrdersInCache.isEmpty) return;
+      final acceptedIds = await _nostrOrderService
+          .fetchAcceptedOrderIdsForProvider(userPubkey)
+          .timeout(const Duration(seconds: 10), onTimeout: () => <String>{});
+      if (acceptedIds.isEmpty) return; // can't prove anything, don't touch cache
+      final before = _orders.length;
+      _orders = _orders.where((order) {
+        final isMeAsProvider = order.providerId == userPubkey;
+        final someoneElseIsCustomer = order.userPubkey != null &&
+            order.userPubkey!.isNotEmpty &&
+            order.userPubkey != userPubkey;
+        if (isMeAsProvider && someoneElseIsCustomer && !acceptedIds.contains(order.id)) {
+          broLog('🧹 Ghost order removida via Nostr cross-check (sem bro_accept meu): ${order.id.substring(0, 8)}');
+          return false;
+        }
+        return true;
+      }).toList();
+      if (_orders.length < before) {
+        await _saveOrders();
+        _immediateNotify();
+      }
+    } catch (e) {
+      broLog('⚠️ _removeGhostsAgainstNostr error: $e');
     }
   }
   
@@ -1003,16 +1081,25 @@ class OrderProvider with ChangeNotifier {
         // entao quando catch roda, o loop esta suspenso em algum await.
         // Ao retomar, verifica cancelled e para.)
         cancelled = true;
+        // v530: SEMPRE publicar cancel best-effort em qualquer falha.
+        // ANTES (v529) so publicava cancel se eventId estivesse setado, mas
+        // o timeout mata _publishOrderToNostr ANTES dele setar eventId mesmo
+        // se 1 relay ja aceitou o evento (Future.wait espera todos). Resultado:
+        // ordem orfa no relay, provedor ve duplicata. Cancel e idempotente
+        // e filtrado por fetchPendingOrders, entao nao ha custo em publicar a toa.
         _orders.removeWhere((o) => o.id == orderId);
         await _saveOrders();
+        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
         broLog('[createOrder] Ordem ${orderId.substring(0, 8)} timeout/erro: $e');
         _error = 'Falha ao publicar ordem nos relays Nostr';
         return null;
       }
       
       if (!published) {
+        // v530: SEMPRE publicar cancel best-effort em qualquer falha (ver comentario acima).
         _orders.removeWhere((o) => o.id == orderId);
         await _saveOrders();
+        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
         broLog('[createOrder] Ordem ${orderId.substring(0, 8)} falhou apos 3 tentativas');
         _error = 'Falha ao publicar ordem nos relays Nostr';
         return null;
@@ -1032,7 +1119,25 @@ class OrderProvider with ChangeNotifier {
       _immediateNotify();
     }
   }
-  
+
+  /// v529: Publica cancel best-effort para ordem orfa (publicada em algum relay
+  /// mas cujo createOrder falhou/timed out). Sem isso provedores veem duplicatas.
+  Future<void> _publishOrphanCancel(String orderId, String? userPubkey) async {
+    try {
+      final privateKey = _nostrService.privateKey;
+      if (privateKey == null) return;
+      await _nostrOrderService.updateOrderStatus(
+        privateKey: privateKey,
+        orderId: orderId,
+        newStatus: 'cancelled',
+        orderUserPubkey: userPubkey ?? _currentUserPubkey,
+      ).timeout(const Duration(seconds: 6));
+      broLog('[createOrder] cancel publicado para ordem orfa ' + orderId.substring(0, 8));
+    } catch (e) {
+      broLog('[createOrder] falha ao publicar cancel orfao ' + orderId.substring(0, 8) + ': ' + e.toString());
+    }
+  }
+
   /// CR�?TICO: Publicar ordem no Nostr SOMENTE AP�?�??S pagamento confirmado
   /// Este m�?©todo transforma a ordem de 'draft' para 'pending' e publica no Nostr
   /// para que os Bros possam v�?ª-la e aceitar
@@ -1674,6 +1779,32 @@ class OrderProvider with ChangeNotifier {
 
     for (final order in candidates) {
       try {
+        // v541: ANTI-RACE DEFINITIVO. Antes de revelar o billCode para o
+        // provedor, varremos TODOS os relays buscando bro_accept events
+        // para esta ordem. Se houver mais de um, o vencedor e o primeiro
+        // (menor created_at). Se o providerId atual NAO for o vencedor,
+        // NAO revelamos o billCode — o segundo bro perde a corrida.
+        final allAccepts = await _nostrOrderService
+            .fetchAllAcceptsForOrder(order.id)
+            .timeout(const Duration(seconds: 10), onTimeout: () => <String>[]);
+        if (allAccepts.length > 1) {
+          final winner = allAccepts.first;
+          broLog('🏁 v541: ordem ${order.id.substring(0, 8)} tem ${allAccepts.length} accepts. Winner=${winner.substring(0, 8)}');
+          if (winner != order.providerId) {
+            // O providerId armazenado localmente perdeu a corrida.
+            // Atualizar para o vencedor. Proximo sync vai propagar para os relays.
+            broLog('⚠️ v541: providerId local (${order.providerId!.substring(0, 8)}) perdeu corrida. Corrigindo para winner.');
+            final idx = _orders.indexWhere((o) => o.id == order.id);
+            if (idx != -1) {
+              _orders[idx] = _orders[idx].copyWith(providerId: winner);
+              await _saveOnlyUserOrders();
+              _immediateNotify();
+            }
+            // Nao envia billCode para o provider perdedor. Pula para proxima ordem.
+            continue;
+          }
+        }
+
         final ok = await _nostrOrderService.publishEncryptedBillCode(
           privateKey: privateKey,
           orderId: order.id,
@@ -1691,14 +1822,9 @@ class OrderProvider with ChangeNotifier {
           }
           broLog('🔐 v438: billCode NIP-44 sent for ${order.id.substring(0, 8)}');
 
-          // Push notify the provider that billCode is ready
-          final pushOk = await _apiService.notifyUser(
-            targetPubkey: order.providerId!,
-            type: 'order_update',
-            subtype: 'billcode_encrypted',
-            orderId: order.id,
-          );
-          broLog('[PUSH] billcode_encrypted notify to ${order.providerId!.substring(0, 16)}: $pushOk');
+          // v541: Nao envia push 'billcode_encrypted' - era notificacao spam.
+          // O provedor vai ver o billcode quando abrir o app. Notificacoes
+          // uteis sao accepted, payment_received, completed, disputed.
         }
       } catch (e) {
         broLog('⚠️ v438: failed to send encrypted billCode for ${order.id.substring(0, 8)}: $e');
@@ -2077,6 +2203,28 @@ class OrderProvider with ChangeNotifier {
       final providerPubkey = _nostrService.publicKey;
       broLog('ðŸ�?�µ [acceptOrderAsProvider] Publicando aceita�?§�?£o no Nostr (providerPubkey=${providerPubkey?.substring(0, 8)}...)');
 
+      // v531: RACE CHECK — antes de publicar, verificar se outro provedor já aceitou.
+      // Sem isso, 2 provedores podem aceitar simultaneamente, ambos pagarem,
+      // e só um ser reconhecido (o evento 30079 mais recente "vence" nos relays).
+      // Kind 30079 é replaceable por #d=${orderId}_accept, então o último
+      // provedor a publicar sobrescreve o primeiro, fazendo a ordem "sumir"
+      // do dashboard do primeiro após sync.
+      try {
+        final existingProvider = await _nostrOrderService
+            .fetchOrderProviderPubkey(orderId)
+            .timeout(const Duration(seconds: 6), onTimeout: () => null);
+        if (existingProvider != null && existingProvider != providerPubkey) {
+          _error = 'Ordem já foi aceita por outro bro';
+          broLog('🚫 [acceptOrderAsProvider] RACE: ordem já aceita por ${existingProvider.substring(0, 8)}');
+          _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
+          _isLoading = false;
+          _immediateNotify();
+          return false;
+        }
+      } catch (e) {
+        broLog('⚠️ [acceptOrderAsProvider] race check falhou (seguindo mesmo assim): $e');
+      }
+
       // Publicar aceita�?§�?£o no Nostr
       final success = await _nostrOrderService.acceptOrderOnNostr(
         order: order,
@@ -2092,23 +2240,25 @@ class OrderProvider with ChangeNotifier {
         return false;
       }
 
+      // v541: Post-check removido. Ele chamava fetchOrderProviderPubkey que
+      // retornava o PRIMEIRO provedor encontrado nos relays — mas kind 30079
+      // com mesma #d mas pubkeys diferentes sao slots replaceable SEPARADOS
+      // (relay armazena AMBOS). Entao o post-check retornava qualquer um dos
+      // accepts, causando falsos positivos e revertendo aceitacoes validas.
+      // O pre-check (linha 2192) ja protege contra a maioria dos casos.
+      // Races genuinas sao resolvidas pela escolha do buyer (so um accept
+      // vai receber pagamento).
+
       // CORREÇÃO v1.0.129+223: Remover da lista de disponíveis IMEDIATAMENTE
       // Sem isso, a ordem ficava em _availableOrdersForProvider com status stale
       // e continuava aparecendo na aba "Disponíveis" mesmo após aceita/completada
       _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
       broLog('✅ [acceptOrderAsProvider] Removido de _availableOrdersForProvider');
 
-      // Push notify the buyer that their order was accepted
-      if (order.userPubkey != null && order.userPubkey!.isNotEmpty) {
-        final pushOk = await _apiService.notifyUser(
-          targetPubkey: order.userPubkey!,
-          type: 'order_update',
-          subtype: 'accepted',
-          orderId: orderId,
-        );
-        broLog('[PUSH] accepted notify to ${order.userPubkey!.substring(0, 16)}: $pushOk');
-      }
-      
+      // v541: Nao envia push manualmente. O backend watchtower detecta o
+      // evento bro_accept no Nostr e envia a notificacao automaticamente.
+      // Envio manual aqui causava notificacao em duplicidade.
+
       // Atualizar localmente
       final index = _orders.indexWhere((o) => o.id == orderId);
       if (index != -1) {
@@ -2210,6 +2360,9 @@ class OrderProvider with ChangeNotifier {
             'paymentProof': proof,
             'proofImage': proof,
             'proofSentAt': DateTime.now().toIso8601String(),
+            // v517: MUST set completedAt locally so _renewInvoicesForLiquidatedAsProvider
+            // can tell if the order is >30min old and needs a fresh invoice.
+            'completedAt': DateTime.now().toIso8601String(),
             if (e2eId != null && e2eId.isNotEmpty) 'e2eId': e2eId,
             if (providerInvoice != null) 'providerInvoice': providerInvoice,
           },
@@ -2222,16 +2375,9 @@ class OrderProvider with ChangeNotifier {
         
       }
 
-      // Push notify the buyer that payment proof was submitted
-      if (order.userPubkey != null && order.userPubkey!.isNotEmpty) {
-        final pushOk = await _apiService.notifyUser(
-          targetPubkey: order.userPubkey!,
-          type: 'order_update',
-          subtype: 'payment_received',
-          orderId: orderId,
-        );
-        broLog('[PUSH] payment_received notify to ${order.userPubkey!.substring(0, 16)}: $pushOk');
-      }
+      // v541: Nao envia push manualmente. Watchtower detecta o evento
+      // bro_payment_proof (kind 30080) no Nostr e envia 'Comprovante recebido!'
+      // automaticamente. Envio manual aqui causava notificacao em duplicidade.
 
       return true;
     } catch (e) {
@@ -2678,16 +2824,26 @@ class OrderProvider with ChangeNotifier {
         if (order.status != 'liquidated' && order.status != 'awaiting_confirmation') return false;
         final providerId = order.providerId ?? order.metadata?['providerId'] ?? order.metadata?['provider_id'] ?? '';
         if (providerId != _currentUserPubkey) return false;
-        if (order.metadata?['invoiceRefreshed'] == true) return false;
+        // v517: Allow re-refresh every 30min instead of 2h. If the first refreshed
+        // invoice also fails (buyer kept timing out), next sync will publish a new one.
+        final refreshedAtStr = order.metadata?['invoiceRefreshedAt']?.toString();
+        if (refreshedAtStr != null) {
+          try {
+            final refreshedAt = DateTime.parse(refreshedAtStr);
+            if (DateTime.now().difference(refreshedAt).inMinutes < 30) return false;
+          } catch (_) {}
+        }
         if (order.metadata?['providerPaymentReceived'] == true) return false;
         if (order.metadata?['autoPaymentCompleted'] == true) return false;
-        // For awaiting_confirmation, only refresh if completed >2h ago (invoice likely expired)
+        // v517: Refresh much faster (30min) and fall back to proofSentAt/createdAt
+        // when completedAt is missing (older local orders that predate v517 fix).
         if (order.status == 'awaiting_confirmation') {
-          final completedAt = order.metadata?['completedAt']?.toString();
-          if (completedAt == null) return false;
+          final completedAtStr = order.metadata?['completedAt']?.toString()
+              ?? order.metadata?['proofSentAt']?.toString()
+              ?? order.createdAt.toIso8601String();
           try {
-            final completedTime = DateTime.parse(completedAt);
-            if (DateTime.now().difference(completedTime).inHours < 2) return false;
+            final completedTime = DateTime.parse(completedAtStr);
+            if (DateTime.now().difference(completedTime).inMinutes < 30) return false;
           } catch (_) { return false; }
         }
         return true;
@@ -3701,6 +3857,13 @@ class OrderProvider with ChangeNotifier {
     } finally {
       _isSyncingUser = false;
       _syncUserStartedAt = null; // v259: clear stale tracker
+    }
+
+    // v521: authoritative ghost-order cleanup runs AFTER every sync, not only on login.
+    // Fire-and-forget so it doesn't block the UI.
+    if (_currentUserPubkey != null && _currentUserPubkey!.isNotEmpty) {
+      final me = _currentUserPubkey!;
+      unawaited(_removeGhostsAgainstNostr(me));
     }
   }
 

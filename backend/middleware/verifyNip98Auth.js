@@ -21,6 +21,7 @@ const TIMESTAMP_TOLERANCE = 30;
 const seenEventIds = new Map(); // eventId → expiresAt (timestamp ms)
 const REPLAY_WINDOW_MS = (TIMESTAMP_TOLERANCE + 5) * 1000; // slightly beyond tolerance
 const REPLAY_CLEANUP_INTERVAL = 60000; // cleanup every 60s
+const REPLAY_MAX_SIZE = 100000; // v523: hard cap to prevent memory growth under load
 
 // Periodic cleanup of expired event IDs
 setInterval(() => {
@@ -159,6 +160,16 @@ function verifyNip98Event(event, req) {
   // 4b. Replay protection — reject reused event IDs
   if (seenEventIds.has(event.id)) {
     return { valid: false, reason: 'Replay detected: event ID already used' };
+  }
+  // v523: Cap set size to prevent unbounded growth under burst load
+  if (seenEventIds.size >= REPLAY_MAX_SIZE) {
+    // Evict oldest 10% by insertion order (Map preserves it)
+    const evict = Math.floor(REPLAY_MAX_SIZE / 10);
+    let i = 0;
+    for (const key of seenEventIds.keys()) {
+      if (i++ >= evict) break;
+      seenEventIds.delete(key);
+    }
   }
   seenEventIds.set(event.id, Date.now() + REPLAY_WINDOW_MS);
   

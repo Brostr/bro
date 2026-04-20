@@ -10,6 +10,7 @@ import 'package:bro_app/services/brix_service.dart';
 import 'package:bro_app/services/api_service.dart';
 import 'package:bro_app/services/storage_service.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/push_diag.dart';
 import 'package:bro_app/services/lnaddress_service.dart';
 import 'package:bro_app/providers/breez_provider.dart';
 import 'package:bro_app/config.dart';
@@ -45,13 +46,25 @@ class BrixRelayService {
     if (_fcmRegistered && _backendFcmRegistered) return;
     try {
       _pubkey ??= await _storage.getNostrPublicKey();
-      if (_pubkey == null || _pubkey!.isEmpty) return;
+      if (_pubkey == null || _pubkey!.isEmpty) {
+        PushDiag.log('relay: no pubkey');
+        return;
+      }
       // iOS: APNS token must be ready before FCM can provide a token
       if (defaultTargetPlatform == TargetPlatform.iOS) {
-        final apns = await FirebaseMessaging.instance.getAPNSToken();
+        String? apns = await FirebaseMessaging.instance.getAPNSToken();
+        // v524: aggressive APNS wait within a single attempt (up to 8s).
+        // On iOS, APNS can take 10-30s on cold starts and the old code bailed immediately.
+        if (apns == null) {
+          for (int i = 0; i < 4 && apns == null; i++) {
+            await Future.delayed(const Duration(seconds: 2));
+            apns = await FirebaseMessaging.instance.getAPNSToken();
+          }
+        }
         if (apns == null) {
           if (_fcmRetryCount % 5 == 0) {
-            broLog('[BRIX-RELAY] iOS: APNS not ready, cannot get FCM token (retry $_fcmRetryCount)');
+            broLog('[BRIX-RELAY] iOS: APNS still not ready after 8s (retry $_fcmRetryCount)');
+            PushDiag.log('relay: APNS null retry=$_fcmRetryCount');
           }
           _fcmRetryCount++;
           return;
@@ -59,7 +72,9 @@ class BrixRelayService {
       }
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null) {
-        broLog('[BRIX-RELAY] FCM token is null — cannot register');
+        _fcmRetryCount++;
+        broLog('[BRIX-RELAY] FCM token is null (retry $_fcmRetryCount) — cannot register');
+        PushDiag.log('relay: FCM token NULL retry=$_fcmRetryCount');
         return;
       }
 
@@ -90,16 +105,34 @@ class BrixRelayService {
           if (ok) {
             _backendFcmRegistered = true;
             broLog('[BRIX-RELAY] FCM token registered successfully (backend)');
+            PushDiag.log('relay: backend register OK');
           } else {
             broLog('[BRIX-RELAY] Backend FCM registration returned false');
+            PushDiag.log('relay: backend register FALSE');
           }
         } catch (e) {
           broLog('[BRIX-RELAY] Backend FCM registration error: $e');
+          PushDiag.log('relay: backend register ERR ${e.toString().substring(0, e.toString().length > 60 ? 60 : e.toString().length)}');
         }
       }
     } catch (e) {
       _fcmRetryCount++;
       broLog('[BRIX-RELAY] FCM registration error (attempt $_fcmRetryCount): $e');
+    }
+  }
+
+  /// v524: Ask the backend whether our token is actually stored.
+  /// If not, flip the flag so the next poll re-registers.
+  Future<void> _verifyBackendRegistration() async {
+    try {
+      final registered = await ApiService().diagnosePushToken();
+      PushDiag.log('relay: diagnose=${registered ?? "null"}');
+      if (registered == false) {
+        broLog('[BRIX-RELAY] Backend says NOT registered — forcing re-registration');
+        _backendFcmRegistered = false;
+      }
+    } catch (e) {
+      PushDiag.log('relay: diagnose ERR $e');
     }
   }
 
@@ -114,7 +147,11 @@ class BrixRelayService {
     _fcmRegistered = false; // Reset on start so we always try to register
     _backendFcmRegistered = false;
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
+    // v535: intervalo de 5s (antes 1.5s). 1.5s era excessivo e causava
+    // lentidao na UI por fazer 2 chamadas HTTP a cada polling (invoice requests
+    // + pending payments). FCM push faz triggerPoll() imediato quando chega
+    // pagamento, entao 5s de fallback eh suficiente.
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
     _poll(); // immediate first check
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service started');
@@ -127,7 +164,7 @@ class BrixRelayService {
     _running = true;
     _fcmRegistered = false; // Force re-registration after resume (token may have rotated)
     _backendFcmRegistered = false;
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
     _poll();
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service restarted (resume)');
@@ -184,6 +221,13 @@ class BrixRelayService {
     // Retry FCM registration every ~30s (20 polls) until successful
     if ((!_fcmRegistered || !_backendFcmRegistered) && _pollCount % 20 == 1) {
       _ensureFcmRegistered();
+    }
+
+    // v524: Every ~2min, verify the backend ACTUALLY has our token.
+    // Protects against silent deregistration (e.g. FCM rotates token without
+    // firing onTokenRefresh, or server evicts stale tokens).
+    if (_backendFcmRegistered && _pollCount % 80 == 1) {
+      unawaited(_verifyBackendRegistration());
     }
 
     try {

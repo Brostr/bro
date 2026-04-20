@@ -172,10 +172,16 @@ Future<void> _checkNostrForNewEvents() async {
     }
   }
   
-  // 6. Filtrar eventos ja vistos
+  // 6. Filtrar eventos ja vistos + eventos publicados pelo proprio usuario.
+  // v529: FIX self-notify. O query #p:userPubkey tambem casa com eventos que
+  // Carol publica tagueando ela mesma (updateOrderStatus inclui ['p', me]).
+  // Antes, kind 30080 'completed' publicado pela propria Carol disparava
+  // "Comprovante Recebido!" localmente no celular dela.
   final unseenEvents = <Map<String, dynamic>>[];
   for (final event in newEvents) {
     final eventId = event['id']?.toString() ?? '';
+    final authorPubkey = event['pubkey']?.toString() ?? '';
+    if (authorPubkey == userPubkey) continue; // v529: pular eventos proprios
     if (eventId.isNotEmpty && !seenIds.contains(eventId)) {
       unseenEvents.add(event);
       seenIds.add(eventId);
@@ -359,14 +365,42 @@ Future<void> _showNotificationForEvent(Map<String, dynamic> event, String userPu
       importance = Importance.max;
       break;
       
-    case _kindBroPaymentProof: // 30080 - Comprovante de pagamento
-      final amount = content['amount']?.toString() ?? '';
-      title = 'Comprovante Recebido!';
-      body = amount.isNotEmpty 
-        ? 'Comprovante de R\$ $amount recebido. Verifique e confirme.'
-        : 'Comprovante recebido para ordem $shortOrderId. Verifique e confirme.';
-      payload = 'payment_received:$orderId';
-      importance = Importance.max;
+    case _kindBroPaymentProof: // 30080 - bro-update (todos os status transitions)
+      // v529: kind 30080 eh generico para TODAS as mudancas de status
+      // (accepted/payment_submitted/awaiting_confirmation/completed/cancelled).
+      // Antes disparava "Comprovante Recebido!" para todos, incluindo 'completed'
+      // publicado pela propria Carol ou pelo provedor — mensagem errada.
+      final status = content['status']?.toString() ?? '';
+      switch (status) {
+        case 'awaiting_confirmation':
+          final amount = content['amount']?.toString() ?? '';
+          title = 'Comprovante Recebido!';
+          body = amount.isNotEmpty
+            ? 'Comprovante de R\$ $amount recebido. Verifique e confirme.'
+            : 'Comprovante recebido para ordem $shortOrderId. Verifique e confirme.';
+          payload = 'payment_received:$orderId';
+          importance = Importance.max;
+          break;
+        case 'completed':
+          title = 'Ordem Concluida!';
+          body = 'Ordem $shortOrderId foi finalizada com sucesso.';
+          payload = 'order_completed:$orderId';
+          break;
+        case 'cancelled':
+          title = 'Ordem Cancelada';
+          body = 'A ordem $shortOrderId foi cancelada.';
+          payload = 'order_cancelled:$orderId';
+          break;
+        case 'disputed':
+          title = 'Disputa Aberta';
+          body = 'Uma disputa foi aberta na ordem $shortOrderId.';
+          payload = 'order_disputed:$orderId';
+          importance = Importance.max;
+          break;
+        default:
+          broLog('[BRO-BG] kind 30080 status=$status — sem notificacao local');
+          return;
+      }
       break;
       
     case _kindBroComplete: // 30081 - Ordem completada
@@ -448,15 +482,10 @@ String? _getTagValue(Map<String, dynamic> event, String tagName) {
 // Garante que usuarios offline por semanas mantenham token valido
 // ============================================================
 
-const String _brixServerUrl = String.fromEnvironment(
-  'BRIX_SERVER_URL',
-  defaultValue: 'https://brix.brostr.app',
-);
+const String _brixServerUrl = 'https://brix.brostr.app';
 
-const String _backendUrl = String.fromEnvironment(
-  'BACKEND_URL',
-  defaultValue: 'https://api.brostr.app',
-);
+// v538: HARDCODED - Codemagic estava injetando valor errado via env
+const String _backendUrl = 'https://api.brostr.app';
 
 /// Validate that a URL uses HTTPS and belongs to a trusted domain
 bool _isValidSecureUrl(String url) {

@@ -3,6 +3,8 @@
  * 
  * POST /push/register-token — Register FCM token (requires NIP-98 auth)
  * POST /push/notify         — Send push to another user (requires NIP-98 auth)
+ * POST /push/broadcast       — Admin: send notification to ALL registered users (requires NIP-98 + ADMIN_PUBKEY)
+ * GET  /push/status          — Push service status (public)
  */
 
 const express = require('express');
@@ -107,7 +109,6 @@ router.post('/notify', notifyLimiter, async (req, res) => {
   if (type === 'order_update') {
     const notifMap = {
       accepted:           { title: '🤝 Ordem aceita!',        body: 'Um Bro aceitou sua ordem' },
-      billcode_encrypted: { title: '🔐 Código PIX recebido',  body: 'Código de pagamento disponível' },
       payment_received:   { title: '📸 Comprovante recebido!', body: 'Verifique o comprovante e confirme' },
       completed:          { title: '✅ Ordem concluída!',      body: 'Troca finalizada com sucesso' },
       disputed:           { title: '⚠️ Disputa aberta',       body: 'Uma disputa foi aberta na sua ordem' },
@@ -125,13 +126,132 @@ router.post('/notify', notifyLimiter, async (req, res) => {
 });
 
 /**
+ * POST /push/test-self
+ * Auth: NIP-98 (req.verifiedPubkey)
+ * v539: Envia um push de teste para o proprio usuario, bypass do self_notify guard.
+ * Usado pela tela de diagnostico para validar delivery end-to-end.
+ */
+router.post('/test-self', notifyLimiter, async (req, res) => {
+  const pubkey = req.verifiedPubkey;
+  const data = {
+    type: 'order_update',
+    sender_pubkey: pubkey,
+    subtype: 'accepted',
+    order_id: `test-${Date.now()}`,
+  };
+  const notification = {
+    title: '🧪 Push de teste',
+    body: 'Se voce ve isso, notificacoes funcionam!',
+  };
+  console.log(`[PUSH] /test-self pubkey=${pubkey.substring(0, 16)}...`);
+  const sent = await pushService.sendPush(pubkey, data, notification);
+  console.log(`[PUSH] /test-self result: sent=${sent}`);
+  res.json({ ok: sent });
+});
+
+/**
  * GET /push/status
  * Returns push service status (no auth required)
  */
 router.get('/status', (req, res) => {
   res.json({
     enabled: pushService.isEnabled(),
+    tokens_registered: pushService.getTokenCount(),
   });
+});
+
+/**
+ * GET /push/diagnose
+ * Auth: NIP-98 (req.verifiedPubkey)
+ * Returns whether THIS pubkey has a token registered.
+ * Used by the app to detect silent registration failures on iOS.
+ */
+router.get('/diagnose', (req, res) => {
+  const pubkey = req.verifiedPubkey;
+  const state = pushService.hasToken(pubkey);
+  // Log so we can see iOS devices calling in for diagnosis
+  console.log(`[PUSH] /diagnose pubkey=${pubkey.substring(0, 16)}... registered=${state.registered}${state.registered ? ` age=${state.ageSeconds}s` : ''}`);
+  res.json({
+    pubkey_short: pubkey.substring(0, 8),
+    push_enabled: pushService.isEnabled(),
+    ...state,
+  });
+});
+
+// Admin pubkey from env
+const ADMIN_PUBKEY = process.env.ADMIN_PUBKEY || '';
+
+// Rate limiting: 1 broadcast per 5 minutes
+const broadcastLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 1,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Broadcast rate limited. Try again in 5 minutes.' },
+});
+
+/**
+ * POST /push/broadcast
+ * Body: { title: string, body: string }
+ * Auth: NIP-98 + ADMIN_PUBKEY required
+ * 
+ * Sends a visible notification to ALL registered users.
+ * Throttled: 1 push/second per recipient to respect FCM quota.
+ */
+router.post('/broadcast', broadcastLimiter, async (req, res) => {
+  // Verify admin
+  if (!ADMIN_PUBKEY || !/^[0-9a-f]{64}$/.test(ADMIN_PUBKEY)) {
+    return res.status(503).json({ error: 'ADMIN_PUBKEY not configured' });
+  }
+  if (req.verifiedPubkey !== ADMIN_PUBKEY) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  const { title, body } = req.body;
+
+  if (!title || typeof title !== 'string' || title.length < 1 || title.length > 200) {
+    return res.status(400).json({ error: 'title is required (1-200 chars)' });
+  }
+  if (!body || typeof body !== 'string' || body.length < 1 || body.length > 500) {
+    return res.status(400).json({ error: 'body is required (1-500 chars)' });
+  }
+
+  const allPubkeys = pushService.getAllPubkeys();
+  if (allPubkeys.length === 0) {
+    return res.json({ success: true, sent: 0, failed: 0, total: 0, message: 'No registered users' });
+  }
+
+  console.log(`[PUSH] Broadcasting to ${allPubkeys.length} users: "${title}"`);
+
+  // Send async — respond immediately, process in background
+  res.json({
+    success: true,
+    total: allPubkeys.length,
+    message: `Broadcasting to ${allPubkeys.length} users. Check server logs for progress.`,
+  });
+
+  // Process sends with 1s delay between each to respect FCM quota
+  let sent = 0;
+  let failed = 0;
+
+  for (const pubkey of allPubkeys) {
+    try {
+      const ok = await pushService.sendPush(
+        pubkey,
+        { type: 'app_update', broadcast: 'true' },
+        { title, body }
+      );
+      if (ok) sent++;
+      else failed++;
+    } catch (e) {
+      failed++;
+    }
+
+    // Throttle: 1 push per second
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  console.log(`[PUSH] Broadcast complete: ${sent} sent, ${failed} failed, ${allPubkeys.length} total`);
 });
 
 module.exports = router;

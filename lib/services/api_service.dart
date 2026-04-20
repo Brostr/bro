@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/push_diag.dart';
 import 'package:dio/dio.dart';
 import 'storage_service.dart';
 import 'nostr_service.dart';
@@ -34,12 +35,31 @@ class ApiService {
   Dio get dio => _dio;
 
   Future<void> init() async {
-    _baseUrl = await _storage.getBackendUrl();
+    // v536: SEMPRE usar AppConfig.defaultBackendUrl (vem de env.json no build).
+    // O storage override era feature de dev e causava bugs em producao:
+    // URLs como http://10.0.2.2:3002 (emulador Android) eram persistidas e
+    // vazavam para dispositivos reais (via backup/restore do Android).
+    // Isso fazia TODAS as chamadas ao backend darem timeout, quebrando push
+    // notifications, order_update, notifyUser, etc.
+    _baseUrl = AppConfig.defaultBackendUrl;
+
+    // Limpar qualquer URL stale que tenha sido salva em versoes antigas
+    try {
+      final saved = await _storage.getBackendUrl();
+      if (saved != _baseUrl) {
+        broLog('[API] Overriding stale saved URL: $saved → $_baseUrl');
+        PushDiag.log('api: override stale $saved → $_baseUrl');
+        await _storage.saveBackendUrl(_baseUrl);
+      }
+    } catch (_) {}
+
+    // v537: Log a URL em uso para diagnostico definitivo + timeouts maiores (20s)
+    PushDiag.log('api: init baseUrl=$_baseUrl');
 
     _dio = Dio(BaseOptions(
       baseUrl: _baseUrl,
-      connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 10),
+      connectTimeout: const Duration(seconds: 20),
+      receiveTimeout: const Duration(seconds: 20),
       headers: {
         'Content-Type': 'application/json',
       },
@@ -879,15 +899,42 @@ class ApiService {
   /// Register FCM token with the backend for order push notifications
   Future<bool> registerPushToken(String fcmToken) async {
     try {
+      PushDiag.log('api: POST /push/register-token base=$_baseUrl');
       final response = await _dio.post('/push/register-token', data: {
         'fcm_token': fcmToken,
       });
       final ok = response.data?['ok'] == true;
       broLog('[PUSH] Backend token registered: $ok (push_enabled=${response.data?['push_enabled']})');
+      PushDiag.log('api: register response status=${response.statusCode} ok=$ok body=${response.data}');
       return ok;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message} body=${e.response?.data}';
+      broLog('[PUSH] Backend token registration failed: $msg');
+      PushDiag.log('api: register FAIL $msg');
+      return false;
     } catch (e) {
       broLog('[PUSH] Backend token registration failed: $e');
+      PushDiag.log('api: register EXC $e');
       return false;
+    }
+  }
+
+  /// v524: Ask backend whether our FCM token is registered.
+  /// Used to detect silent registration failures on iOS
+  /// (where getToken() may return null intermittently).
+  /// Returns null on network error so callers can distinguish from a real "not registered" answer.
+  Future<bool?> diagnosePushToken() async {
+    try {
+      final response = await _dio.get('/push/diagnose');
+      return response.data?['registered'] == true;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message}';
+      broLog('[PUSH] Backend diagnose failed: $msg');
+      PushDiag.log('api: diagnose FAIL $msg');
+      return null;
+    } catch (e) {
+      broLog('[PUSH] Backend diagnose failed: $e');
+      return null;
     }
   }
 
@@ -905,9 +952,35 @@ class ApiService {
         if (subtype != null) 'subtype': subtype,
         if (orderId != null) 'order_id': orderId,
       });
-      return response.data?['ok'] == true;
+      final ok = response.data?['ok'] == true;
+      PushDiag.log('api: notify status=${response.statusCode} ok=$ok body=${response.data}');
+      return ok;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message} body=${e.response?.data}';
+      PushDiag.log('api: notify FAIL $msg');
+      broLog('[PUSH] Notify failed: $msg');
+      return false;
     } catch (e) {
+      PushDiag.log('api: notify EXC $e');
       broLog('[PUSH] Notify failed: $e');
+      return false;
+    }
+  }
+
+  /// v539: Envia push de teste para si mesmo via endpoint dedicado
+  /// (o /push/notify bloqueia self-notify).
+  Future<bool> testSelfPush() async {
+    try {
+      final response = await _dio.post('/push/test-self');
+      final ok = response.data?['ok'] == true;
+      PushDiag.log('api: test-self status=${response.statusCode} ok=$ok body=${response.data}');
+      return ok;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message} body=${e.response?.data}';
+      PushDiag.log('api: test-self FAIL $msg');
+      return false;
+    } catch (e) {
+      PushDiag.log('api: test-self EXC $e');
       return false;
     }
   }

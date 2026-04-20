@@ -169,7 +169,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
     if (newStatus == 'disputed') return true;
     const statusOrder = [
       'draft', 'pending', 'payment_received', 'accepted', 
-      'processing', 'awaiting_confirmation', 'completed', 'liquidated',
+      'processing', 'awaiting_confirmation', 'completing', 'completed', 'liquidated',
     ];
     final currentIndex = statusOrder.indexOf(currentStatus);
     final newIndex = statusOrder.indexOf(newStatus);
@@ -431,6 +431,23 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
   
   /// Trata mudancas de status e envia notificacoes
   void _handleStatusChange(String newStatus) {
+    // v540: Nao disparar notificacao local para ordens antigas (>30 min).
+    // Evita flood de notificacoes durante sync/catch-up ao abrir o app
+    // apos muito tempo offline.
+    final createdAtMs = _orderDetails?['created_at'];
+    DateTime? createdAt;
+    if (createdAtMs is int) {
+      createdAt = DateTime.fromMillisecondsSinceEpoch(createdAtMs);
+    } else if (createdAtMs is String) {
+      createdAt = DateTime.tryParse(createdAtMs);
+    }
+    if (createdAt != null) {
+      final age = DateTime.now().difference(createdAt);
+      if (age.inMinutes > 30) {
+        broLog('[ORDER] Notificacao ignorada - ordem com ${age.inMinutes}min');
+        return;
+      }
+    }
     switch (newStatus) {
       case 'accepted':
         _notificationService.notifyOrderAccepted(
@@ -540,11 +557,22 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       }
       
       if (status != _currentStatus) {
-        // Notificar sobre mudanca de status
-        _handleStatusChange(status);
+        // v533: So disparar notificacao em transicoes para FRENTE no fluxo.
+        // Quando a usuaria toca Confirmar, _currentStatus vira 'completing'
+        // (estado transitorio local) e o sync seguinte traz 'awaiting_confirmation'
+        // do relay — isso NAO eh uma transicao real, eh o sync reconciliando.
+        // Sem esse check, 'completing' -> 'awaiting_confirmation' dispara
+        // "Comprovante Recebido!" no momento errado (quando ela confirma).
+        final isForward = _isStatusMoreRecent(status, _currentStatus);
+        if (isForward) {
+          _handleStatusChange(status);
+        } else {
+          broLog('[ORDER] Transicao para tras ignorada: $_currentStatus -> $status (sem notificacao)');
+        }
         if (!mounted) return;
         setState(() {
-          _currentStatus = status;
+          // So atualizar _currentStatus se for forward, senao manter o local ('completing')
+          if (isForward) _currentStatus = status;
         });
 
         // Iniciar countdown timer quando chega em awaiting_confirmation
@@ -693,21 +721,10 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         setState(() {
           _currentStatus = 'cancelled';
         });
-        
-        // v493: Push notify the provider that order was cancelled
-        final orderProvider = Provider.of<OrderProvider>(context, listen: false);
-        final existingOrder = orderProvider.getOrderById(widget.orderId);
-        final providerPubkey = existingOrder?.providerId ?? _orderDetails?['providerId'] as String?;
-        if (providerPubkey != null && providerPubkey.isNotEmpty) {
-          final pushOk = await ApiService().notifyUser(
-            targetPubkey: providerPubkey,
-            type: 'order_update',
-            subtype: 'cancelled',
-            orderId: widget.orderId,
-          );
-          broLog('[PUSH] cancelled notify to ${providerPubkey.substring(0, 16)}: $pushOk');
-        }
-        
+
+        // v541: Nao envia push manualmente. Watchtower detecta o evento
+        // bro_cancel no Nostr e envia notificacao automaticamente.
+
         // Mostrar confirmação simples
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -3090,18 +3107,9 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
           ),
         );
 
-        // v493: Push notify the provider that a dispute was opened
-        final providerPubkey = existingOrder?.providerId ?? _orderDetails?['providerId'] as String?;
-        if (providerPubkey != null && providerPubkey.isNotEmpty) {
-          final pushOk = await ApiService().notifyUser(
-            targetPubkey: providerPubkey,
-            type: 'order_update',
-            subtype: 'disputed',
-            orderId: widget.orderId,
-          );
-          broLog('[PUSH] disputed notify to ${providerPubkey.substring(0, 16)}: $pushOk');
-        }
-        
+        // v541: Nao envia push manualmente. Watchtower detecta o evento
+        // bro_dispute no Nostr e envia notificacao automaticamente.
+
         // Publicar notificação de disputa no Nostr (fire-and-forget)
         // Não bloqueia a UI — o admin será notificado em segundo plano
         try {
@@ -4441,8 +4449,35 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         if (!breezProvider.isInitialized && !liquidProvider.isInitialized) {
           paymentError = l.t('order_wallet_not_initialized');
         } else {
+          // v516: Mutable local holding the latest invoice (may be refreshed between retries)
+          String currentInvoice = providerInvoice;
           // Retry: tentar até 3 vezes com intervalo de 2s
           for (int attempt = 1; attempt <= 3; attempt++) {
+            // v516: Before retry 2 and 3, refetch the latest invoice from Nostr.
+            // If the provider published a newer invoice_refresh (e.g. because the first
+            // one is stuck/expired on his SDK), use it for the next attempt.
+            if (attempt > 1) {
+              try {
+                final nostrService = NostrOrderService();
+                final latest = await nostrService.fetchOrderCompleteEvent(widget.orderId)
+                    .timeout(const Duration(seconds: 8), onTimeout: () => null);
+                final freshInvoice = latest?['providerInvoice'] as String?;
+                if (freshInvoice != null && freshInvoice.isNotEmpty && freshInvoice != currentInvoice) {
+                  broLog('🔄 Invoice atualizada recebida do Nostr — usando nova para tentativa $attempt');
+                  currentInvoice = freshInvoice;
+                  // Redecode to update paymentHash so verifyPendingSparkPayment checa o hash certo
+                  try {
+                    final decoded = await breezProvider.decodeInvoice(freshInvoice);
+                    final newHash = decoded?['invoice']?['paymentHash']?.toString();
+                    if (newHash != null && newHash.isNotEmpty) {
+                      providerInvoicePaymentHash = newHash;
+                    }
+                  } catch (_) {}
+                }
+              } catch (e) {
+                broLog('⚠️ Falha ao refetch invoice antes da tentativa $attempt: $e');
+              }
+            }
             try {
               Map<String, dynamic>? payResult;
               String usedBackend = 'none';
@@ -4451,11 +4486,11 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                 broLog('⚡ Tentativa $attempt/3: Pagando via Breez Spark...');
                 // v514: NO outer timeout — payInvoice() has internal 30s prepare + 60s send timeouts.
                 // Outer timeout was killing payments mid-flight, causing "timeout" errors.
-                payResult = await breezProvider.payInvoice(providerInvoice);
+                payResult = await breezProvider.payInvoice(currentInvoice);
                 usedBackend = 'Spark';
               } else if (liquidProvider.isInitialized) {
                 broLog('⚡ Tentativa $attempt/3: Pagando via Liquid...');
-                payResult = await liquidProvider.payInvoice(providerInvoice);
+                payResult = await liquidProvider.payInvoice(currentInvoice);
                 usedBackend = 'Liquid';
               }
               
@@ -4585,16 +4620,8 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       
       broLog('✅ Ordem marcada como completed com sucesso');
 
-      // v493: Push notify the provider that order was completed
-      if (providerId != null && providerId.isNotEmpty) {
-        final pushOk = await ApiService().notifyUser(
-          targetPubkey: providerId,
-          type: 'order_update',
-          subtype: 'completed',
-          orderId: widget.orderId,
-        );
-        broLog('[PUSH] completed notify to ${providerId.substring(0, 16)}: $pushOk');
-      }
+      // v541: Nao envia push manualmente. Watchtower detecta o evento
+      // bro_complete no Nostr e envia 'Ordem concluida!' automaticamente.
       
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();

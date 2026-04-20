@@ -28,16 +28,13 @@ class AppConfig {
   // BACKEND API
   // ============================================
   
-  /// URL do backend — definido via env.json (BACKEND_URL)
-  /// Fallback: https://api.brostr.app (produção)
+  /// URL do backend — HARDCODED para evitar bugs de env var mal-configurada.
+  /// v538: logs da Carol provaram que Codemagic estava injetando
+  /// http://10.0.2.2:3002 (emulador Android) via $BACKEND_URL. Agora eh
+  /// sempre https://api.brostr.app em release.
   ///
-  /// Valores comuns para desenvolvimento:
-  ///   Emulador Android: http://10.0.2.2:3002
-  ///   Dispositivo físico: http://<SEU_IP>:3002
-  static const String defaultBackendUrl = String.fromEnvironment(
-    'BACKEND_URL',
-    defaultValue: 'https://api.brostr.app',
-  );
+  /// Para desenvolvimento local, edite este arquivo localmente (nao commite).
+  static const String defaultBackendUrl = 'https://api.brostr.app';
 
   // ============================================
   // BREEZ SDK (Lightning Network)
