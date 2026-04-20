@@ -482,15 +482,10 @@ String? _getTagValue(Map<String, dynamic> event, String tagName) {
 // Garante que usuarios offline por semanas mantenham token valido
 // ============================================================
 
-const String _brixServerUrl = String.fromEnvironment(
-  'BRIX_SERVER_URL',
-  defaultValue: 'https://brix.brostr.app',
-);
+const String _brixServerUrl = 'https://brix.brostr.app';
 
-const String _backendUrl = String.fromEnvironment(
-  'BACKEND_URL',
-  defaultValue: 'https://api.brostr.app',
-);
+// v538: HARDCODED - Codemagic estava injetando valor errado via env
+const String _backendUrl = 'https://api.brostr.app';
 
 /// Validate that a URL uses HTTPS and belongs to a trusted domain
 bool _isValidSecureUrl(String url) {
