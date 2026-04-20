@@ -35,22 +35,23 @@ class ApiService {
   Dio get dio => _dio;
 
   Future<void> init() async {
-    _baseUrl = await _storage.getBackendUrl();
+    // v536: SEMPRE usar AppConfig.defaultBackendUrl (vem de env.json no build).
+    // O storage override era feature de dev e causava bugs em producao:
+    // URLs como http://10.0.2.2:3002 (emulador Android) eram persistidas e
+    // vazavam para dispositivos reais (via backup/restore do Android).
+    // Isso fazia TODAS as chamadas ao backend darem timeout, quebrando push
+    // notifications, order_update, notifyUser, etc.
+    _baseUrl = AppConfig.defaultBackendUrl;
 
-    // v527: Auto-heal stale dev URLs. A local/emulator URL saved on a dev
-    // device propagates via secure storage backup and bricks push on real
-    // iOS devices. Reset to production default if detected.
-    final lower = _baseUrl.toLowerCase();
-    if (lower.contains('10.0.2.2') ||
-        lower.contains('localhost') ||
-        lower.contains('127.0.0.1') ||
-        lower.contains('192.168.') ||
-        lower.contains('10.0.0.')) {
-      broLog('[API] Stale dev URL detected: $_baseUrl → resetting to default');
-      PushDiag.log('api: stale URL $_baseUrl → reset');
-      _baseUrl = AppConfig.defaultBackendUrl;
-      await _storage.saveBackendUrl(_baseUrl);
-    }
+    // Limpar qualquer URL stale que tenha sido salva em versoes antigas
+    try {
+      final saved = await _storage.getBackendUrl();
+      if (saved != _baseUrl) {
+        broLog('[API] Overriding stale saved URL: $saved → $_baseUrl');
+        PushDiag.log('api: override stale $saved → $_baseUrl');
+        await _storage.saveBackendUrl(_baseUrl);
+      }
+    } catch (_) {}
 
     _dio = Dio(BaseOptions(
       baseUrl: _baseUrl,

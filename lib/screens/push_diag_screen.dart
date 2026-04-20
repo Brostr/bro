@@ -6,6 +6,7 @@ import 'package:bro_app/services/push_diag.dart';
 import 'package:bro_app/services/api_service.dart';
 import 'package:bro_app/services/storage_service.dart';
 import 'package:bro_app/services/brix_relay_service.dart';
+import 'package:bro_app/config.dart';
 
 /// v535: Tela de diagnostico de push notifications.
 /// Permite ao usuario ver logs de registro FCM, verificar se o token esta
@@ -24,6 +25,7 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
   String _fcmTokenPreview = '...';
   String _backendDiagnose = '...';
   String _pubkeyPreview = '...';
+  String _backendUrl = '...';
   bool _loading = true;
 
   @override
@@ -65,6 +67,9 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
       pk = p != null ? '${p.substring(0, 16)}...' : 'NULL';
     } catch (_) {}
 
+    // Backend URL atual (real, do Dio)
+    String url = ApiService().baseUrl;
+
     // Backend diagnose
     String backend = 'checking...';
     try {
@@ -85,8 +90,22 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
       _fcmTokenPreview = fcm;
       _backendDiagnose = backend;
       _pubkeyPreview = pk;
+      _backendUrl = url;
       _loading = false;
     });
+  }
+
+  Future<void> _resetBackendUrl() async {
+    try {
+      await StorageService().saveBackendUrl(AppConfig.defaultBackendUrl);
+      await ApiService().init();
+      BrixRelayService().resetFcmRegistration();
+      PushDiag.log('diag: manual reset backend URL → ${AppConfig.defaultBackendUrl}');
+      _snack('URL resetada para ${AppConfig.defaultBackendUrl}');
+      await _refresh();
+    } catch (e) {
+      _snack('Erro: $e');
+    }
   }
 
   Future<void> _forceReregister() async {
@@ -192,6 +211,7 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
             const SizedBox(height: 12),
             _kv('Plataforma', defaultTargetPlatform.name),
             _kv('Pubkey', _pubkeyPreview),
+            _kv('Backend URL', _backendUrl),
             _kv('APNS token (iOS)', _apnsStatus),
             _kv('FCM token', _fcmTokenPreview),
             _kv('Backend registrado', _backendDiagnose),
@@ -232,6 +252,13 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
               style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 12),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+              icon: const Icon(Icons.cloud_sync),
+              label: const Text('Resetar URL do backend (fix dev URL)'),
+              onPressed: _resetBackendUrl,
+            ),
+            const SizedBox(height: 8),
             ElevatedButton.icon(
               style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B6B)),
               icon: const Icon(Icons.refresh),
