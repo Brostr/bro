@@ -596,6 +596,42 @@ class NostrOrderService {
     return acceptedIds;
   }
 
+  /// v541: Busca TODOS os provedores que aceitaram uma ordem (kind 30079).
+  /// Retorna lista de pubkeys dos provedores que publicaram bro_accept para
+  /// esta ordem, ordenados pelo created_at (primeiro = mais antigo).
+  /// Usado para detectar e bloquear double-accept ANTES de revelar o billCode.
+  Future<List<String>> fetchAllAcceptsForOrder(String orderId) async {
+    final accepts = <Map<String, dynamic>>[]; // {pubkey, created_at}
+    final seenPubkeys = <String>{};
+    for (final relay in _relays.take(3)) {
+      try {
+        final events = await _fetchFromRelay(
+          relay,
+          kinds: [kindBroAccept],
+          tags: {'#d': ['${orderId}_accept']},
+          limit: 20,
+        ).timeout(const Duration(seconds: 8), onTimeout: () => <Map<String, dynamic>>[]);
+        for (final event in events) {
+          try {
+            final content = event['parsedContent'] ?? jsonDecode(event['content']);
+            if (content['orderId'] != orderId) continue;
+            if (content['type'] != 'bro_accept') continue;
+            final pubkey = event['pubkey'] as String?;
+            final createdAt = event['created_at'] as int?;
+            if (pubkey == null || pubkey.isEmpty || createdAt == null) continue;
+            if (seenPubkeys.contains(pubkey)) continue;
+            seenPubkeys.add(pubkey);
+            accepts.add({'pubkey': pubkey, 'created_at': createdAt});
+          } catch (_) {}
+        }
+      } catch (_) {
+        // try next relay
+      }
+    }
+    accepts.sort((a, b) => (a['created_at'] as int).compareTo(b['created_at'] as int));
+    return accepts.map((e) => e['pubkey'] as String).toList();
+  }
+
   /// Busca ordens aceitas por um provedor e retorna como List<Order>
   /// CORREÇÃO: Agora também busca eventos de UPDATE para obter status correto
   Future<List<Order>> fetchProviderOrders(String providerPubkey) async {

@@ -1779,6 +1779,32 @@ class OrderProvider with ChangeNotifier {
 
     for (final order in candidates) {
       try {
+        // v541: ANTI-RACE DEFINITIVO. Antes de revelar o billCode para o
+        // provedor, varremos TODOS os relays buscando bro_accept events
+        // para esta ordem. Se houver mais de um, o vencedor e o primeiro
+        // (menor created_at). Se o providerId atual NAO for o vencedor,
+        // NAO revelamos o billCode — o segundo bro perde a corrida.
+        final allAccepts = await _nostrOrderService
+            .fetchAllAcceptsForOrder(order.id)
+            .timeout(const Duration(seconds: 10), onTimeout: () => <String>[]);
+        if (allAccepts.length > 1) {
+          final winner = allAccepts.first;
+          broLog('🏁 v541: ordem ${order.id.substring(0, 8)} tem ${allAccepts.length} accepts. Winner=${winner.substring(0, 8)}');
+          if (winner != order.providerId) {
+            // O providerId armazenado localmente perdeu a corrida.
+            // Atualizar para o vencedor. Proximo sync vai propagar para os relays.
+            broLog('⚠️ v541: providerId local (${order.providerId!.substring(0, 8)}) perdeu corrida. Corrigindo para winner.');
+            final idx = _orders.indexWhere((o) => o.id == order.id);
+            if (idx != -1) {
+              _orders[idx] = _orders[idx].copyWith(providerId: winner);
+              await _saveOnlyUserOrders();
+              _immediateNotify();
+            }
+            // Nao envia billCode para o provider perdedor. Pula para proxima ordem.
+            continue;
+          }
+        }
+
         final ok = await _nostrOrderService.publishEncryptedBillCode(
           privateKey: privateKey,
           orderId: order.id,
@@ -2229,17 +2255,10 @@ class OrderProvider with ChangeNotifier {
       _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
       broLog('✅ [acceptOrderAsProvider] Removido de _availableOrdersForProvider');
 
-      // Push notify the buyer that their order was accepted
-      if (order.userPubkey != null && order.userPubkey!.isNotEmpty) {
-        final pushOk = await _apiService.notifyUser(
-          targetPubkey: order.userPubkey!,
-          type: 'order_update',
-          subtype: 'accepted',
-          orderId: orderId,
-        );
-        broLog('[PUSH] accepted notify to ${order.userPubkey!.substring(0, 16)}: $pushOk');
-      }
-      
+      // v541: Nao envia push manualmente. O backend watchtower detecta o
+      // evento bro_accept no Nostr e envia a notificacao automaticamente.
+      // Envio manual aqui causava notificacao em duplicidade.
+
       // Atualizar localmente
       final index = _orders.indexWhere((o) => o.id == orderId);
       if (index != -1) {
@@ -2356,16 +2375,9 @@ class OrderProvider with ChangeNotifier {
         
       }
 
-      // Push notify the buyer that payment proof was submitted
-      if (order.userPubkey != null && order.userPubkey!.isNotEmpty) {
-        final pushOk = await _apiService.notifyUser(
-          targetPubkey: order.userPubkey!,
-          type: 'order_update',
-          subtype: 'payment_received',
-          orderId: orderId,
-        );
-        broLog('[PUSH] payment_received notify to ${order.userPubkey!.substring(0, 16)}: $pushOk');
-      }
+      // v541: Nao envia push manualmente. Watchtower detecta o evento
+      // bro_payment_proof (kind 30080) no Nostr e envia 'Comprovante recebido!'
+      // automaticamente. Envio manual aqui causava notificacao em duplicidade.
 
       return true;
     } catch (e) {

@@ -549,19 +549,9 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
       }
 
       if (success) {
-        // v493: Push notify the provider that order was cancelled
-        final existingOrder = Provider.of<OrderProvider>(context, listen: false).getOrderById(orderId);
-        final providerPubkey = existingOrder?.providerId;
-        if (providerPubkey != null && providerPubkey.isNotEmpty) {
-          final pushOk = await ApiService().notifyUser(
-            targetPubkey: providerPubkey,
-            type: 'order_update',
-            subtype: 'cancelled',
-            orderId: orderId,
-          );
-          broLog('[PUSH] cancelled notify to ${providerPubkey.substring(0, 16)}: $pushOk');
-        }
-        
+        // v541: Nao envia push manualmente. Watchtower detecta o evento
+        // bro_cancel no Nostr e envia notificacao automaticamente.
+
         _loadOrders(); // Recarregar lista
         // Mostrar confirmação simples
         _showCancelConfirmation();

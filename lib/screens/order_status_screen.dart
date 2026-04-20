@@ -721,21 +721,10 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         setState(() {
           _currentStatus = 'cancelled';
         });
-        
-        // v493: Push notify the provider that order was cancelled
-        final orderProvider = Provider.of<OrderProvider>(context, listen: false);
-        final existingOrder = orderProvider.getOrderById(widget.orderId);
-        final providerPubkey = existingOrder?.providerId ?? _orderDetails?['providerId'] as String?;
-        if (providerPubkey != null && providerPubkey.isNotEmpty) {
-          final pushOk = await ApiService().notifyUser(
-            targetPubkey: providerPubkey,
-            type: 'order_update',
-            subtype: 'cancelled',
-            orderId: widget.orderId,
-          );
-          broLog('[PUSH] cancelled notify to ${providerPubkey.substring(0, 16)}: $pushOk');
-        }
-        
+
+        // v541: Nao envia push manualmente. Watchtower detecta o evento
+        // bro_cancel no Nostr e envia notificacao automaticamente.
+
         // Mostrar confirmação simples
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -3118,18 +3107,9 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
           ),
         );
 
-        // v493: Push notify the provider that a dispute was opened
-        final providerPubkey = existingOrder?.providerId ?? _orderDetails?['providerId'] as String?;
-        if (providerPubkey != null && providerPubkey.isNotEmpty) {
-          final pushOk = await ApiService().notifyUser(
-            targetPubkey: providerPubkey,
-            type: 'order_update',
-            subtype: 'disputed',
-            orderId: widget.orderId,
-          );
-          broLog('[PUSH] disputed notify to ${providerPubkey.substring(0, 16)}: $pushOk');
-        }
-        
+        // v541: Nao envia push manualmente. Watchtower detecta o evento
+        // bro_dispute no Nostr e envia notificacao automaticamente.
+
         // Publicar notificação de disputa no Nostr (fire-and-forget)
         // Não bloqueia a UI — o admin será notificado em segundo plano
         try {
@@ -4640,16 +4620,8 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       
       broLog('✅ Ordem marcada como completed com sucesso');
 
-      // v493: Push notify the provider that order was completed
-      if (providerId != null && providerId.isNotEmpty) {
-        final pushOk = await ApiService().notifyUser(
-          targetPubkey: providerId,
-          type: 'order_update',
-          subtype: 'completed',
-          orderId: widget.orderId,
-        );
-        broLog('[PUSH] completed notify to ${providerId.substring(0, 16)}: $pushOk');
-      }
+      // v541: Nao envia push manualmente. Watchtower detecta o evento
+      // bro_complete no Nostr e envia 'Ordem concluida!' automaticamente.
       
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
