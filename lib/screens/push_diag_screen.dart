@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -152,6 +154,35 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
     _snack('Logs copiados');
   }
 
+  /// v537: Testa conexao HTTPS crua (bypass Dio) para diagnosticar se eh
+  /// problema de rede/DNS/TLS ou do Dio/interceptor.
+  Future<void> _testRawHttp() async {
+    final url = 'https://api.brostr.app/';
+    PushDiag.log('raw: testing GET $url');
+    _snack('Testando conexao direta...');
+    final sw = Stopwatch()..start();
+    HttpClient? client;
+    try {
+      client = HttpClient();
+      client.connectionTimeout = const Duration(seconds: 15);
+      client.idleTimeout = const Duration(seconds: 15);
+      final req = await client.getUrl(Uri.parse(url));
+      final resp = await req.close().timeout(const Duration(seconds: 15));
+      final body = await resp.transform(utf8.decoder).join().timeout(const Duration(seconds: 5));
+      sw.stop();
+      final preview = body.length > 80 ? body.substring(0, 80) : body;
+      PushDiag.log('raw: OK status=${resp.statusCode} time=${sw.elapsedMilliseconds}ms body=$preview');
+      _snack('Raw HTTP OK: ${resp.statusCode} em ${sw.elapsedMilliseconds}ms');
+    } catch (e) {
+      sw.stop();
+      PushDiag.log('raw: FAIL time=${sw.elapsedMilliseconds}ms err=${e.runtimeType}: $e');
+      _snack('Raw HTTP FALHOU: ${e.runtimeType}');
+    } finally {
+      client?.close(force: true);
+      await _refresh();
+    }
+  }
+
   Future<void> _clearLogs() async {
     await PushDiag.clear();
     await _refresh();
@@ -257,6 +288,13 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
               icon: const Icon(Icons.cloud_sync),
               label: const Text('Resetar URL do backend (fix dev URL)'),
               onPressed: _resetBackendUrl,
+            ),
+            const SizedBox(height: 8),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.purple),
+              icon: const Icon(Icons.network_check),
+              label: const Text('Testar conexao HTTPS crua (bypass Dio)'),
+              onPressed: _testRawHttp,
             ),
             const SizedBox(height: 8),
             ElevatedButton.icon(

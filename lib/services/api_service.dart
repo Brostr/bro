@@ -53,10 +53,13 @@ class ApiService {
       }
     } catch (_) {}
 
+    // v537: Log a URL em uso para diagnostico definitivo + timeouts maiores (20s)
+    PushDiag.log('api: init baseUrl=$_baseUrl');
+
     _dio = Dio(BaseOptions(
       baseUrl: _baseUrl,
-      connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 10),
+      connectTimeout: const Duration(seconds: 20),
+      receiveTimeout: const Duration(seconds: 20),
       headers: {
         'Content-Type': 'application/json',
       },
