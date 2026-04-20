@@ -436,9 +436,12 @@ class NostrWatchtowerService {
       // Targeted: only notify specific providers mentioned in #p tags
       targetPubkeys = pTags.filter(pk => pk !== creatorPubkey);
     } else {
-      // Broadcast: notify all registered users (rate limiter prevents abuse)
-      targetPubkeys = (pushService.getAllPubkeys ? pushService.getAllPubkeys() : [])
-        .filter(pk => pk !== creatorPubkey);
+      // v544: Broadcast ONLY to users who enabled provider mode.
+      // Users who never became providers will not receive 'Nova ordem' pushes.
+      const providerPubkeys = pushService.getProviderPubkeys
+        ? pushService.getProviderPubkeys()
+        : [];
+      targetPubkeys = providerPubkeys.filter(pk => pk !== creatorPubkey);
     }
 
     let sent = 0;

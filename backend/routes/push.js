@@ -43,7 +43,7 @@ const ALLOWED_SUBTYPES = new Set(['accepted', 'billcode_encrypted', 'payment_rec
  */
 router.post('/register-token', registerLimiter, (req, res) => {
   const pubkey = req.verifiedPubkey;
-  const { fcm_token } = req.body;
+  const { fcm_token, provider_enabled } = req.body;
   
   if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 100 || fcm_token.length > 4096) {
     return res.status(400).json({ error: 'Invalid fcm_token' });
@@ -52,9 +52,29 @@ router.post('/register-token', registerLimiter, (req, res) => {
   if (!/^[A-Za-z0-9_:.-]{100,4096}$/.test(fcm_token)) {
     return res.status(400).json({ error: 'Invalid fcm_token format' });
   }
-  
-  const ok = pushService.registerToken(pubkey, fcm_token);
+
+  // v544: provider_enabled is optional; when omitted, existing flag is preserved
+  const providerFlag = (typeof provider_enabled === 'boolean') ? provider_enabled : undefined;
+  const ok = pushService.registerToken(pubkey, fcm_token, providerFlag);
   res.json({ ok, push_enabled: pushService.isEnabled() });
+});
+
+/**
+ * POST /push/provider-status
+ * Body: { enabled: boolean }
+ * Auth: NIP-98 (req.verifiedPubkey)
+ *
+ * v544: Toggles whether this pubkey receives 'Nova ordem disponivel' broadcast
+ * pushes. Called by the app when the user enters/exits provider mode.
+ */
+router.post('/provider-status', registerLimiter, (req, res) => {
+  const pubkey = req.verifiedPubkey;
+  const { enabled } = req.body;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'Invalid enabled flag' });
+  }
+  const ok = pushService.setProviderStatus(pubkey, enabled);
+  res.json({ ok });
 });
 
 /**

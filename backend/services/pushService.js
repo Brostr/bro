@@ -35,6 +35,7 @@ function _loadTokens() {
             tokenStore.set(pubkey, {
               token: entry.token,
               updatedAt: entry.updatedAt || Date.now(),
+              providerEnabled: entry.providerEnabled === true,
             });
           }
         }
@@ -129,9 +130,9 @@ function init() {
 /**
  * Register or update FCM token for a pubkey
  */
-function registerToken(pubkey, fcmToken) {
+function registerToken(pubkey, fcmToken, providerEnabled) {
   if (!pubkey || !fcmToken) return false;
-  
+
   // Evict oldest entry if at capacity (and not updating existing)
   if (!tokenStore.has(pubkey) && tokenStore.size >= MAX_TOKENS) {
     let oldest = null;
@@ -144,14 +145,36 @@ function registerToken(pubkey, fcmToken) {
     }
     if (oldest) tokenStore.delete(oldest);
   }
-  
+
+  // Preserve existing providerEnabled if caller did not pass it explicitly
+  const previous = tokenStore.get(pubkey);
+  const finalProviderEnabled = (typeof providerEnabled === 'boolean')
+    ? providerEnabled
+    : (previous ? previous.providerEnabled === true : false);
+
   tokenStore.set(pubkey, {
     token: fcmToken,
     updatedAt: Date.now(),
+    providerEnabled: finalProviderEnabled,
   });
-  
+
   _saveTokens();
-  console.log(`[PUSH] Token registered for ${pubkey.substring(0, 16)}... (${tokenStore.size} total)`);
+  console.log(`[PUSH] Token registered for ${pubkey.substring(0, 16)}... provider=${finalProviderEnabled} (${tokenStore.size} total)`);
+  return true;
+}
+
+/**
+ * Update provider flag for a pubkey without touching the FCM token.
+ * Returns true if updated, false if pubkey has no registered token.
+ */
+function setProviderStatus(pubkey, enabled) {
+  if (!pubkey) return false;
+  const entry = tokenStore.get(pubkey);
+  if (!entry) return false;
+  entry.providerEnabled = enabled === true;
+  entry.updatedAt = Date.now();
+  _saveTokens();
+  console.log(`[PUSH] Provider flag for ${pubkey.substring(0, 16)}... = ${entry.providerEnabled}`);
   return true;
 }
 
@@ -263,6 +286,18 @@ function getAllPubkeys() {
 }
 
 /**
+ * Get pubkeys of users that currently have provider mode ENABLED.
+ * v544: Used by watchtower to scope 'new_order' broadcasts to providers only.
+ */
+function getProviderPubkeys() {
+  const out = [];
+  for (const [pubkey, entry] of tokenStore) {
+    if (entry && entry.providerEnabled === true) out.push(pubkey);
+  }
+  return out;
+}
+
+/**
  * Clean up stale tokens older than 90 days
  */
 function cleanupStaleTokens() {
@@ -297,4 +332,4 @@ function hasToken(pubkey) {
   };
 }
 
-module.exports = { init, registerToken, sendPush, isEnabled, getTokenCount, getAllPubkeys, hasToken };
+module.exports = { init, registerToken, setProviderStatus, sendPush, isEnabled, getTokenCount, getAllPubkeys, getProviderPubkeys, hasToken };

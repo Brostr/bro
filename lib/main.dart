@@ -57,6 +57,7 @@ import 'services/order_realtime_service.dart';
 import 'services/brix_service.dart';
 import 'services/brix_relay_service.dart';
 import 'services/push_diag.dart';
+import 'services/secure_storage_service.dart';
 import 'config.dart';
 import 'config/breez_config.dart';
 
@@ -266,8 +267,11 @@ void main() async {
       });
 
       _retryAsync('Backend push', () async {
-        final ok = await ApiService().registerPushToken(token);
-        PushDiag.log('main: backend register=$ok');
+        // v544: Inclui flag provider_enabled para backend saber se deve
+        // enviar broadcasts de 'Nova ordem' para este usuario.
+        final isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
+        final ok = await ApiService().registerPushToken(token, providerEnabled: isProvider);
+        PushDiag.log('main: backend register=$ok provider=$isProvider');
         return ok;
       });
     } else {

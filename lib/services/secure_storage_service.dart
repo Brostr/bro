@@ -1,5 +1,6 @@
 ﻿import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/api_service.dart';
 import 'package:flutter/foundation.dart';
 
 /// Serviço de armazenamento seguro para dados sensíveis
@@ -122,6 +123,12 @@ class SecureStorageService {
       final key = _getProviderModeKey(userPubkey);
       await _storage.write(key: key, value: isProvider.toString());
       broLog('🔐 setProviderMode($isProvider) para key=$key');
+      // v544: Sincroniza flag com backend para filtrar pushes 'Nova ordem'.
+      // Usuarios que nunca entraram em modo provedor nao recebem broadcasts.
+      ApiService().setProviderPushStatus(isProvider).catchError((e) {
+        broLog('⚠️ setProviderPushStatus backend sync failed: $e');
+        return false;
+      });
     } catch (e) {
       broLog('❌ Erro ao salvar modo provedor: $e');
     }
