@@ -477,16 +477,23 @@ class OrderProvider with ChangeNotifier {
     _isInitialized = true;
     _immediateNotify();
     
-    // Sincronizar do Nostr IMEDIATAMENTE (n�?£o em background)
+    // v540: Sync com timeout de 15s para nao travar login se relays estiverem lentos.
+    // Se o timeout disparar, a tela home abre com ordens do cache local e
+    // o sync continua em background (proxima refresh completa).
     try {
-      await syncOrdersFromNostr();
-      // v519: second cleanup pass after sync re-adds from Nostr
+      await syncOrdersFromNostr().timeout(
+        const Duration(seconds: 15),
+        onTimeout: () {
+          broLog('[OrderProvider] syncOrdersFromNostr timeout — continuing with cache');
+        },
+      );
       _removeGhostProviderOrders(userPubkey);
-      // v520: authoritative pass — cross-check cached provider orders against
-      // actual Nostr accept/complete events from this pubkey. Any provider
-      // order that cannot be proven by a real accept event is a ghost.
-      await _removeGhostsAgainstNostr(userPubkey);
+      await _removeGhostsAgainstNostr(userPubkey).timeout(
+        const Duration(seconds: 10),
+        onTimeout: () {},
+      );
     } catch (e) {
+      broLog('[OrderProvider] sync error (continuing): $e');
     }
   }
 

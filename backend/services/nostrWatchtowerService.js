@@ -58,6 +58,11 @@ class NostrWatchtowerService {
     this._pushRateMap = new Map(); // pubkey → [timestamps]
     this._PUSH_RATE_WINDOW = 5 * 60 * 1000; // 5 minutes
     this._PUSH_RATE_MAX = 10; // max pushes per window per target
+    // v540: Dedup persistente por pubkey+orderId+status com TTL 24h.
+    // Protege contra flood quando o app estava offline e backend reinicia:
+    // evita reenviar para mesma combo ja entregue.
+    this._deliveredPushes = new Map(); // key → timestamp
+    this._DELIVERED_TTL = 24 * 60 * 60 * 1000; // 24h
   }
 
   start() {
@@ -456,8 +461,17 @@ class NostrWatchtowerService {
    * Wrapper around pushService.sendPush with stats tracking and rate limiting
    */
   async _sendPush(targetPubkey, data, notification) {
-    // SECURITY: Per-pubkey rate limiting to prevent push notification spam
+    // v540: Dedup persistente 24h por pubkey+orderId+subtype.
+    // Protege contra flood quando backend reinicia ou Nostr republica eventos.
     const now = Date.now();
+    const dedupKey = `${targetPubkey}:${data.order_id || 'no-order'}:${data.subtype || data.type}`;
+    const lastSent = this._deliveredPushes.get(dedupKey);
+    if (lastSent && (now - lastSent) < this._DELIVERED_TTL) {
+      // Ja enviado nas ultimas 24h — skip
+      return false;
+    }
+
+    // SECURITY: Per-pubkey rate limiting to prevent push notification spam
     const history = this._pushRateMap.get(targetPubkey) || [];
     const recent = history.filter(t => now - t < this._PUSH_RATE_WINDOW);
     if (recent.length >= this._PUSH_RATE_MAX) {
@@ -467,12 +481,16 @@ class NostrWatchtowerService {
     recent.push(now);
     this._pushRateMap.set(targetPubkey, recent);
 
-    // Periodic cleanup of rate map (every 1000 pushes)
+    // Periodic cleanup of rate map + delivered pushes (every 1000 pushes)
     if (this._stats.pushesSent % 1000 === 0 && this._pushRateMap.size > 100) {
       for (const [pk, times] of this._pushRateMap) {
         const valid = times.filter(t => now - t < this._PUSH_RATE_WINDOW);
         if (valid.length === 0) this._pushRateMap.delete(pk);
         else this._pushRateMap.set(pk, valid);
+      }
+      // v540: cleanup delivered pushes older than TTL
+      for (const [k, ts] of this._deliveredPushes) {
+        if (now - ts > this._DELIVERED_TTL) this._deliveredPushes.delete(k);
       }
     }
 
@@ -480,6 +498,7 @@ class NostrWatchtowerService {
       const ok = await pushService.sendPush(targetPubkey, data, notification);
       if (ok) {
         this._stats.pushesSent++;
+        this._deliveredPushes.set(dedupKey, now);
       } else {
         this._stats.pushesFailed++;
       }

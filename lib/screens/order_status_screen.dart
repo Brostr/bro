@@ -431,6 +431,23 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
   
   /// Trata mudancas de status e envia notificacoes
   void _handleStatusChange(String newStatus) {
+    // v540: Nao disparar notificacao local para ordens antigas (>30 min).
+    // Evita flood de notificacoes durante sync/catch-up ao abrir o app
+    // apos muito tempo offline.
+    final createdAtMs = _orderDetails?['created_at'];
+    DateTime? createdAt;
+    if (createdAtMs is int) {
+      createdAt = DateTime.fromMillisecondsSinceEpoch(createdAtMs);
+    } else if (createdAtMs is String) {
+      createdAt = DateTime.tryParse(createdAtMs);
+    }
+    if (createdAt != null) {
+      final age = DateTime.now().difference(createdAt);
+      if (age.inMinutes > 30) {
+        broLog('[ORDER] Notificacao ignorada - ordem com ${age.inMinutes}min');
+        return;
+      }
+    }
     switch (newStatus) {
       case 'accepted':
         _notificationService.notifyOrderAccepted(
