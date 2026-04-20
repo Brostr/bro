@@ -151,26 +151,7 @@ Future<void> _checkNostrForNewEvents() async {
   );
   newEvents.addAll(userEvents);
   
-  // 5b. Se provedor: verificar novas ordens disponiveis
-  if (isProvider) {
-    final orderEvents = await _queryRelaysForEvents(
-      kinds: [_kindBroOrder],
-      tags: {'#t': ['bro-order']}, // NAO usar #status — relays nao indexam tags longas
-      since: sinceTimestamp,
-    );
-    // Filtrar: nao ser do proprio provedor + status pending
-    for (final event in orderEvents) {
-      final authorPubkey = event['pubkey']?.toString() ?? '';
-      if (authorPubkey == userPubkey) continue; // Pular ordens proprias
-      
-      // Verificar status pending (filtro em memoria)
-      final content = event['parsedContent'] as Map<String, dynamic>? ?? {};
-      final status = content['status']?.toString() ?? _getTagValue(event, 'status') ?? 'pending';
-      if (status != 'pending') continue; // Pular ordens ja aceitas/completadas
-      
-      newEvents.add(event);
-    }
-  }
+  // 5b. Se provedor: NAO buscar novas ordens aqui. v545: o backend watchtower\n  // ja envia FCM push quando detecta kind 30078, e o provider_orders_screen\n  // mostra a lista via Nostr sync normal. Buscar aqui causava notificacao\n  // local DUPLICADA em cima da FCM.\n  // (isProvider era usado antes; agora ignorado para evitar triplicacao.)
   
   // 6. Filtrar eventos ja vistos + eventos publicados pelo proprio usuario.
   // v529: FIX self-notify. O query #p:userPubkey tambem casa com eventos que
@@ -409,14 +390,13 @@ Future<void> _showNotificationForEvent(Map<String, dynamic> event, String userPu
       payload = 'order_completed:$orderId';
       break;
       
-    case _kindBroOrder: // 30078 - Nova ordem disponivel (para provedores)
-      final amount = content['amount']?.toString() ?? '?';
-      final billType = content['billType']?.toString() ?? 'pix';
-      title = 'Nova Ordem Disponivel!';
-      body = 'Ordem de R\$ $amount ($billType) aguardando. Toque para aceitar.';
-      payload = 'new_order:$orderId';
-      importance = Importance.high;
-      break;
+    case _kindBroOrder: // 30078 - Nova ordem disponivel
+      // v545: NAO disparamos notificacao local aqui. O backend watchtower
+      // envia FCM push automaticamente via getProviderPubkeys() (v544).
+      // Antes, esta branch + foreground polling + FCM = 3 notificacoes
+      // para a mesma ordem.
+      broLog('[BRO-BG] kind 30078 ignorado — FCM push cuida disso');
+      return;
       
     default:
       broLog('[BRO-BG] Kind desconhecido: $kind — ignorando');

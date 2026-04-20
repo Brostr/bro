@@ -897,11 +897,12 @@ class ApiService {
   // ===== PUSH NOTIFICATION ENDPOINTS =====
 
   /// Register FCM token with the backend for order push notifications
-  Future<bool> registerPushToken(String fcmToken) async {
+  Future<bool> registerPushToken(String fcmToken, {bool? providerEnabled}) async {
     try {
       PushDiag.log('api: POST /push/register-token base=$_baseUrl');
       final response = await _dio.post('/push/register-token', data: {
         'fcm_token': fcmToken,
+        if (providerEnabled != null) 'provider_enabled': providerEnabled,
       });
       final ok = response.data?['ok'] == true;
       broLog('[PUSH] Backend token registered: $ok (push_enabled=${response.data?['push_enabled']})');
@@ -915,6 +916,25 @@ class ApiService {
     } catch (e) {
       broLog('[PUSH] Backend token registration failed: $e');
       PushDiag.log('api: register EXC $e');
+      return false;
+    }
+  }
+
+  /// v544: Toggle whether this pubkey receives 'Nova ordem disponivel'
+  /// broadcast pushes. Called when the user enters/exits provider mode.
+  Future<bool> setProviderPushStatus(bool enabled) async {
+    try {
+      final response = await _dio.post('/push/provider-status', data: {
+        'enabled': enabled,
+      });
+      final ok = response.data?['ok'] == true;
+      broLog('[PUSH] Provider status=$enabled ok=$ok');
+      return ok;
+    } on DioException catch (e) {
+      broLog('[PUSH] setProviderPushStatus failed: ${e.message}');
+      return false;
+    } catch (e) {
+      broLog('[PUSH] setProviderPushStatus failed: $e');
       return false;
     }
   }

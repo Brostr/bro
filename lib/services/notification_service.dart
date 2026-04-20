@@ -323,6 +323,22 @@ class NotificationService {
     );
   }
 
+  /// Mostra notificacao generica (expoe _showNotification com dedup).
+  /// Usado pelo handler FCM foreground em main.dart.
+  Future<void> showGeneric({
+    required String title,
+    required String body,
+    String? dedupKey,
+  }) async {
+    await _showNotification(
+      id: (dedupKey ?? '$title|$body').hashCode & 0x7FFFFFFF,
+      title: title,
+      body: body,
+      payload: dedupKey,
+      importance: Importance.high,
+    );
+  }
+
   /// Metodo generico para mostrar notificacao (com dedup via SharedPreferences)
   Future<void> _showNotification({
     required int id,

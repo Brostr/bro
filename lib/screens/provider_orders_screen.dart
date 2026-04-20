@@ -321,21 +321,17 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
         available.add(orderMap);
       }
       
-      // Notificar sobre novas ordens disponíveis
+      // v545: Notificar sobre novas ordens disponíveis
+      // NAO disparamos local notification aqui — o backend watchtower envia FCM
+      // push automaticamente quando detecta o evento kind 30078. Antes era
+      // triplicado (FCM + WorkManager + foreground polling).
       bool seenIdsChanged = false;
       for (final order in available) {
         final orderId = order['id'] as String? ?? '';
-        if (orderId.isEmpty) continue; // Pular ordens sem ID
+        if (orderId.isEmpty) continue;
         if (!_seenOrderIds.contains(orderId)) {
           _seenOrderIds.add(orderId);
           seenIdsChanged = true;
-          if (_lastOrderCount > 0) {
-            _notificationService.notifyNewOrderAvailable(
-              orderId: orderId,
-              amount: (order['amount'] as num).toDouble(),
-              paymentType: order['payment_type'] as String? ?? 'pix',
-            );
-          }
         }
       }
       if (seenIdsChanged) _saveSeenOrderIds();

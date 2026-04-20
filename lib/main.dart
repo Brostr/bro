@@ -57,6 +57,7 @@ import 'services/order_realtime_service.dart';
 import 'services/brix_service.dart';
 import 'services/brix_relay_service.dart';
 import 'services/push_diag.dart';
+import 'services/secure_storage_service.dart';
 import 'config.dart';
 import 'config/breez_config.dart';
 
@@ -266,8 +267,11 @@ void main() async {
       });
 
       _retryAsync('Backend push', () async {
-        final ok = await ApiService().registerPushToken(token);
-        PushDiag.log('main: backend register=$ok');
+        // v544: Inclui flag provider_enabled para backend saber se deve
+        // enviar broadcasts de 'Nova ordem' para este usuario.
+        final isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
+        final ok = await ApiService().registerPushToken(token, providerEnabled: isProvider);
+        PushDiag.log('main: backend register=$ok provider=$isProvider');
         return ok;
       });
     } else {
@@ -306,6 +310,42 @@ void main() async {
         broLog('[FCM] Order update push — triggering sync');
         // Sync will be triggered when OrderProvider is available
         OrderRealtimeService().onOrderEvent?.call();
+
+        // v545: Android nao exibe automaticamente o campo 'notification' do FCM
+        // quando o app esta em foreground. Mostra local notification aqui (o
+        // dedup em NotificationService via bro_notified_transitions impede que
+        // seja exibida duas vezes para a mesma ordem quando o sistema ja
+        // mostrou em background).
+        //
+        // v547: Chaves de dedup alinhadas com NotificationService/BackgroundNotificationService.
+        // Antes usavamos subtype puro (ex: 'accepted:xxx') que NAO batia com os
+        // payloads canonicos ('order_accepted:xxx'), causando duplicacao quando
+        // a tela de ordem + FCM rodavam simultaneamente.
+        final notif = message.notification;
+        if (notif != null && (notif.title?.isNotEmpty ?? false)) {
+          final subtype = message.data['subtype']?.toString() ?? '';
+          final orderId = message.data['order_id']?.toString() ?? '';
+          // Mapeia subtype do backend para o prefixo canonico usado pelos demais servicos.
+          const subtypeToPayload = {
+            'accepted': 'order_accepted',
+            'awaiting_confirmation': 'payment_received',
+            'payment_submitted': 'payment_submitted',
+            'completed': 'order_completed',
+            'cancelled': 'order_cancelled',
+            'disputed': 'order_disputed',
+            'liquidated': 'order_liquidated',
+            'new_order': 'new_order',
+          };
+          final prefix = subtypeToPayload[subtype] ?? subtype;
+          final dedupKey = orderId.isNotEmpty && prefix.isNotEmpty
+              ? '$prefix:$orderId'
+              : null;
+          NotificationService().showGeneric(
+            title: notif.title!,
+            body: notif.body ?? '',
+            dedupKey: dedupKey,
+          );
+        }
       }
     });
 
