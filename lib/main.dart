@@ -316,14 +316,34 @@ void main() async {
         // dedup em NotificationService via bro_notified_transitions impede que
         // seja exibida duas vezes para a mesma ordem quando o sistema ja
         // mostrou em background).
+        //
+        // v547: Chaves de dedup alinhadas com NotificationService/BackgroundNotificationService.
+        // Antes usavamos subtype puro (ex: 'accepted:xxx') que NAO batia com os
+        // payloads canonicos ('order_accepted:xxx'), causando duplicacao quando
+        // a tela de ordem + FCM rodavam simultaneamente.
         final notif = message.notification;
         if (notif != null && (notif.title?.isNotEmpty ?? false)) {
           final subtype = message.data['subtype']?.toString() ?? '';
           final orderId = message.data['order_id']?.toString() ?? '';
+          // Mapeia subtype do backend para o prefixo canonico usado pelos demais servicos.
+          const subtypeToPayload = {
+            'accepted': 'order_accepted',
+            'awaiting_confirmation': 'payment_received',
+            'payment_submitted': 'payment_submitted',
+            'completed': 'order_completed',
+            'cancelled': 'order_cancelled',
+            'disputed': 'order_disputed',
+            'liquidated': 'order_liquidated',
+            'new_order': 'new_order',
+          };
+          final prefix = subtypeToPayload[subtype] ?? subtype;
+          final dedupKey = orderId.isNotEmpty && prefix.isNotEmpty
+              ? '$prefix:$orderId'
+              : null;
           NotificationService().showGeneric(
             title: notif.title!,
             body: notif.body ?? '',
-            dedupKey: orderId.isNotEmpty ? '$subtype:$orderId' : null,
+            dedupKey: dedupKey,
           );
         }
       }
