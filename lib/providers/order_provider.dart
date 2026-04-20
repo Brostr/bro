@@ -1796,14 +1796,9 @@ class OrderProvider with ChangeNotifier {
           }
           broLog('🔐 v438: billCode NIP-44 sent for ${order.id.substring(0, 8)}');
 
-          // Push notify the provider that billCode is ready
-          final pushOk = await _apiService.notifyUser(
-            targetPubkey: order.providerId!,
-            type: 'order_update',
-            subtype: 'billcode_encrypted',
-            orderId: order.id,
-          );
-          broLog('[PUSH] billcode_encrypted notify to ${order.providerId!.substring(0, 16)}: $pushOk');
+          // v541: Nao envia push 'billcode_encrypted' - era notificacao spam.
+          // O provedor vai ver o billcode quando abrir o app. Notificacoes
+          // uteis sao accepted, payment_received, completed, disputed.
         }
       } catch (e) {
         broLog('⚠️ v438: failed to send encrypted billCode for ${order.id.substring(0, 8)}: $e');
@@ -2219,32 +2214,14 @@ class OrderProvider with ChangeNotifier {
         return false;
       }
 
-      // v531: VERIFICAÇÃO PÓS-PUBLICAÇÃO. Aguardar 1.5s e checar de novo se
-      // o accept winning (mais recente por created_at) é o nosso. Se outro
-      // provedor publicou logo antes, o relay vai retornar o accept dele
-      // (kind 30079 é replaceable — só 1 sobrevive por #d tag).
-      await Future.delayed(const Duration(milliseconds: 1500));
-      try {
-        final winner = await _nostrOrderService
-            .fetchOrderProviderPubkey(orderId)
-            .timeout(const Duration(seconds: 6), onTimeout: () => providerPubkey);
-        if (winner != null && winner != providerPubkey) {
-          _error = 'Outro bro aceitou primeiro';
-          broLog('🚫 [acceptOrderAsProvider] PERDEU RACE: winner=${winner.substring(0, 8)} eu=${providerPubkey?.substring(0, 8)}');
-          _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
-          // Remover qualquer estado "accepted" que já tenhamos inserido local
-          final idx = _orders.indexWhere((o) => o.id == orderId);
-          if (idx != -1 && _orders[idx].providerId == providerPubkey) {
-            _orders.removeAt(idx);
-            await _saveOnlyUserOrders();
-          }
-          _isLoading = false;
-          _immediateNotify();
-          return false;
-        }
-      } catch (e) {
-        broLog('⚠️ [acceptOrderAsProvider] post-check falhou: $e');
-      }
+      // v541: Post-check removido. Ele chamava fetchOrderProviderPubkey que
+      // retornava o PRIMEIRO provedor encontrado nos relays — mas kind 30079
+      // com mesma #d mas pubkeys diferentes sao slots replaceable SEPARADOS
+      // (relay armazena AMBOS). Entao o post-check retornava qualquer um dos
+      // accepts, causando falsos positivos e revertendo aceitacoes validas.
+      // O pre-check (linha 2192) ja protege contra a maioria dos casos.
+      // Races genuinas sao resolvidas pela escolha do buyer (so um accept
+      // vai receber pagamento).
 
       // CORREÇÃO v1.0.129+223: Remover da lista de disponíveis IMEDIATAMENTE
       // Sem isso, a ordem ficava em _availableOrdersForProvider com status stale

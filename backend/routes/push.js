@@ -109,7 +109,6 @@ router.post('/notify', notifyLimiter, async (req, res) => {
   if (type === 'order_update') {
     const notifMap = {
       accepted:           { title: '🤝 Ordem aceita!',        body: 'Um Bro aceitou sua ordem' },
-      billcode_encrypted: { title: '🔐 Código PIX recebido',  body: 'Código de pagamento disponível' },
       payment_received:   { title: '📸 Comprovante recebido!', body: 'Verifique o comprovante e confirme' },
       completed:          { title: '✅ Ordem concluída!',      body: 'Troca finalizada com sucesso' },
       disputed:           { title: '⚠️ Disputa aberta',       body: 'Uma disputa foi aberta na sua ordem' },
