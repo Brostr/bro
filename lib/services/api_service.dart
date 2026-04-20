@@ -952,9 +952,35 @@ class ApiService {
         if (subtype != null) 'subtype': subtype,
         if (orderId != null) 'order_id': orderId,
       });
-      return response.data?['ok'] == true;
+      final ok = response.data?['ok'] == true;
+      PushDiag.log('api: notify status=${response.statusCode} ok=$ok body=${response.data}');
+      return ok;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message} body=${e.response?.data}';
+      PushDiag.log('api: notify FAIL $msg');
+      broLog('[PUSH] Notify failed: $msg');
+      return false;
     } catch (e) {
+      PushDiag.log('api: notify EXC $e');
       broLog('[PUSH] Notify failed: $e');
+      return false;
+    }
+  }
+
+  /// v539: Envia push de teste para si mesmo via endpoint dedicado
+  /// (o /push/notify bloqueia self-notify).
+  Future<bool> testSelfPush() async {
+    try {
+      final response = await _dio.post('/push/test-self');
+      final ok = response.data?['ok'] == true;
+      PushDiag.log('api: test-self status=${response.statusCode} ok=$ok body=${response.data}');
+      return ok;
+    } on DioException catch (e) {
+      final msg = 'type=${e.type.name} code=${e.response?.statusCode} msg=${e.message} body=${e.response?.data}';
+      PushDiag.log('api: test-self FAIL $msg');
+      return false;
+    } catch (e) {
+      PushDiag.log('api: test-self EXC $e');
       return false;
     }
   }

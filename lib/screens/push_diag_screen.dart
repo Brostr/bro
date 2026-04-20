@@ -129,20 +129,11 @@ class _PushDiagScreenState extends State<PushDiagScreen> {
 
   Future<void> _sendTestPush() async {
     try {
-      final pubkey = await StorageService().getNostrPublicKey();
-      if (pubkey == null) {
-        _snack('Pubkey NULL');
-        return;
-      }
-      // Manda um push pra si mesmo via endpoint /push/notify
-      final ok = await ApiService().notifyUser(
-        targetPubkey: pubkey,
-        type: 'order_update',
-        subtype: 'accepted',
-        orderId: 'test-diag-${DateTime.now().millisecondsSinceEpoch}',
-      );
-      _snack(ok ? 'Push enviado ✓ — aguarde alguns segundos' : 'Falha ao enviar');
+      // v539: usa endpoint dedicado /push/test-self (bypass do self_notify guard)
+      final ok = await ApiService().testSelfPush();
+      _snack(ok ? 'Push enviado ✓ — aguarde alguns segundos' : 'Falha ao enviar (veja logs)');
       PushDiag.log('diag: test push sent=$ok');
+      await _refresh();
     } catch (e) {
       _snack('Erro: $e');
     }

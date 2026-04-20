@@ -127,6 +127,30 @@ router.post('/notify', notifyLimiter, async (req, res) => {
 });
 
 /**
+ * POST /push/test-self
+ * Auth: NIP-98 (req.verifiedPubkey)
+ * v539: Envia um push de teste para o proprio usuario, bypass do self_notify guard.
+ * Usado pela tela de diagnostico para validar delivery end-to-end.
+ */
+router.post('/test-self', notifyLimiter, async (req, res) => {
+  const pubkey = req.verifiedPubkey;
+  const data = {
+    type: 'order_update',
+    sender_pubkey: pubkey,
+    subtype: 'accepted',
+    order_id: `test-${Date.now()}`,
+  };
+  const notification = {
+    title: '🧪 Push de teste',
+    body: 'Se voce ve isso, notificacoes funcionam!',
+  };
+  console.log(`[PUSH] /test-self pubkey=${pubkey.substring(0, 16)}...`);
+  const sent = await pushService.sendPush(pubkey, data, notification);
+  console.log(`[PUSH] /test-self result: sent=${sent}`);
+  res.json({ ok: sent });
+});
+
+/**
  * GET /push/status
  * Returns push service status (no auth required)
  */
