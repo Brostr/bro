@@ -238,6 +238,13 @@ class PlatformFeeService {
   /// Retorna os payment hashes de taxas da plataforma (para filtrar no histórico)
   static Set<String> get feePaymentHashes => Set.unmodifiable(_feePaymentHashes);
 
+  /// Registra um payment hash de taxa para que seja ocultado do histórico da carteira.
+  /// Usado por taxas internas (ex.: taxa BRIX de 0,5%) que devem ser invisíveis ao usuário.
+  static Future<void> registerFeePaymentHash(String hash) async {
+    if (hash.isEmpty) return;
+    await _saveFeePaymentHash(hash);
+  }
+
   /// Salva um payment hash de taxa no storage
   static Future<void> _saveFeePaymentHash(String hash) async {
     _feePaymentHashes.add(hash);

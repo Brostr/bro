@@ -321,30 +321,37 @@ void main() async {
         // Antes usavamos subtype puro (ex: 'accepted:xxx') que NAO batia com os
         // payloads canonicos ('order_accepted:xxx'), causando duplicacao quando
         // a tela de ordem + FCM rodavam simultaneamente.
-        final notif = message.notification;
-        if (notif != null && (notif.title?.isNotEmpty ?? false)) {
-          final subtype = message.data['subtype']?.toString() ?? '';
-          final orderId = message.data['order_id']?.toString() ?? '';
-          // Mapeia subtype do backend para o prefixo canonico usado pelos demais servicos.
-          const subtypeToPayload = {
-            'accepted': 'order_accepted',
-            'awaiting_confirmation': 'payment_received',
-            'payment_submitted': 'payment_submitted',
-            'completed': 'order_completed',
-            'cancelled': 'order_cancelled',
-            'disputed': 'order_disputed',
-            'liquidated': 'order_liquidated',
-            'new_order': 'new_order',
-          };
-          final prefix = subtypeToPayload[subtype] ?? subtype;
-          final dedupKey = orderId.isNotEmpty && prefix.isNotEmpty
-              ? '$prefix:$orderId'
-              : null;
-          NotificationService().showGeneric(
-            title: notif.title!,
-            body: notif.body ?? '',
-            dedupKey: dedupKey,
-          );
+        //
+        // v548: iOS ja exibe a notificacao FCM em foreground via
+        // setForegroundNotificationPresentationOptions(alert: true). Chamar
+        // showGeneric aqui duplicava a notificacao no iOS ("Bro encontrado"
+        // aparecia 2x por ordem). So disparamos local notification no Android.
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          final notif = message.notification;
+          if (notif != null && (notif.title?.isNotEmpty ?? false)) {
+            final subtype = message.data['subtype']?.toString() ?? '';
+            final orderId = message.data['order_id']?.toString() ?? '';
+            // Mapeia subtype do backend para o prefixo canonico usado pelos demais servicos.
+            const subtypeToPayload = {
+              'accepted': 'order_accepted',
+              'awaiting_confirmation': 'payment_received',
+              'payment_submitted': 'payment_submitted',
+              'completed': 'order_completed',
+              'cancelled': 'order_cancelled',
+              'disputed': 'order_disputed',
+              'liquidated': 'order_liquidated',
+              'new_order': 'new_order',
+            };
+            final prefix = subtypeToPayload[subtype] ?? subtype;
+            final dedupKey = orderId.isNotEmpty && prefix.isNotEmpty
+                ? '$prefix:$orderId'
+                : null;
+            NotificationService().showGeneric(
+              title: notif.title!,
+              body: notif.body ?? '',
+              dedupKey: dedupKey,
+            );
+          }
         }
       }
     });
