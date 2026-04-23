@@ -10,6 +10,7 @@ import '../services/nostr_service.dart';
 import '../services/nostr_order_service.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
+import '../services/order_reminder_service.dart';
 import '../models/order.dart';
 import '../config.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -2630,6 +2631,19 @@ class OrderProvider with ChangeNotifier {
         broLog('[AutoLiquidation] Background task is running, skipping foreground check');
         return;
       }
+    }
+    
+    // v550: Lembretes progressivos (24h / 30h / 35h) antes do deadline de 36h.
+    // Cobre ambos os cenarios: provedor pendente de comprovante e usuario
+    // pendente de confirmacao. Idempotente via SharedPreferences.
+    try {
+      final ordersAsMap = _orders.map((o) => o.toJson()).toList();
+      await OrderReminderService().checkAndNotify(
+        orders: ordersAsMap,
+        currentPubkey: _currentUserPubkey!,
+      );
+    } catch (e) {
+      broLog('[Reminder] erro no foreground: $e');
     }
     
     final now = DateTime.now();
