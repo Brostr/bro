@@ -47,6 +47,7 @@ import 'services/notification_service.dart';
 import 'services/api_service.dart';
 import 'services/cache_service.dart';
 import 'services/platform_fee_service.dart';
+import 'services/local_collateral_service.dart';
 import 'providers/theme_provider.dart';
 import 'widgets/alfa_banner.dart';
 
@@ -269,7 +270,25 @@ void main() async {
       _retryAsync('Backend push', () async {
         // v544: Inclui flag provider_enabled para backend saber se deve
         // enviar broadcasts de 'Nova ordem' para este usuario.
-        final isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
+        //
+        // v551: Auto-heal — se o flag diz que eh provedor mas NAO tem
+        // colateral local, o flag esta errado (legacy do bug onde
+        // provider_education_screen.dart setava true prematuramente).
+        // Corrigimos localmente e o setProviderMode sincroniza com o backend.
+        var isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
+        if (isProvider) {
+          try {
+            LocalCollateralService().setCurrentUser(pubkey);
+            final hasCol = await LocalCollateralService().hasCollateral(userPubkey: pubkey);
+            if (!hasCol) {
+              broLog('[FCM] auto-heal: provider flag=true sem colateral — corrigindo');
+              await SecureStorageService.setProviderMode(false, userPubkey: pubkey);
+              isProvider = false;
+            }
+          } catch (e) {
+            broLog('[FCM] auto-heal provider check error: $e');
+          }
+        }
         final ok = await ApiService().registerPushToken(token, providerEnabled: isProvider);
         PushDiag.log('main: backend register=$ok provider=$isProvider');
         return ok;
