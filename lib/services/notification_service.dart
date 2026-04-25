@@ -339,6 +339,23 @@ class NotificationService {
     );
   }
 
+  /// v553: Marca uma chave como ja notificada SEM exibir nada.
+  /// Usado quando o sistema (iOS) ja exibiu a notificacao FCM em foreground
+  /// e queremos impedir que um caminho local subsequente exiba a mesma
+  /// transicao novamente (ex.: order_status_screen detectando o sync).
+  Future<void> markShown(String dedupKey) async {
+    if (dedupKey.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    final notifiedJson = prefs.getString(notifiedTransitionsKey) ?? '[]';
+    final notified = Set<String>.from(jsonDecode(notifiedJson) as List);
+    if (notified.contains(dedupKey)) return;
+    notified.add(dedupKey);
+    final list = notified.toList();
+    if (list.length > 300) list.removeRange(0, list.length - 300);
+    await prefs.setString(notifiedTransitionsKey, jsonEncode(list));
+    broLog('🔕 markShown: $dedupKey');
+  }
+
   /// Metodo generico para mostrar notificacao (com dedup via SharedPreferences)
   Future<void> _showNotification({
     required int id,

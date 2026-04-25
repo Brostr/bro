@@ -54,9 +54,13 @@ class OrderProvider with ChangeNotifier {
   // v552: Sync expectations triggered by FCM push.
   // Quando chega um push de order_update, marcamos a ordem como "sincronizando"
   // ate o evento Nostr correspondente chegar (e o status bater com o esperado)
-  // OU ate o timeout (20s). UI consulta isSyncing(orderId) para mostrar spinner.
+  // OU ate o timeout (120s). UI consulta isSyncing(orderId) para mostrar spinner.
+  // v553: timeout aumentado de 20s -> 120s. A sequencia pending->accepted->
+  // awaiting_confirmation pode levar mais de 20s se o relay esta lento, e o
+  // spinner sumindo no meio do caminho confunde mais que ajuda. Tambem
+  // resetamos o timer a cada progresso parcial detectado em _reconcileSyncExpectations.
   final Map<String, _SyncExpectation> _syncExpectations = {};
-  static const Duration _syncExpectationTimeout = Duration(seconds: 20);
+  static const Duration _syncExpectationTimeout = Duration(seconds: 120);
 
   // v448: Flag para saber se o sync inicial já completou
   // Enquanto false, UI mostra "sincronizando" ao invés de "nenhuma troca"
@@ -4511,6 +4515,10 @@ class OrderProvider with ChangeNotifier {
 
   /// Internal: clears expectations whose target was reached after a sync.
   /// Called at the end of every sync cycle.
+  /// v553: also RESETS the timeout timer when partial progress is detected
+  /// (status advanced but didn't yet reach the expected target). Prevents
+  /// the spinner from disappearing mid-flight on slow relay deliveries
+  /// (e.g. pending -> accepted -> awaiting_confirmation can take >20s).
   void _reconcileSyncExpectations() {
     if (_syncExpectations.isEmpty) return;
     final toClear = <String>[];
@@ -4522,6 +4530,19 @@ class OrderProvider with ChangeNotifier {
       if (order.status == exp.expectedStatus ||
           _isStatusMoreRecent(order.status, exp.expectedStatus)) {
         toClear.add(orderId);
+        return;
+      }
+      // Partial progress: status changed since last reconcile but still
+      // behind the expectation. Reset the timer so the spinner stays.
+      if (exp.lastSeenStatus != order.status) {
+        exp.lastSeenStatus = order.status;
+        exp.timer?.cancel();
+        exp.timer = Timer(_syncExpectationTimeout, () {
+          if (_syncExpectations[orderId] == exp) {
+            _syncExpectations.remove(orderId);
+            _throttledNotify();
+          }
+        });
       }
     });
     for (final id in toClear) {
@@ -4570,5 +4591,8 @@ class _SyncExpectation {
   final String expectedStatus;
   final DateTime triggeredAt;
   Timer? timer;
+  // v553: tracks the last order.status observed during reconcile, so we
+  // can detect partial progress and reset the timer accordingly.
+  String? lastSeenStatus;
   _SyncExpectation({required this.expectedStatus, required this.triggeredAt});
 }
