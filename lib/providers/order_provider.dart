@@ -51,6 +51,13 @@ class OrderProvider with ChangeNotifier {
   final Map<String, DateTime> _nudgedOrders = {};
   static const int _nudgeCooldownMinutes = 30;
 
+  // v552: Sync expectations triggered by FCM push.
+  // Quando chega um push de order_update, marcamos a ordem como "sincronizando"
+  // ate o evento Nostr correspondente chegar (e o status bater com o esperado)
+  // OU ate o timeout (20s). UI consulta isSyncing(orderId) para mostrar spinner.
+  final Map<String, _SyncExpectation> _syncExpectations = {};
+  static const Duration _syncExpectationTimeout = Duration(seconds: 20);
+
   // v448: Flag para saber se o sync inicial já completou
   // Enquanto false, UI mostra "sincronizando" ao invés de "nenhuma troca"
   bool _hasCompletedInitialSync = false;
@@ -3865,6 +3872,8 @@ class OrderProvider with ChangeNotifier {
       if (!_hasCompletedInitialSync) {
         _hasCompletedInitialSync = true;
       }
+      // v552: limpar expectations cujo target ja foi alcancado pelo relay
+      _reconcileSyncExpectations();
       _throttledNotify();
       
     } catch (e) {
@@ -4450,4 +4459,116 @@ class OrderProvider with ChangeNotifier {
     _throttledNotify();
     return true;
   }
+
+  // ==================== v552: Sync expectations (FCM push -> spinner UX) ====================
+
+  /// Returns true if this order is currently waiting for a relay sync to
+  /// confirm a status transition that was just announced via FCM push.
+  bool isSyncing(String orderId) => _syncExpectations.containsKey(orderId);
+
+  /// Returns the status the UI is waiting for, or null if not syncing.
+  String? expectedStatusForSyncing(String orderId) =>
+      _syncExpectations[orderId]?.expectedStatus;
+
+  /// Marks an order as syncing toward [expectedStatus]. Triggered by an FCM
+  /// push (see main.dart onMessage). Schedules a [_syncExpectationTimeout]
+  /// timer that auto-clears the expectation if the relay does not deliver
+  /// the matching event in time. Idempotent: re-marking the same order
+  /// resets the timer.
+  ///
+  /// IMPORTANT: this method does NOT trigger a fetch by itself. The fetch
+  /// is already triggered by OrderRealtimeService.onOrderEvent (wired in
+  /// main.dart Builder) and by foreground polling.
+  void markSyncing(String orderId, String expectedStatus) {
+    if (orderId.isEmpty || expectedStatus.isEmpty) return;
+
+    // If the order is already at or past the expected status, no need to
+    // signal syncing — the relay already delivered (or local state is
+    // ahead of the push).
+    final existing = getOrderById(orderId);
+    if (existing != null) {
+      if (existing.status == expectedStatus ||
+          _isStatusMoreRecent(existing.status, expectedStatus)) {
+        return;
+      }
+    }
+
+    // Cancel any previous timer for this order before replacing.
+    _syncExpectations[orderId]?.timer?.cancel();
+    final exp = _SyncExpectation(
+      expectedStatus: expectedStatus,
+      triggeredAt: DateTime.now(),
+    );
+    exp.timer = Timer(_syncExpectationTimeout, () {
+      if (_syncExpectations[orderId] == exp) {
+        _syncExpectations.remove(orderId);
+        _throttledNotify();
+      }
+    });
+    _syncExpectations[orderId] = exp;
+    _throttledNotify();
+  }
+
+  /// Internal: clears expectations whose target was reached after a sync.
+  /// Called at the end of every sync cycle.
+  void _reconcileSyncExpectations() {
+    if (_syncExpectations.isEmpty) return;
+    final toClear = <String>[];
+    _syncExpectations.forEach((orderId, exp) {
+      final order = getOrderById(orderId);
+      if (order == null) return;
+      // Clear when actual status reached the expectation OR went past it
+      // (e.g. expected 'awaiting_confirmation' but already 'completed').
+      if (order.status == exp.expectedStatus ||
+          _isStatusMoreRecent(order.status, exp.expectedStatus)) {
+        toClear.add(orderId);
+      }
+    });
+    for (final id in toClear) {
+      _syncExpectations[id]?.timer?.cancel();
+      _syncExpectations.remove(id);
+    }
+  }
+
+  /// Maps an FCM order_update subtype to the Order.status the app expects
+  /// to see in the next sync. Returns null for unknown subtypes.
+  static String? expectedStatusForSubtype(String subtype) {
+    switch (subtype) {
+      case 'accepted':
+        return 'accepted';
+      case 'awaiting_confirmation':
+      case 'payment_submitted':
+        return 'awaiting_confirmation';
+      case 'completed':
+        return 'completed';
+      case 'cancelled':
+        return 'cancelled';
+      case 'disputed':
+        return 'disputed';
+      case 'liquidated':
+        return 'liquidated';
+      default:
+        return null;
+    }
+  }
+
+  @override
+  void dispose() {
+    // v552: cancel sync expectation timers to prevent leaks.
+    for (final exp in _syncExpectations.values) {
+      exp.timer?.cancel();
+    }
+    _syncExpectations.clear();
+    _saveDebounceTimer?.cancel();
+    _notifyDebounceTimer?.cancel();
+    super.dispose();
+  }
+}
+
+/// v552: Tracks an in-flight sync expectation triggered by an FCM push.
+class _SyncExpectation {
+  final String expectedStatus;
+  final DateTime triggeredAt;
+  Timer? timer;
+  _SyncExpectation({required this.expectedStatus, required this.triggeredAt});
 }

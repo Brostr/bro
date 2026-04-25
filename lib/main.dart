@@ -330,6 +330,14 @@ void main() async {
         // Sync will be triggered when OrderProvider is available
         OrderRealtimeService().onOrderEvent?.call();
 
+        // v552: notify OrderProvider to mark this order as "syncing" so the
+        // UI can show a spinner/placeholder until the relay event arrives.
+        final orderId = message.data['order_id']?.toString() ?? '';
+        final subtype = message.data['subtype']?.toString() ?? '';
+        if (orderId.isNotEmpty && subtype.isNotEmpty) {
+          OrderRealtimeService().onOrderPush?.call(orderId, subtype);
+        }
+
         // v545: Android nao exibe automaticamente o campo 'notification' do FCM
         // quando o app esta em foreground. Mostra local notification aqui (o
         // dedup em NotificationService via bro_notified_transitions impede que
@@ -382,9 +390,16 @@ void main() async {
         BrixRelayService().triggerPoll();
       } else if (message.data['type'] == 'order_update') {
         OrderRealtimeService().onOrderEvent?.call();
+        // v552: also mark order as syncing so opening the app shows the
+        // spinner immediately while the relay catches up.
+        final orderId = message.data['order_id']?.toString() ?? '';
+        final subtype = message.data['subtype']?.toString() ?? '';
+        if (orderId.isNotEmpty && subtype.isNotEmpty) {
+          OrderRealtimeService().onOrderPush?.call(orderId, subtype);
+        }
       }
     });
-    
+
     // v262: Iniciar background notifications (polling Nostr a cada 15min)
     await initBackgroundNotifications();
     broLog('🔔 Background notifications ativado');
@@ -552,6 +567,15 @@ class BroApp extends StatelessWidget {
           OrderRealtimeService().onOrderEvent = () {
             broLog('[RT] Triggering immediate sync from real-time event');
             orderProvider.syncOrdersFromNostr(force: true);
+          };
+
+          // v552: Connect FCM order_update push -> mark order as syncing
+          // so UI can show spinner/placeholder while the relay catches up.
+          OrderRealtimeService().onOrderPush = (String orderId, String subtype) {
+            final expected = OrderProvider.expectedStatusForSubtype(subtype);
+            if (expected != null) {
+              orderProvider.markSyncing(orderId, expected);
+            }
           };
           
           // Callback para pagamentos RECEBIDOS (menos comum no fluxo atual)
