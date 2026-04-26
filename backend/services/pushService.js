@@ -321,6 +321,9 @@ setInterval(cleanupStaleTokens, 24 * 60 * 60 * 1000);
 
 /**
  * Check if a pubkey has a registered token (for diagnostics)
+ *
+ * v559: Also surfaces providerEnabled so the device can self-diagnose
+ * "why am I not receiving 'Nova ordem' broadcasts?" without a server log.
  */
 function hasToken(pubkey) {
   const entry = tokenStore.get(pubkey);
@@ -329,6 +332,7 @@ function hasToken(pubkey) {
     registered: true,
     updatedAt: entry.updatedAt,
     ageSeconds: Math.floor((Date.now() - entry.updatedAt) / 1000),
+    providerEnabled: entry.providerEnabled === true,
   };
 }
 

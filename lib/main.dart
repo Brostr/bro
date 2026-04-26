@@ -47,7 +47,6 @@ import 'services/notification_service.dart';
 import 'services/api_service.dart';
 import 'services/cache_service.dart';
 import 'services/platform_fee_service.dart';
-import 'services/local_collateral_service.dart';
 import 'providers/theme_provider.dart';
 import 'widgets/alfa_banner.dart';
 
@@ -296,26 +295,21 @@ void main() async {
         // v544: Inclui flag provider_enabled para backend saber se deve
         // enviar broadcasts de 'Nova ordem' para este usuario.
         //
-        // v551: Auto-heal — se o flag diz que eh provedor mas NAO tem
-        // colateral local, o flag esta errado (legacy do bug onde
-        // provider_education_screen.dart setava true prematuramente).
-        // Corrigimos localmente e o setProviderMode sincroniza com o backend.
-        var isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
-        if (isProvider) {
-          try {
-            LocalCollateralService().setCurrentUser(pubkey);
-            final hasCol = await LocalCollateralService().hasCollateral(userPubkey: pubkey);
-            if (!hasCol) {
-              broLog('[FCM] auto-heal: provider flag=true sem colateral — corrigindo');
-              await SecureStorageService.setProviderMode(false, userPubkey: pubkey);
-              isProvider = false;
-            }
-          } catch (e) {
-            broLog('[FCM] auto-heal provider check error: $e');
-          }
-        }
-        final ok = await ApiService().registerPushToken(token, providerEnabled: isProvider);
-        PushDiag.log('main: backend register=$ok provider=$isProvider');
+        // v559: Auto-heal removido. O bug original (provider_education_screen
+        // marcando true prematuramente) ja foi corrigido na fonte. O auto-heal
+        // estava REBAIXANDO provedores legitimos quando LocalCollateralService
+        // perdia o cache (ex: instalacao limpa apos restore parcial), parando
+        // de receber broadcasts de 'Nova ordem'.
+        //
+        // v559: Quando isProvider=false, OMITIMOS o flag em vez de mandar
+        // false. O backend (v544) preserva o flag existente quando o campo
+        // e omitido — assim o provider mode so liga via tier_deposit ou
+        // provider_orders_screen, nunca "desliga" sozinho aqui.
+        final isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
+        final ok = isProvider
+            ? await ApiService().registerPushToken(token, providerEnabled: true)
+            : await ApiService().registerPushToken(token);
+        PushDiag.log('main: backend register=$ok provider=$isProvider${isProvider ? '' : '(omitido)'}');
         return ok;
       });
     } else {
