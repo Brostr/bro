@@ -1055,73 +1055,53 @@ class OrderProvider with ChangeNotifier {
       
       // v493: PUBLICAR NO NOSTR com flag de cancelamento.
       // CRITICO: .timeout() em Dart NAO cancela o Future! O loop interno
-      // continua rodando em background e re-insere a ordem via _saveOrders().
-      // FIX: usar flag 'cancelled' que o loop verifica antes de cada tentativa.
+      // v554: NUNCA deletar a ordem se Nostr publish falhar. Esta funcao e
+      // chamada APOS o pagamento ter sido confirmado (ver
+      // lightning_payment_screen._handlePaymentSuccess + onchain). Se a ordem
+      // for removida porque o relay falhou, o usuario ja pagou e nao tem
+      // ordem no app — bug critico de perda de dados. O sistema de
+      // republishLocalOrdersToNostr() (chamado em todo sync background)
+      // cuida de re-publicar ordens com eventId == null.
       bool published = false;
-      bool cancelled = false;
       final orderId = order.id;
-      
+
+      // Persistir LOCALMENTE imediatamente. Pagamento ja confirmado, ordem precisa existir.
+      _orders.insert(0, order);
+      await _saveOrders();
+      _immediateNotify();
+
+      // Tentar publicar no Nostr com timeout curto (10s). Se falhar, a ordem
+      // permanece localmente com eventId null e o background republish cuida.
       try {
-        await Future(() async {
-          // Inserir UMA VEZ antes do loop
-          _orders.insert(0, order);
-          
-          for (int attempt = 1; attempt <= 3; attempt++) {
-            // CRUCIAL: se timeout ja disparou, nao continuar
-            if (cancelled) {
-              broLog('[createOrder] attempt $attempt abortado (cancelled)');
-              return;
-            }
-            try {
-              await _publishOrderToNostr(order);
-              if (cancelled) return; // Checar de novo apos publish
-              final idx = _orders.indexWhere((o) => o.id == orderId);
-              if (idx != -1 && _orders[idx].eventId != null) {
-                published = true;
-                broLog('[createOrder] Ordem publicada no Nostr (tentativa $attempt)');
-                return;
-              }
-              broLog('[createOrder] Publish tentativa $attempt: sem eventId retornado');
-            } catch (e) {
-              broLog('[createOrder] Publish tentativa $attempt falhou: $e');
-            }
-            if (attempt < 3) await Future.delayed(const Duration(seconds: 2));
-          }
-        }).timeout(const Duration(seconds: 20));
+        await _publishOrderToNostr(order).timeout(const Duration(seconds: 10));
+        final idx = _orders.indexWhere((o) => o.id == orderId);
+        if (idx != -1 && _orders[idx].eventId != null) {
+          published = true;
+          broLog('[createOrder] Ordem ${orderId.substring(0, 8)} publicada no Nostr');
+        } else {
+          broLog('[createOrder] Ordem ${orderId.substring(0, 8)} publicada localmente, aguardando republish no proximo sync');
+        }
       } catch (e) {
-        // Timeout ou erro: setar flag ANTES de limpar (Dart e single-threaded,
-        // entao quando catch roda, o loop esta suspenso em algum await.
-        // Ao retomar, verifica cancelled e para.)
-        cancelled = true;
-        // v530: SEMPRE publicar cancel best-effort em qualquer falha.
-        // ANTES (v529) so publicava cancel se eventId estivesse setado, mas
-        // o timeout mata _publishOrderToNostr ANTES dele setar eventId mesmo
-        // se 1 relay ja aceitou o evento (Future.wait espera todos). Resultado:
-        // ordem orfa no relay, provedor ve duplicata. Cancel e idempotente
-        // e filtrado por fetchPendingOrders, entao nao ha custo em publicar a toa.
-        _orders.removeWhere((o) => o.id == orderId);
-        await _saveOrders();
-        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} timeout/erro: $e');
-        _error = 'Falha ao publicar ordem nos relays Nostr';
-        return null;
+        broLog('[createOrder] Publish Nostr falhou (ordem mantida localmente, sera republicada): $e');
+        // Tentar uma 2a vez em background sem bloquear o usuario
+        unawaited(Future.delayed(const Duration(seconds: 3), () async {
+          try {
+            await _publishOrderToNostr(order).timeout(const Duration(seconds: 10));
+            broLog('[createOrder] retry background OK para ${orderId.substring(0, 8)}');
+            _throttledNotify();
+          } catch (_) {
+            // republishLocalOrdersToNostr cuida no proximo sync
+          }
+        }));
       }
-      
-      if (!published) {
-        // v530: SEMPRE publicar cancel best-effort em qualquer falha (ver comentario acima).
-        _orders.removeWhere((o) => o.id == orderId);
-        await _saveOrders();
-        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} falhou apos 3 tentativas');
-        _error = 'Falha ao publicar ordem nos relays Nostr';
-        return null;
-      }
-      
-      // Publicou com sucesso
+
       _currentOrder = _orders.firstWhere((o) => o.id == orderId);
       await _saveOrders();
       _immediateNotify();
-      
+      // ignore: dead_code
+      if (!published) {
+        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} salva sem eventId (sera republicada)');
+      }
       return _currentOrder;
     } catch (e) {
       _error = e.toString();
