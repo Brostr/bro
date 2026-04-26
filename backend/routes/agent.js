@@ -173,4 +173,22 @@ router.post('/analyze', analyzeLimiter, requireAdmin, (req, res) => {
   }
 });
 
+/**
+ * v557 (Audit B3): Vision-based proof analysis — STUB.
+ *
+ * Real implementation requires:
+ *   - process.env.VISION_API_KEY (Anthropic Claude vision OR OpenAI GPT-4o)
+ *   - Admin upload UX in platform_admin_screen to send the image
+ *   - Server-side OCR + heuristics to detect: PIX E2E presence, code de
+ *     autenticação, valor, data/hora; flag screenshots without those fields
+ *     as "weak/possibly fabricated".
+ * Until then, returns 501.
+ */
+router.post('/analyze-proof', requireAdmin, (req, res) => {
+  res.status(501).json({
+    error: 'not_implemented',
+    detail: 'Vision-based proof analysis not implemented. Requires VISION_API_KEY env + admin upload UX (Audit B3).',
+  });
+});
+
 module.exports = router;

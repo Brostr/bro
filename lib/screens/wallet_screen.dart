@@ -2808,7 +2808,19 @@ class _WalletScreenState extends State<WalletScreen> {
     // Cada ordem salva o paymentHash no momento do pagamento
     bool isBroOrderPayment = false;
     String? correlatedOrderId;
-    
+
+    // v557: Early-detect — invoice com descrição 'Bro - Ordem XXXXXXXX' SÓ é
+    // gerado pelo PROVEDOR ([provider_order_detail_screen.dart] e [main.dart]).
+    // Logo, qualquer recebimento com esse formato é GANHO DE BRO,
+    // independente de a ordem ter sincronizado e ter providerId setado.
+    // Sem esse atalho, o fallback por descrição (#2 abaixo) achava a ordem
+    // mas com providerId ainda nulo (sync atrasado) → rotulava como
+    // "Depósito para ordem XXXXX" e depois mudava para "Ganho como Bro"
+    // ao re-renderizar.
+    if (isReceived && description.startsWith('Bro - Ordem ')) {
+      isBroOrderPayment = true;
+    }
+
     // 1. Correlação EXATA por paymentHash (mais confiável)
     if (paymentHash.isNotEmpty) {
       for (final order in orderProvider.orders) {
@@ -2825,7 +2837,9 @@ class _WalletScreenState extends State<WalletScreen> {
     
     // 2. Fallback: Correlação por descrição
     // Suporta múltiplos formatos: "Bro - Ordem XXXXXXXX" e "Bro XXXXXXXX"
-    if (correlatedOrderId == null && 
+    // v557: skip se já marcamos como Bro earning no early-detect (evita
+    // setar correlatedOrderId que causaria render como "Depósito para ordem")
+    if (!isBroOrderPayment && correlatedOrderId == null && 
         !description.contains('Garantia') &&
         !description.contains('Platform Fee')) {
       String? orderIdFromDesc;

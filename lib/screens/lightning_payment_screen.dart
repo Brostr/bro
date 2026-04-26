@@ -125,16 +125,61 @@ class _LightningPaymentScreenState extends State<LightningPaymentScreen> {
     _confettiController.play();
 
     if (!mounted) return;
-    
+
+    // v557: Mostrar feedback visual IMEDIATAMENTE; trabalho pesado
+    // (publish Nostr, save preferences, fee tracking) roda em background
+    // pra não congelar a thread principal e travar a animação dos confetes.
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Pagamento recebido! Agora aguarde um Bro aceitar sua ordem.'),
+        backgroundColor: Colors.green,
+        duration: Duration(seconds: 3),
+      ),
+    );
+
     final orderProvider = context.read<OrderProvider>();
-    
-    // 🔥 NOVO FLUXO: Criar ordem SOMENTE AGORA que o pagamento foi confirmado!
-    // Isso evita criar ordens "fantasma" que não foram pagas
+    final navigator = Navigator.of(context);
+
+    // Faz o trabalho pesado em background. A navegação espera no máximo 2.5s
+    // pelo orderId, mas o confete já está caindo livre.
+    final orderIdFuture = _persistOrderInBackground(orderProvider);
+
+    // Aguardar até 2.5s pela criação da ordem (suficiente pra ter orderId
+    // antes da navegação) — se demorar mais, navegamos pra home.
+    String? orderId;
+    try {
+      orderId = await orderIdFuture.timeout(const Duration(milliseconds: 2500));
+    } catch (_) {
+      orderId = null;
+    }
+
+    if (!mounted) return;
+
+    broLog('🔄 Navegando para próxima tela... orderId=${orderId ?? "(timeout)"}');
+
+    if (orderId != null && orderId.isNotEmpty) {
+      navigator.pushNamedAndRemoveUntil(
+        '/order-status',
+        (route) => route.isFirst,
+        arguments: {
+          'orderId': orderId,
+          'amountBrl': widget.totalBrl,
+          'amountSats': widget.amountSats,
+        },
+      );
+    } else {
+      broLog('⚠️ orderId não disponível em 2.5s, voltando para dashboard (background ainda processa)');
+      navigator.pushNamedAndRemoveUntil('/home', (route) => false);
+    }
+  }
+
+  /// Persiste a ordem e dispara side-effects em background, sem bloquear UI.
+  /// Retorna o orderId quando disponível (ou null se falhar).
+  Future<String?> _persistOrderInBackground(OrderProvider orderProvider) async {
     String orderId = widget.orderId;
-    
+
     if (orderId.isEmpty && widget.billType != null) {
-      broLog('🚀 Pagamento confirmado! CRIANDO ORDEM AGORA...');
-      
+      broLog('🚀 Pagamento confirmado! CRIANDO ORDEM em background...');
       final order = await orderProvider.createOrder(
         billType: widget.billType!,
         billCode: widget.billCode ?? '',
@@ -142,18 +187,7 @@ class _LightningPaymentScreenState extends State<LightningPaymentScreen> {
         btcAmount: widget.btcAmount ?? 0,
         btcPrice: widget.btcPrice ?? 0,
       );
-      
-      if (order != null) {
-        orderId = order.id;
-        _createdOrderId = orderId;
-        broLog('✅ Ordem CRIADA após pagamento: $orderId');
-        
-        // Salvar paymentHash na ordem
-        if (widget.paymentHash.isNotEmpty) {
-          await orderProvider.setOrderPaymentHash(orderId, widget.paymentHash, widget.invoice);
-          broLog('✅ PaymentHash salvo na ordem: ${widget.paymentHash}');
-        }
-      } else {
+      if (order == null) {
         broLog('❌ Falha ao criar ordem após pagamento!');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -163,79 +197,44 @@ class _LightningPaymentScreenState extends State<LightningPaymentScreen> {
               duration: Duration(seconds: 5),
             ),
           );
-          // v403: NÃO retornar — navegar para home em vez de ficar preso
-          await Future.delayed(const Duration(seconds: 2));
-          if (mounted) {
-            Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
-          }
         }
-        return;
+        return null;
       }
+      orderId = order.id;
+      _createdOrderId = orderId;
+      broLog('✅ Ordem CRIADA após pagamento: $orderId');
+
+      // Side-effects: NÃO bloquear o retorno do orderId (UI pode navegar já).
+      if (widget.paymentHash.isNotEmpty) {
+        unawaited(orderProvider
+            .setOrderPaymentHash(orderId, widget.paymentHash, widget.invoice)
+            .catchError((e) => broLog('setOrderPaymentHash erro: $e')));
+      }
+      unawaited(orderProvider
+          .updateOrderStatus(orderId: orderId, status: 'payment_received')
+          .catchError((e) => broLog('updateOrderStatus erro: $e')));
     } else if (orderId.isNotEmpty) {
-      // Ordem já existe (fluxo antigo) - apenas publicar
-      broLog('🚀 Pagamento confirmado! Publicando ordem existente...');
-      final published = await orderProvider.publishOrderAfterPayment(orderId);
-      if (published) {
-        broLog('✅ Ordem publicada no Nostr - Bros agora podem vê-la!');
-      } else {
-        broLog('⚠️ Falha ao publicar ordem no Nostr');
-      }
-    }
-    
-    // Status payment_received = usuário pagou via Lightning, aguardando Bro aceitar
-    if (orderId.isNotEmpty) {
-      await orderProvider.updateOrderStatus(
-        orderId: orderId,
-        status: 'payment_received',
-      );
-      broLog('✅ Ordem $orderId atualizada para payment_received');
+      // Ordem já existe (fluxo antigo) — publicar e atualizar em background
+      unawaited(orderProvider
+          .publishOrderAfterPayment(orderId)
+          .catchError((e) => broLog('publishOrderAfterPayment erro: $e')));
+      unawaited(orderProvider
+          .updateOrderStatus(orderId: orderId, status: 'payment_received')
+          .catchError((e) => broLog('updateOrderStatus erro: $e')));
     }
 
-    // Registrar taxa da plataforma (2%)
-    try {
-      await PlatformFeeService.recordFee(
+    // Fee tracking — fire and forget
+    if (orderId.isNotEmpty) {
+      unawaited(PlatformFeeService.recordFee(
         orderId: orderId,
         transactionBrl: widget.totalBrl,
         transactionSats: widget.amountSats,
         providerPubkey: widget.receiver ?? 'unknown',
         clientPubkey: 'client',
-      );
-      broLog('Taxa da plataforma registrada');
-    } catch (e) {
-      broLog('Erro ao registrar taxa: $e');
+      ).catchError((e) => broLog('recordFee erro: $e')));
     }
 
-    // Mostrar mensagem e navegar
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Pagamento recebido! Agora aguarde um Bro aceitar sua ordem.'),
-          backgroundColor: Colors.green,
-          duration: Duration(seconds: 3),
-        ),
-      );
-    }
-
-    broLog('🔄 Aguardando 2 segundos para navegar... orderId=$orderId');
-    
-    // v403: Aguardar e SEMPRE navegar — nunca ficar preso na tela de pagamento
-    await Future.delayed(const Duration(seconds: 2));
-    if (mounted && orderId.isNotEmpty) {
-      broLog('🚀 Navegando para /order-status com orderId=$orderId');
-      Navigator.of(context).pushNamedAndRemoveUntil(
-        '/order-status',
-        (route) => route.isFirst,
-        arguments: {
-          'orderId': orderId,
-          'amountBrl': widget.totalBrl,
-          'amountSats': widget.amountSats,
-        },
-      );
-    } else if (mounted) {
-      // Fallback: voltar para o dashboard
-      broLog('⚠️ orderId vazio, voltando para dashboard');
-      Navigator.of(context).pushNamedAndRemoveUntil('/home', (route) => false);
-    }
+    return orderId.isEmpty ? null : orderId;
   }
 
   void _copyToClipboard(String text, String label) {
