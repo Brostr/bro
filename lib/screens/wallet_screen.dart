@@ -145,6 +145,17 @@ class _WalletScreenState extends State<WalletScreen> {
           broLog('🔇 Ocultando lado recebido do wallet payment: $amount sats');
           return false;
         }
+
+        // v555: OCULTAR "Bro Payment" recebido — é o invoice de depósito que o
+        // cliente cria na PRÓPRIA carteira em payment_screen para iniciar uma
+        // ordem (criada APÓS pagamento confirmado). O sats entram na carteira
+        // dele e ficam disponíveis para uso, mas não são "ganho como Bro" nem
+        // uma transação real do user — é apenas reserva interna. Quando a
+        // ordem for paga ao provedor, aparecerá uma saída separada.
+        if (isReceived && description == 'Bro Payment') {
+          broLog('🔇 Ocultando depósito interno Bro Payment recebido: $amount sats');
+          return false;
+        }
         
         // OCULTAR: Auto-pagamentos Lightning de ordens pagas com saldo da carteira
         // Evita duplicata entre synthetic wallet entry e outgoing auto-pay SDK tx
