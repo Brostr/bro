@@ -201,8 +201,34 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
           final matchingOrder = allOrders.where((o) => o.id == dOrderId).firstOrNull;
           final isOrderResolved = matchingOrder != null && 
               const ['completed', 'cancelled', 'liquidated'].contains(matchingOrder.status);
-          
-          if (resolution != null || isLocallyResolved || isOrderResolved) {
+
+          // v556 FIX (A3 + A7): também considerar status do Dispute LOCAL.
+          // Disputas antigas (pré-persistência) podem ter `Dispute.status` =
+          // resolved_user/resolved_provider/cancelled mas nunca foram marcadas
+          // via markDisputeResolved(). Isso fazia a disputa aparecer aberta no
+          // admin mesmo após resolução. Aqui consultamos o registro local e,
+          // se resolvido, fazemos backfill da persistência.
+          Dispute? localMatch;
+          for (final d in allDisputes) {
+            if (d.orderId == dOrderId) { localMatch = d; break; }
+          }
+          final isLocalResolved = localMatch != null &&
+              (localMatch.status.startsWith('resolved') ||
+               localMatch.status == 'cancelled' ||
+               localMatch.status == 'completed');
+
+          if (resolution != null || isLocallyResolved || isOrderResolved || isLocalResolved) {
+            // Backfill: garantir persistência de resolução para evitar reaparecer
+            if (!isLocallyResolved) {
+              final resTag = resolution != null
+                  ? (resolution['resolution'] as String? ?? 'resolved_unknown')
+                  : (isLocalResolved ? localMatch!.status : (matchingOrder?.status ?? 'resolved_unknown'));
+              try {
+                await storage.markDisputeResolved(dOrderId, resTag);
+                locallyResolvedIds.add(dOrderId);
+                broLog('💾 Backfill markDisputeResolved: ${dOrderId.substring(0, 8)} ($resTag)');
+              } catch (_) {}
+            }
             dispute['resolution'] = resolution;
             dispute['resolved'] = true;
             resolvedNostr.add(dispute);
