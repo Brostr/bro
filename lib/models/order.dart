@@ -156,23 +156,14 @@
   bool get isPaymentVerified => paymentHash != null && paymentHash!.isNotEmpty;
 
   /// v560: sats totais que o consumidor deve pagar ao Bro nesta ordem.
-  /// Usa o preço BTC TRAVADO na criação para converter a fee do provedor (BRL→sats),
-  /// garantindo que a tela do consumidor (que usa providerFee BRL / btcPrice) e o
-  /// invoice gerado pelo Bro batam exatamente.
-  /// Fórmula:
-  ///   baseSats = btcAmount × 1e8
-  ///   providerFeeSats = providerFee_BRL / btcPrice × 1e8  (com fallback para baseSats × 3%)
-  ///   total = baseSats + max(1, providerFeeSats)   // 1 sat mínimo se baseSats > 0
+  /// Fórmula CANÔNICA do app (usada também em main.dart AutoPay e na validação
+  /// de invoice em order_status_screen): baseSats + round(baseSats × 3%).
+  /// Mantém tudo em sats — sem misturar BRL/btcPrice — pra evitar off-by-one
+  /// entre a tela do consumidor, o invoice do Bro e o sat travado.
   int get totalInvoiceSats {
     final baseSats = (btcAmount * 100000000).round();
     if (baseSats <= 0) return 0;
-    int providerFeeSats;
-    if (btcPrice > 0 && providerFee > 0) {
-      providerFeeSats = (providerFee / btcPrice * 100000000).round();
-    } else {
-      // Fallback para ordens antigas/migradas sem btcPrice ou providerFee
-      providerFeeSats = (baseSats * 0.03).round();
-    }
+    var providerFeeSats = (baseSats * 0.03).round();
     if (providerFeeSats < 1) providerFeeSats = 1;
     return baseSats + providerFeeSats;
   }

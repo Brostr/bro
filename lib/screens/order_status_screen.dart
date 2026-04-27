@@ -1952,15 +1952,14 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
     // Calcular fees e valores
     final rawBillCode = fullOrder?.billCode ?? _orderDetails?['billCode'] ?? '';
     final billCode = BillCodeCryptoService().decrypt(rawBillCode);
-    final providerFeeBrl = fullOrder?.providerFee ?? 
-        ((_orderDetails?['providerFee'] as num?)?.toDouble() ?? 0.0);
-    final btcPrice = fullOrder?.btcPrice ?? 
-        ((_orderDetails?['btcPrice'] as num?)?.toDouble() ?? 0.0);
-    
-    // Converter para sats (taxa plataforma 2% embutida no spread)
-    final providerFeeSats = btcPrice > 0 
-        ? (providerFeeBrl / btcPrice * 100000000).round() : 0;
-    final totalSats = widget.amountSats + providerFeeSats;
+
+    // v560: Usar fórmula canônica (baseSats × 3%) — mesma usada pelo Bro ao
+    // gerar o invoice e pelo AutoPay (main.dart) ao validar. Antes usávamos
+    // providerFeeBrl / btcPrice que dava off-by-one e travava confirmação.
+    final baseSats = widget.amountSats;
+    var providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
+    if (providerFeeSats < 1 && baseSats > 0) providerFeeSats = 1;
+    final totalSats = baseSats + providerFeeSats;
     
     return Card(
       color: const Color(0xFF1A1A1A),

@@ -277,20 +277,26 @@ class OrderProvider with ChangeNotifier {
     // Sem trava, esses sats podem ser "gastos" em outra ordem antes da confirmacao,
     // resultando em "Saldo insuficiente" na hora de pagar o Bro.
     //
-    // Inclui base + provider fee (total que sera pago ao Bro) usando o btcPrice
-    // travado na criacao da ordem.
+    // CRITICO: filtrar apenas ordens onde o usuario eh o BUYER (owner). Ordens
+    // onde o usuario eh o PROVIDER tem paymentHash do invoice gerado pelo Bro
+    // para receber pagamento (sats RECEBIDOS, nao a pagar) e nao devem ser
+    // travados aqui.
 
+    if (_currentUserPubkey == null || _currentUserPubkey!.isEmpty) return 0;
     const terminalStatuses = ['completed', 'cancelled', 'liquidated'];
 
     int locked = 0;
     for (final o in _filteredOrders) {
+      // v560: SO travar ordens onde sou o buyer (vou pagar ao Bro)
+      if (o.userPubkey != _currentUserPubkey) continue;
+
       // Precisa ter pagamento associado (wallet_* sintetico OU Lightning real)
       if (o.paymentHash == null || o.paymentHash!.isEmpty) continue;
 
       // Nao contar ordens terminais (ja foram resolvidas)
       if (terminalStatuses.contains(o.status)) continue;
 
-      // v560: usar total = base + fee travada (mesmo valor que o consumidor
+      // v560: usar total = base + fee canonica (mesmo valor que o consumidor
       // ve como "Total Pago" e que sera pago ao Bro)
       final sats = o.totalInvoiceSats;
       if (sats > 0) {
@@ -301,7 +307,7 @@ class OrderProvider with ChangeNotifier {
     }
 
     if (locked > 0) {
-      broLog('TOTAL LOCKED: $locked sats (wallet + lightning recebidas, nao confirmadas)');
+      broLog('TOTAL LOCKED: $locked sats (ordens nao confirmadas como buyer)');
     }
 
     return locked;
@@ -2874,18 +2880,11 @@ class OrderProvider with ChangeNotifier {
         try {
           final baseSats = (order.btcAmount * 100000000).round();
           if (baseSats <= 0) continue;
-          // v560: Usar fee TRAVADA na criação (providerFee BRL / btcPrice locked).
-          // Antes recomputávamos baseSats×3% e isso gerava off-by-one entre o
-          // que a tela mostrava como "Total Pago" e o invoice gerado.
-          int providerFeeSats;
-          if (order.btcPrice > 0 && order.providerFee > 0) {
-            providerFeeSats = (order.providerFee / order.btcPrice * 100000000).round();
-          } else {
-            providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
-          }
+          // v449: Include 3% provider fee in invoice
+          final providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
           final amountSats = baseSats + (providerFeeSats < 1 && baseSats > 0 ? 1 : providerFeeSats);
 
-          broLog('[InvoiceRefresh] Gerando invoice de $amountSats sats ($baseSats base + $providerFeeSats fee travada) para ${order.id.substring(0, 8)}...');
+          broLog('[InvoiceRefresh] Gerando invoice de $amountSats sats ($baseSats base + $providerFeeSats fee) para ${order.id.substring(0, 8)}...');
           final invoice = await onGenerateProviderInvoice!(amountSats, order.id);
           if (invoice == null || invoice.isEmpty) {
             broLog('[InvoiceRefresh] ?? Falha ao gerar invoice para ${order.id.substring(0, 8)}');

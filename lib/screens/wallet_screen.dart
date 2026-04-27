@@ -3392,12 +3392,10 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                     const SizedBox(height: 8),
                     Builder(builder: (context) {
-                      final billSats = correlatedOrder!.btcPrice > 0
-                          ? (correlatedOrder.amount / correlatedOrder.btcPrice * 100000000).round()
-                          : 0;
-                      final provFeeSats = correlatedOrder.btcPrice > 0
-                          ? (correlatedOrder.providerFee / correlatedOrder.btcPrice * 100000000).round()
-                          : 0;
+                      // v560: usar fórmula canônica (baseSats × 3%) — mesmo do invoice gerado.
+                      final billSats = (correlatedOrder!.btcAmount * 100000000).round();
+                      var provFeeSats = (billSats * AppConfig.providerFeePercent).round();
+                      if (provFeeSats < 1 && billSats > 0) provFeeSats = 1;
                       final totalSats = billSats + provFeeSats;
                       return Column(
                         children: [

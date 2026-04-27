@@ -578,26 +578,16 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
       // Modelo: Usuário paga sats -> Provedor paga PIX -> Provedor recebe sats
       final amount = (_orderDetails!['amount'] as num).toDouble();
       final btcAmount = (_orderDetails!['btcAmount'] as num?)?.toDouble() ?? 0;
-      final providerFeeBrl = (_orderDetails!['providerFee'] as num?)?.toDouble() ?? 0;
-      final btcPrice = (_orderDetails!['btcPrice'] as num?)?.toDouble() ?? 0;
 
       // Converter btcAmount para sats (btcAmount está em BTC, * 100_000_000 = sats)
       final baseSats = (btcAmount * 100000000).round();
 
-      // v560: Usar fee TRAVADA na criação da ordem (providerFee BRL / btcPrice locked)
-      // para que o invoice bata exatamente com o que a tela do consumidor exibe
-      // como "Total Pago". Antes recomputávamos baseSats×3%, gerando off-by-one
-      // que fazia o pagamento falhar com "Saldo insuficiente" mesmo com sats certos.
-      int providerFeeSats;
-      if (btcPrice > 0 && providerFeeBrl > 0) {
-        providerFeeSats = (providerFeeBrl / btcPrice * 100000000).round();
-      } else {
-        providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
-      }
+      // v449: Provedor recebe base + 3% de ganho. A taxa de plataforma (2%) é paga pelo usuário separadamente.
+      final providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
       var providerReceiveSats = baseSats + (providerFeeSats < 1 && baseSats > 0 ? 1 : providerFeeSats);
 
-      broLog('💰 Ordem: R\$ ${amount.toStringAsFixed(2)} = $baseSats sats base + $providerFeeSats sats (fee travada)');
-      broLog('💰 Provedor vai receber: $providerReceiveSats sats (base + ganho)');
+      broLog('💰 Ordem: R\$ ${amount.toStringAsFixed(2)} = $baseSats sats base + $providerFeeSats sats (3%)');
+      broLog('💰 Provedor vai receber: $providerReceiveSats sats (base + ganho 3%)');
       
       String? generatedInvoice;
       
