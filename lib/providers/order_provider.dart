@@ -271,30 +271,39 @@ class OrderProvider with ChangeNotifier {
     // Ordens com paymentHash 'wallet_*' NAO saem via Lightning - sats continuam na carteira
     // Precisamos travar esses sats para o saldo exibido ser correto
     //
-    // Para pagamentos Lightning normais, sats JA sairam da carteira (return 0 para eles)
-    
+    // v560: ESTENDIDO para incluir tambem ordens Lightning recebidas (paymentHash
+    // != null e nao 'wallet_*'). Quando o usuario paga uma invoice externa, os
+    // sats CHEGAM na carteira interna e ficam ali ate confirmar pagamento ao Bro.
+    // Sem trava, esses sats podem ser "gastos" em outra ordem antes da confirmacao,
+    // resultando em "Saldo insuficiente" na hora de pagar o Bro.
+    //
+    // Inclui base + provider fee (total que sera pago ao Bro) usando o btcPrice
+    // travado na criacao da ordem.
+
     const terminalStatuses = ['completed', 'cancelled', 'liquidated'];
-    
+
     int locked = 0;
     for (final o in _filteredOrders) {
-      // So contar ordens com wallet payment (nao-Lightning)
-      if (o.paymentHash == null || !o.paymentHash!.startsWith('wallet_')) continue;
-      
+      // Precisa ter pagamento associado (wallet_* sintetico OU Lightning real)
+      if (o.paymentHash == null || o.paymentHash!.isEmpty) continue;
+
       // Nao contar ordens terminais (ja foram resolvidas)
       if (terminalStatuses.contains(o.status)) continue;
-      
-      // Converter btcAmount para sats
-      final sats = (o.btcAmount * 100000000).round();
+
+      // v560: usar total = base + fee travada (mesmo valor que o consumidor
+      // ve como "Total Pago" e que sera pago ao Bro)
+      final sats = o.totalInvoiceSats;
       if (sats > 0) {
         locked += sats;
-        broLog('LOCKED: ordem=\${o.id.substring(0, 8)} status=\${o.status} sats=\$sats');
+        final kind = o.paymentHash!.startsWith('wallet_') ? 'wallet' : 'lightning';
+        broLog('LOCKED[$kind]: ordem=${o.id.substring(0, 8)} status=${o.status} sats=$sats');
       }
     }
-    
+
     if (locked > 0) {
-      broLog('TOTAL LOCKED (wallet payments): \$locked sats');
+      broLog('TOTAL LOCKED: $locked sats (wallet + lightning recebidas, nao confirmadas)');
     }
-    
+
     return locked;
   }
 
@@ -2865,11 +2874,18 @@ class OrderProvider with ChangeNotifier {
         try {
           final baseSats = (order.btcAmount * 100000000).round();
           if (baseSats <= 0) continue;
-          // v449: Include 3% provider fee in invoice
-          final providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
+          // v560: Usar fee TRAVADA na criação (providerFee BRL / btcPrice locked).
+          // Antes recomputávamos baseSats×3% e isso gerava off-by-one entre o
+          // que a tela mostrava como "Total Pago" e o invoice gerado.
+          int providerFeeSats;
+          if (order.btcPrice > 0 && order.providerFee > 0) {
+            providerFeeSats = (order.providerFee / order.btcPrice * 100000000).round();
+          } else {
+            providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
+          }
           final amountSats = baseSats + (providerFeeSats < 1 && baseSats > 0 ? 1 : providerFeeSats);
 
-          broLog('[InvoiceRefresh] Gerando invoice de $amountSats sats ($baseSats base + $providerFeeSats fee) para ${order.id.substring(0, 8)}...');
+          broLog('[InvoiceRefresh] Gerando invoice de $amountSats sats ($baseSats base + $providerFeeSats fee travada) para ${order.id.substring(0, 8)}...');
           final invoice = await onGenerateProviderInvoice!(amountSats, order.id);
           if (invoice == null || invoice.isEmpty) {
             broLog('[InvoiceRefresh] ?? Falha ao gerar invoice para ${order.id.substring(0, 8)}');
