@@ -220,7 +220,7 @@ class LightningProvider with ChangeNotifier {
   ///   - fees: int (taxas estimadas em sats, se Liquid)
   ///   - backend: String ('spark' ou 'liquid')
   Future<Map<String, dynamic>?> createInvoice({
-    required int amountSats,
+    int? amountSats,
     String? description,
   }) async {
     _setLoading(true);
@@ -262,7 +262,8 @@ class LightningProvider with ChangeNotifier {
     }
     
     // 2. Fallback para Liquid se habilitado
-    if (AppConfig.enableLiquidFallback) {
+    // v562: Liquid (Boltz swaps) NAO suporta invoice de valor aberto. Pular se amountSats==null.
+    if (AppConfig.enableLiquidFallback && amountSats != null) {
       // Inicializar Liquid se ainda não foi
       if (!_liquidProvider.isInitialized) {
         broLog('💧 Inicializando Liquid para fallback...');

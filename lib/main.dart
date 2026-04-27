@@ -75,6 +75,31 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // This fixes background notification delivery on BOTH platforms (data-only was "best effort")
   if (message.data['type'] == 'order_update') {
     broLog('[FCM-BG] order_update received — system notification handles display');
+
+    // v553: Marca a chave de dedup como ja exibida pelo sistema. Quando o
+    // usuario abrir o app, o sync local detecta a transicao e tenta exibir
+    // uma SEGUNDA notificacao via NotificationService — bloqueamos isso
+    // gravando a chave no set de notificadas antes que isso aconteca.
+    try {
+      final orderId = message.data['order_id']?.toString() ?? '';
+      final subtype = message.data['subtype']?.toString() ?? '';
+      const subtypeToPayload = {
+        'accepted': 'order_accepted',
+        'awaiting_confirmation': 'payment_received',
+        'payment_submitted': 'payment_submitted',
+        'completed': 'order_completed',
+        'cancelled': 'order_cancelled',
+        'disputed': 'order_disputed',
+        'liquidated': 'order_liquidated',
+        'new_order': 'new_order',
+      };
+      final prefix = subtypeToPayload[subtype] ?? subtype;
+      if (orderId.isNotEmpty && prefix.isNotEmpty) {
+        await NotificationService().markShown('$prefix:$orderId');
+      }
+    } catch (e) {
+      broLog('[FCM-BG] markShown error: $e');
+    }
     return;
   }
 
@@ -269,9 +294,22 @@ void main() async {
       _retryAsync('Backend push', () async {
         // v544: Inclui flag provider_enabled para backend saber se deve
         // enviar broadcasts de 'Nova ordem' para este usuario.
+        //
+        // v559: Auto-heal removido. O bug original (provider_education_screen
+        // marcando true prematuramente) ja foi corrigido na fonte. O auto-heal
+        // estava REBAIXANDO provedores legitimos quando LocalCollateralService
+        // perdia o cache (ex: instalacao limpa apos restore parcial), parando
+        // de receber broadcasts de 'Nova ordem'.
+        //
+        // v559: Quando isProvider=false, OMITIMOS o flag em vez de mandar
+        // false. O backend (v544) preserva o flag existente quando o campo
+        // e omitido — assim o provider mode so liga via tier_deposit ou
+        // provider_orders_screen, nunca "desliga" sozinho aqui.
         final isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
-        final ok = await ApiService().registerPushToken(token, providerEnabled: isProvider);
-        PushDiag.log('main: backend register=$ok provider=$isProvider');
+        final ok = isProvider
+            ? await ApiService().registerPushToken(token, providerEnabled: true)
+            : await ApiService().registerPushToken(token);
+        PushDiag.log('main: backend register=$ok provider=$isProvider${isProvider ? '' : '(omitido)'}');
         return ok;
       });
     } else {
@@ -311,40 +349,60 @@ void main() async {
         // Sync will be triggered when OrderProvider is available
         OrderRealtimeService().onOrderEvent?.call();
 
+        // v552: notify OrderProvider to mark this order as "syncing" so the
+        // UI can show a spinner/placeholder until the relay event arrives.
+        final orderId = message.data['order_id']?.toString() ?? '';
+        final subtype = message.data['subtype']?.toString() ?? '';
+        if (orderId.isNotEmpty && subtype.isNotEmpty) {
+          OrderRealtimeService().onOrderPush?.call(orderId, subtype);
+        }
+
+        // v553: Mapeamento canonico subtype -> payload, usado tanto para
+        // dedup local (Android showGeneric) quanto para markShown (iOS).
+        const subtypeToPayload = {
+          'accepted': 'order_accepted',
+          'awaiting_confirmation': 'payment_received',
+          'payment_submitted': 'payment_submitted',
+          'completed': 'order_completed',
+          'cancelled': 'order_cancelled',
+          'disputed': 'order_disputed',
+          'liquidated': 'order_liquidated',
+          'new_order': 'new_order',
+        };
+        final prefix = subtypeToPayload[subtype] ?? subtype;
+        final dedupKey = (orderId.isNotEmpty && prefix.isNotEmpty)
+            ? '$prefix:$orderId'
+            : null;
+
+        // v553: o sistema (iOS em foreground via setForegroundNotificationPresentationOptions
+        // e iOS/Android em background) JA exibiu a notificacao do payload FCM.
+        // Marcamos a chave como "ja exibida" antes que o sync local detecte
+        // a transicao em order_status_screen e tente mostrar uma SEGUNDA
+        // notificacao via NotificationService (foi o caso de "Comprovante
+        // Recebido" + "Comprovante recebido" em iOS).
+        if (dedupKey != null) {
+          NotificationService().markShown(dedupKey);
+        }
+
         // v545: Android nao exibe automaticamente o campo 'notification' do FCM
         // quando o app esta em foreground. Mostra local notification aqui (o
         // dedup em NotificationService via bro_notified_transitions impede que
         // seja exibida duas vezes para a mesma ordem quando o sistema ja
         // mostrou em background).
         //
-        // v547: Chaves de dedup alinhadas com NotificationService/BackgroundNotificationService.
-        // Antes usavamos subtype puro (ex: 'accepted:xxx') que NAO batia com os
-        // payloads canonicos ('order_accepted:xxx'), causando duplicacao quando
-        // a tela de ordem + FCM rodavam simultaneamente.
-        final notif = message.notification;
-        if (notif != null && (notif.title?.isNotEmpty ?? false)) {
-          final subtype = message.data['subtype']?.toString() ?? '';
-          final orderId = message.data['order_id']?.toString() ?? '';
-          // Mapeia subtype do backend para o prefixo canonico usado pelos demais servicos.
-          const subtypeToPayload = {
-            'accepted': 'order_accepted',
-            'awaiting_confirmation': 'payment_received',
-            'payment_submitted': 'payment_submitted',
-            'completed': 'order_completed',
-            'cancelled': 'order_cancelled',
-            'disputed': 'order_disputed',
-            'liquidated': 'order_liquidated',
-            'new_order': 'new_order',
-          };
-          final prefix = subtypeToPayload[subtype] ?? subtype;
-          final dedupKey = orderId.isNotEmpty && prefix.isNotEmpty
-              ? '$prefix:$orderId'
-              : null;
-          NotificationService().showGeneric(
-            title: notif.title!,
-            body: notif.body ?? '',
-            dedupKey: dedupKey,
-          );
+        // v548: iOS ja exibe a notificacao FCM em foreground via
+        // setForegroundNotificationPresentationOptions(alert: true). Chamar
+        // showGeneric aqui duplicava a notificacao no iOS ("Bro encontrado"
+        // aparecia 2x por ordem). So disparamos local notification no Android.
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          final notif = message.notification;
+          if (notif != null && (notif.title?.isNotEmpty ?? false)) {
+            NotificationService().showGeneric(
+              title: notif.title!,
+              body: notif.body ?? '',
+              dedupKey: dedupKey,
+            );
+          }
         }
       }
     });
@@ -356,9 +414,16 @@ void main() async {
         BrixRelayService().triggerPoll();
       } else if (message.data['type'] == 'order_update') {
         OrderRealtimeService().onOrderEvent?.call();
+        // v552: also mark order as syncing so opening the app shows the
+        // spinner immediately while the relay catches up.
+        final orderId = message.data['order_id']?.toString() ?? '';
+        final subtype = message.data['subtype']?.toString() ?? '';
+        if (orderId.isNotEmpty && subtype.isNotEmpty) {
+          OrderRealtimeService().onOrderPush?.call(orderId, subtype);
+        }
       }
     });
-    
+
     // v262: Iniciar background notifications (polling Nostr a cada 15min)
     await initBackgroundNotifications();
     broLog('🔔 Background notifications ativado');
@@ -526,6 +591,15 @@ class BroApp extends StatelessWidget {
           OrderRealtimeService().onOrderEvent = () {
             broLog('[RT] Triggering immediate sync from real-time event');
             orderProvider.syncOrdersFromNostr(force: true);
+          };
+
+          // v552: Connect FCM order_update push -> mark order as syncing
+          // so UI can show spinner/placeholder while the relay catches up.
+          OrderRealtimeService().onOrderPush = (String orderId, String subtype) {
+            final expected = OrderProvider.expectedStatusForSubtype(subtype);
+            if (expected != null) {
+              orderProvider.markSyncing(orderId, expected);
+            }
           };
           
           // Callback para pagamentos RECEBIDOS (menos comum no fluxo atual)

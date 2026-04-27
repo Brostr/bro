@@ -155,6 +155,19 @@
   /// Uma ordem só é considerada "paga" se tiver um paymentHash válido
   bool get isPaymentVerified => paymentHash != null && paymentHash!.isNotEmpty;
 
+  /// v560: sats totais que o consumidor deve pagar ao Bro nesta ordem.
+  /// Fórmula CANÔNICA do app (usada também em main.dart AutoPay e na validação
+  /// de invoice em order_status_screen): baseSats + round(baseSats × 3%).
+  /// Mantém tudo em sats — sem misturar BRL/btcPrice — pra evitar off-by-one
+  /// entre a tela do consumidor, o invoice do Bro e o sat travado.
+  int get totalInvoiceSats {
+    final baseSats = (btcAmount * 100000000).round();
+    if (baseSats <= 0) return 0;
+    var providerFeeSats = (baseSats * 0.03).round();
+    if (providerFeeSats < 1) providerFeeSats = 1;
+    return baseSats + providerFeeSats;
+  }
+
   /// Retorna true se o status indica que o pagamento Lightning foi recebido
   /// Isso inclui payment_received, confirmed, accepted, awaiting_confirmation, completed
   bool get hasPaymentBeenReceived {

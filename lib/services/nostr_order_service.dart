@@ -1588,26 +1588,31 @@ class NostrOrderService {
       );
 
       
-      // Publicar em paralelo - retornar assim que pelo menos 1 relay aceitar
-      final futures = _relays.map((relay) => _publishToRelay(relay, event).catchError((_) => false)).toList();
-      
+      // Publicar em paralelo - retornar assim que pelo menos 1 relay aceitar.
+      // v563: usar Completer para destravar IMEDIATAMENTE no primeiro `true`,
+      // sem esperar relays lentos. Antes, `await futures[0]` bloqueava 15s
+      // (timeout do relay) mesmo quando outros relays já tinham respondido OK.
+      final completer = Completer<bool>();
+      int pending = _relays.length;
       bool anySuccess = false;
-      for (final future in futures) {
-        try {
-          final result = await future;
-          if (result) {
+      for (final relay in _relays) {
+        _publishToRelay(relay, event).then((ok) {
+          if (ok && !completer.isCompleted) {
             anySuccess = true;
-            break;
+            completer.complete(true);
           }
-        } catch (_) {}
+          pending--;
+          if (pending <= 0 && !completer.isCompleted) {
+            completer.complete(anySuccess);
+          }
+        }).catchError((_) {
+          pending--;
+          if (pending <= 0 && !completer.isCompleted) {
+            completer.complete(anySuccess);
+          }
+        });
       }
-      
-      if (!anySuccess) {
-        final results = await Future.wait(
-          futures.map((f) => f.catchError((_) => false)),
-        );
-        anySuccess = results.any((s) => s);
-      }
+      anySuccess = await completer.future;
 
       // Adicionar à blocklist local + invalidar cache
       if (anySuccess) {

@@ -552,10 +552,15 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
         },
       );
     } catch (e) {
-      setState(() {
-        _isUploading = false;
-      });
       _showError(AppLocalizations.of(context)!.tp('prov_det_error_send_receipt', {'error': e.toString()}));
+    } finally {
+      // v563: sempre destravar o botão, mesmo em paths que escaparam dos catches
+      // internos (ex: setState chamado em widget desmontado, exceções não tratadas).
+      if (mounted && _isUploading) {
+        setState(() {
+          _isUploading = false;
+        });
+      }
     }
   }
 
@@ -578,14 +583,14 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
       // Modelo: Usuário paga sats -> Provedor paga PIX -> Provedor recebe sats
       final amount = (_orderDetails!['amount'] as num).toDouble();
       final btcAmount = (_orderDetails!['btcAmount'] as num?)?.toDouble() ?? 0;
-      
+
       // Converter btcAmount para sats (btcAmount está em BTC, * 100_000_000 = sats)
       final baseSats = (btcAmount * 100000000).round();
-      
+
       // v449: Provedor recebe base + 3% de ganho. A taxa de plataforma (2%) é paga pelo usuário separadamente.
       final providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
       var providerReceiveSats = baseSats + (providerFeeSats < 1 && baseSats > 0 ? 1 : providerFeeSats);
-      
+
       broLog('💰 Ordem: R\$ ${amount.toStringAsFixed(2)} = $baseSats sats base + $providerFeeSats sats (3%)');
       broLog('💰 Provedor vai receber: $providerReceiveSats sats (base + ganho 3%)');
       

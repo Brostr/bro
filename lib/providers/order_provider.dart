@@ -10,6 +10,7 @@ import '../services/nostr_service.dart';
 import '../services/nostr_order_service.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
+import '../services/order_reminder_service.dart';
 import '../models/order.dart';
 import '../config.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -49,6 +50,17 @@ class OrderProvider with ChangeNotifier {
   // v437: Tracking de nudges enviados (orderId → último nudge) para throttle
   final Map<String, DateTime> _nudgedOrders = {};
   static const int _nudgeCooldownMinutes = 30;
+
+  // v552: Sync expectations triggered by FCM push.
+  // Quando chega um push de order_update, marcamos a ordem como "sincronizando"
+  // ate o evento Nostr correspondente chegar (e o status bater com o esperado)
+  // OU ate o timeout (120s). UI consulta isSyncing(orderId) para mostrar spinner.
+  // v553: timeout aumentado de 20s -> 120s. A sequencia pending->accepted->
+  // awaiting_confirmation pode levar mais de 20s se o relay esta lento, e o
+  // spinner sumindo no meio do caminho confunde mais que ajuda. Tambem
+  // resetamos o timer a cada progresso parcial detectado em _reconcileSyncExpectations.
+  final Map<String, _SyncExpectation> _syncExpectations = {};
+  static const Duration _syncExpectationTimeout = Duration(seconds: 120);
 
   // v448: Flag para saber se o sync inicial já completou
   // Enquanto false, UI mostra "sincronizando" ao invés de "nenhuma troca"
@@ -259,30 +271,45 @@ class OrderProvider with ChangeNotifier {
     // Ordens com paymentHash 'wallet_*' NAO saem via Lightning - sats continuam na carteira
     // Precisamos travar esses sats para o saldo exibido ser correto
     //
-    // Para pagamentos Lightning normais, sats JA sairam da carteira (return 0 para eles)
-    
+    // v560: ESTENDIDO para incluir tambem ordens Lightning recebidas (paymentHash
+    // != null e nao 'wallet_*'). Quando o usuario paga uma invoice externa, os
+    // sats CHEGAM na carteira interna e ficam ali ate confirmar pagamento ao Bro.
+    // Sem trava, esses sats podem ser "gastos" em outra ordem antes da confirmacao,
+    // resultando em "Saldo insuficiente" na hora de pagar o Bro.
+    //
+    // CRITICO: filtrar apenas ordens onde o usuario eh o BUYER (owner). Ordens
+    // onde o usuario eh o PROVIDER tem paymentHash do invoice gerado pelo Bro
+    // para receber pagamento (sats RECEBIDOS, nao a pagar) e nao devem ser
+    // travados aqui.
+
+    if (_currentUserPubkey == null || _currentUserPubkey!.isEmpty) return 0;
     const terminalStatuses = ['completed', 'cancelled', 'liquidated'];
-    
+
     int locked = 0;
     for (final o in _filteredOrders) {
-      // So contar ordens com wallet payment (nao-Lightning)
-      if (o.paymentHash == null || !o.paymentHash!.startsWith('wallet_')) continue;
-      
+      // v560: SO travar ordens onde sou o buyer (vou pagar ao Bro)
+      if (o.userPubkey != _currentUserPubkey) continue;
+
+      // Precisa ter pagamento associado (wallet_* sintetico OU Lightning real)
+      if (o.paymentHash == null || o.paymentHash!.isEmpty) continue;
+
       // Nao contar ordens terminais (ja foram resolvidas)
       if (terminalStatuses.contains(o.status)) continue;
-      
-      // Converter btcAmount para sats
-      final sats = (o.btcAmount * 100000000).round();
+
+      // v560: usar total = base + fee canonica (mesmo valor que o consumidor
+      // ve como "Total Pago" e que sera pago ao Bro)
+      final sats = o.totalInvoiceSats;
       if (sats > 0) {
         locked += sats;
-        broLog('LOCKED: ordem=\${o.id.substring(0, 8)} status=\${o.status} sats=\$sats');
+        final kind = o.paymentHash!.startsWith('wallet_') ? 'wallet' : 'lightning';
+        broLog('LOCKED[$kind]: ordem=${o.id.substring(0, 8)} status=${o.status} sats=$sats');
       }
     }
-    
+
     if (locked > 0) {
-      broLog('TOTAL LOCKED (wallet payments): \$locked sats');
+      broLog('TOTAL LOCKED: $locked sats (ordens nao confirmadas como buyer)');
     }
-    
+
     return locked;
   }
 
@@ -1043,73 +1070,53 @@ class OrderProvider with ChangeNotifier {
       
       // v493: PUBLICAR NO NOSTR com flag de cancelamento.
       // CRITICO: .timeout() em Dart NAO cancela o Future! O loop interno
-      // continua rodando em background e re-insere a ordem via _saveOrders().
-      // FIX: usar flag 'cancelled' que o loop verifica antes de cada tentativa.
+      // v554: NUNCA deletar a ordem se Nostr publish falhar. Esta funcao e
+      // chamada APOS o pagamento ter sido confirmado (ver
+      // lightning_payment_screen._handlePaymentSuccess + onchain). Se a ordem
+      // for removida porque o relay falhou, o usuario ja pagou e nao tem
+      // ordem no app — bug critico de perda de dados. O sistema de
+      // republishLocalOrdersToNostr() (chamado em todo sync background)
+      // cuida de re-publicar ordens com eventId == null.
       bool published = false;
-      bool cancelled = false;
       final orderId = order.id;
-      
+
+      // Persistir LOCALMENTE imediatamente. Pagamento ja confirmado, ordem precisa existir.
+      _orders.insert(0, order);
+      await _saveOrders();
+      _immediateNotify();
+
+      // Tentar publicar no Nostr com timeout curto (10s). Se falhar, a ordem
+      // permanece localmente com eventId null e o background republish cuida.
       try {
-        await Future(() async {
-          // Inserir UMA VEZ antes do loop
-          _orders.insert(0, order);
-          
-          for (int attempt = 1; attempt <= 3; attempt++) {
-            // CRUCIAL: se timeout ja disparou, nao continuar
-            if (cancelled) {
-              broLog('[createOrder] attempt $attempt abortado (cancelled)');
-              return;
-            }
-            try {
-              await _publishOrderToNostr(order);
-              if (cancelled) return; // Checar de novo apos publish
-              final idx = _orders.indexWhere((o) => o.id == orderId);
-              if (idx != -1 && _orders[idx].eventId != null) {
-                published = true;
-                broLog('[createOrder] Ordem publicada no Nostr (tentativa $attempt)');
-                return;
-              }
-              broLog('[createOrder] Publish tentativa $attempt: sem eventId retornado');
-            } catch (e) {
-              broLog('[createOrder] Publish tentativa $attempt falhou: $e');
-            }
-            if (attempt < 3) await Future.delayed(const Duration(seconds: 2));
-          }
-        }).timeout(const Duration(seconds: 20));
+        await _publishOrderToNostr(order).timeout(const Duration(seconds: 10));
+        final idx = _orders.indexWhere((o) => o.id == orderId);
+        if (idx != -1 && _orders[idx].eventId != null) {
+          published = true;
+          broLog('[createOrder] Ordem ${orderId.substring(0, 8)} publicada no Nostr');
+        } else {
+          broLog('[createOrder] Ordem ${orderId.substring(0, 8)} publicada localmente, aguardando republish no proximo sync');
+        }
       } catch (e) {
-        // Timeout ou erro: setar flag ANTES de limpar (Dart e single-threaded,
-        // entao quando catch roda, o loop esta suspenso em algum await.
-        // Ao retomar, verifica cancelled e para.)
-        cancelled = true;
-        // v530: SEMPRE publicar cancel best-effort em qualquer falha.
-        // ANTES (v529) so publicava cancel se eventId estivesse setado, mas
-        // o timeout mata _publishOrderToNostr ANTES dele setar eventId mesmo
-        // se 1 relay ja aceitou o evento (Future.wait espera todos). Resultado:
-        // ordem orfa no relay, provedor ve duplicata. Cancel e idempotente
-        // e filtrado por fetchPendingOrders, entao nao ha custo em publicar a toa.
-        _orders.removeWhere((o) => o.id == orderId);
-        await _saveOrders();
-        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} timeout/erro: $e');
-        _error = 'Falha ao publicar ordem nos relays Nostr';
-        return null;
+        broLog('[createOrder] Publish Nostr falhou (ordem mantida localmente, sera republicada): $e');
+        // Tentar uma 2a vez em background sem bloquear o usuario
+        unawaited(Future.delayed(const Duration(seconds: 3), () async {
+          try {
+            await _publishOrderToNostr(order).timeout(const Duration(seconds: 10));
+            broLog('[createOrder] retry background OK para ${orderId.substring(0, 8)}');
+            _throttledNotify();
+          } catch (_) {
+            // republishLocalOrdersToNostr cuida no proximo sync
+          }
+        }));
       }
-      
-      if (!published) {
-        // v530: SEMPRE publicar cancel best-effort em qualquer falha (ver comentario acima).
-        _orders.removeWhere((o) => o.id == orderId);
-        await _saveOrders();
-        unawaited(_publishOrphanCancel(orderId, order.userPubkey));
-        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} falhou apos 3 tentativas');
-        _error = 'Falha ao publicar ordem nos relays Nostr';
-        return null;
-      }
-      
-      // Publicou com sucesso
+
       _currentOrder = _orders.firstWhere((o) => o.id == orderId);
       await _saveOrders();
       _immediateNotify();
-      
+      // ignore: dead_code
+      if (!published) {
+        broLog('[createOrder] Ordem ${orderId.substring(0, 8)} salva sem eventId (sera republicada)');
+      }
       return _currentOrder;
     } catch (e) {
       _error = e.toString();
@@ -2332,11 +2339,20 @@ class OrderProvider with ChangeNotifier {
 
 
       // Publicar conclus�?£o no Nostr
+      // v563: timeout explícito de 25s. Antes não havia timeout aqui — se um
+      // relay travasse, a função podia bloquear 90s+ levando o outer timeout
+      // do _uploadReceipt a disparar e fazer o usuário precisar reenviar.
       final success = await _nostrOrderService.completeOrderOnNostr(
         order: order,
         providerPrivateKey: privateKey,
         proofImageBase64: proof,
         providerInvoice: providerInvoice, // Invoice para receber pagamento
+      ).timeout(
+        const Duration(seconds: 25),
+        onTimeout: () {
+          broLog('[completeOrderAsProvider] timeout 25s ao publicar comprovante no Nostr');
+          return false;
+        },
       );
 
       if (!success) {
@@ -2630,6 +2646,19 @@ class OrderProvider with ChangeNotifier {
         broLog('[AutoLiquidation] Background task is running, skipping foreground check');
         return;
       }
+    }
+    
+    // v550: Lembretes progressivos (24h / 30h / 35h) antes do deadline de 36h.
+    // Cobre ambos os cenarios: provedor pendente de comprovante e usuario
+    // pendente de confirmacao. Idempotente via SharedPreferences.
+    try {
+      final ordersAsMap = _orders.map((o) => o.toJson()).toList();
+      await OrderReminderService().checkAndNotify(
+        orders: ordersAsMap,
+        currentPubkey: _currentUserPubkey!,
+      );
+    } catch (e) {
+      broLog('[Reminder] erro no foreground: $e');
     }
     
     final now = DateTime.now();
@@ -3851,6 +3880,8 @@ class OrderProvider with ChangeNotifier {
       if (!_hasCompletedInitialSync) {
         _hasCompletedInitialSync = true;
       }
+      // v552: limpar expectations cujo target ja foi alcancado pelo relay
+      _reconcileSyncExpectations();
       _throttledNotify();
       
     } catch (e) {
@@ -4436,4 +4467,136 @@ class OrderProvider with ChangeNotifier {
     _throttledNotify();
     return true;
   }
+
+  // ==================== v552: Sync expectations (FCM push -> spinner UX) ====================
+
+  /// Returns true if this order is currently waiting for a relay sync to
+  /// confirm a status transition that was just announced via FCM push.
+  bool isSyncing(String orderId) => _syncExpectations.containsKey(orderId);
+
+  /// Returns the status the UI is waiting for, or null if not syncing.
+  String? expectedStatusForSyncing(String orderId) =>
+      _syncExpectations[orderId]?.expectedStatus;
+
+  /// Marks an order as syncing toward [expectedStatus]. Triggered by an FCM
+  /// push (see main.dart onMessage). Schedules a [_syncExpectationTimeout]
+  /// timer that auto-clears the expectation if the relay does not deliver
+  /// the matching event in time. Idempotent: re-marking the same order
+  /// resets the timer.
+  ///
+  /// IMPORTANT: this method does NOT trigger a fetch by itself. The fetch
+  /// is already triggered by OrderRealtimeService.onOrderEvent (wired in
+  /// main.dart Builder) and by foreground polling.
+  void markSyncing(String orderId, String expectedStatus) {
+    if (orderId.isEmpty || expectedStatus.isEmpty) return;
+
+    // If the order is already at or past the expected status, no need to
+    // signal syncing — the relay already delivered (or local state is
+    // ahead of the push).
+    final existing = getOrderById(orderId);
+    if (existing != null) {
+      if (existing.status == expectedStatus ||
+          _isStatusMoreRecent(existing.status, expectedStatus)) {
+        return;
+      }
+    }
+
+    // Cancel any previous timer for this order before replacing.
+    _syncExpectations[orderId]?.timer?.cancel();
+    final exp = _SyncExpectation(
+      expectedStatus: expectedStatus,
+      triggeredAt: DateTime.now(),
+    );
+    exp.timer = Timer(_syncExpectationTimeout, () {
+      if (_syncExpectations[orderId] == exp) {
+        _syncExpectations.remove(orderId);
+        _throttledNotify();
+      }
+    });
+    _syncExpectations[orderId] = exp;
+    _throttledNotify();
+  }
+
+  /// Internal: clears expectations whose target was reached after a sync.
+  /// Called at the end of every sync cycle.
+  /// v553: also RESETS the timeout timer when partial progress is detected
+  /// (status advanced but didn't yet reach the expected target). Prevents
+  /// the spinner from disappearing mid-flight on slow relay deliveries
+  /// (e.g. pending -> accepted -> awaiting_confirmation can take >20s).
+  void _reconcileSyncExpectations() {
+    if (_syncExpectations.isEmpty) return;
+    final toClear = <String>[];
+    _syncExpectations.forEach((orderId, exp) {
+      final order = getOrderById(orderId);
+      if (order == null) return;
+      // Clear when actual status reached the expectation OR went past it
+      // (e.g. expected 'awaiting_confirmation' but already 'completed').
+      if (order.status == exp.expectedStatus ||
+          _isStatusMoreRecent(order.status, exp.expectedStatus)) {
+        toClear.add(orderId);
+        return;
+      }
+      // Partial progress: status changed since last reconcile but still
+      // behind the expectation. Reset the timer so the spinner stays.
+      if (exp.lastSeenStatus != order.status) {
+        exp.lastSeenStatus = order.status;
+        exp.timer?.cancel();
+        exp.timer = Timer(_syncExpectationTimeout, () {
+          if (_syncExpectations[orderId] == exp) {
+            _syncExpectations.remove(orderId);
+            _throttledNotify();
+          }
+        });
+      }
+    });
+    for (final id in toClear) {
+      _syncExpectations[id]?.timer?.cancel();
+      _syncExpectations.remove(id);
+    }
+  }
+
+  /// Maps an FCM order_update subtype to the Order.status the app expects
+  /// to see in the next sync. Returns null for unknown subtypes.
+  static String? expectedStatusForSubtype(String subtype) {
+    switch (subtype) {
+      case 'accepted':
+        return 'accepted';
+      case 'awaiting_confirmation':
+      case 'payment_submitted':
+        return 'awaiting_confirmation';
+      case 'completed':
+        return 'completed';
+      case 'cancelled':
+        return 'cancelled';
+      case 'disputed':
+        return 'disputed';
+      case 'liquidated':
+        return 'liquidated';
+      default:
+        return null;
+    }
+  }
+
+  @override
+  void dispose() {
+    // v552: cancel sync expectation timers to prevent leaks.
+    for (final exp in _syncExpectations.values) {
+      exp.timer?.cancel();
+    }
+    _syncExpectations.clear();
+    _saveDebounceTimer?.cancel();
+    _notifyDebounceTimer?.cancel();
+    super.dispose();
+  }
+}
+
+/// v552: Tracks an in-flight sync expectation triggered by an FCM push.
+class _SyncExpectation {
+  final String expectedStatus;
+  final DateTime triggeredAt;
+  Timer? timer;
+  // v553: tracks the last order.status observed during reconcile, so we
+  // can detect partial progress and reset the timer accordingly.
+  String? lastSeenStatus;
+  _SyncExpectation({required this.expectedStatus, required this.triggeredAt});
 }

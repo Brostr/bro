@@ -11,6 +11,7 @@ import 'package:nostr/nostr.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/order_reminder_service.dart';
 import 'package:workmanager/workmanager.dart';
 
 /// v262: Servico de notificacoes em background
@@ -47,6 +48,7 @@ void broBackgroundCallbackDispatcher() {
       if (taskName == _taskName || taskName == Workmanager.iOSBackgroundTask) {
         await _checkNostrForNewEvents();
         await _checkAutoLiquidationBackground();
+        await _checkOrderRemindersBackground();
         await _refreshFcmToken();
       }
       
@@ -815,6 +817,38 @@ Future<void> _checkAutoLiquidationBackground() async {
       final lockPrefs = await SharedPreferences.getInstance();
       await lockPrefs.remove(_bgAutoLiqLockKey);
     } catch (_) {}
+  }
+}
+
+/// v550: Lembretes progressivos em background (24h / 30h / 35h antes do
+/// deadline de 36h). Cobre ambos os cenarios: provedor pendente de comprovante
+/// (status=accepted) e usuario pendente de confirmacao (status=awaiting_confirmation).
+Future<void> _checkOrderRemindersBackground() async {
+  try {
+    const secureStorage = FlutterSecureStorage(
+      aOptions: AndroidOptions(encryptedSharedPreferences: true),
+      iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+    );
+    final userPubkey = await secureStorage.read(key: 'nostr_public_key');
+    if (userPubkey == null || userPubkey.isEmpty) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final ordersJson = prefs.getString('orders_$userPubkey');
+    if (ordersJson == null || ordersJson.isEmpty) return;
+
+    final rawList = jsonDecode(ordersJson);
+    if (rawList is! List) return;
+    final orders = rawList
+        .whereType<Map>()
+        .map((e) => e.cast<String, dynamic>())
+        .toList();
+
+    await OrderReminderService().checkAndNotify(
+      orders: orders,
+      currentPubkey: userPubkey,
+    );
+  } catch (e) {
+    broLog('[BRO-BG-REMINDER] Erro: $e');
   }
 }
 

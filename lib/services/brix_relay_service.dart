@@ -12,6 +12,7 @@ import 'package:bro_app/services/storage_service.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/push_diag.dart';
 import 'package:bro_app/services/lnaddress_service.dart';
+import 'package:bro_app/services/platform_fee_service.dart';
 import 'package:bro_app/providers/breez_provider.dart';
 import 'package:bro_app/config.dart';
 
@@ -475,7 +476,17 @@ class BrixRelayService {
         final payResult = await breezProvider.payInvoice(result['invoice'] as String);
         final success = payResult != null && payResult['success'] == true;
         broLog('⚡ [BRIX-RELAY] Fee ${success ? "paid" : "failed"}: $feeSats sats');
-        if (!success) _paidFees.remove(requestId);
+        if (success) {
+          // Ocultar a taxa do histórico da carteira — ela já foi deduzida
+          // conceitualmente do valor exibido como "BRIX recebido" para o usuário.
+          final hash = payResult['payment']?['paymentHash']?.toString();
+          if (hash != null && hash.isNotEmpty) {
+            await PlatformFeeService.registerFeePaymentHash(hash);
+            broLog('🔇 [BRIX-RELAY] Fee hash registrado para ocultar do histórico: ${hash.substring(0, hash.length > 16 ? 16 : hash.length)}');
+          }
+        } else {
+          _paidFees.remove(requestId);
+        }
       } else {
         _paidFees.remove(requestId);
       }

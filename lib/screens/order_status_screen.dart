@@ -1549,6 +1549,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                _buildSyncingBanner(),
                 _buildStatusCard(),
                 const SizedBox(height: 10),
                 _buildOrderDetailsCard(),
@@ -1604,6 +1605,68 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
             ],
           ),
         ),
+        ),
+      ),
+    );
+  }
+
+  /// v552: Banner mostrado quando uma notificação push chegou avisando de uma
+  /// transição (ex.: comprovante enviado, ordem aceita) mas o sync com os
+  /// relays Nostr ainda não trouxe o evento correspondente. Some sozinho ao
+  /// fim do sync ou após timeout (20s) configurado no OrderProvider.
+  Widget _buildSyncingBanner() {
+    final orderProvider = context.watch<OrderProvider>();
+    if (!orderProvider.isSyncing(widget.orderId)) {
+      return const SizedBox.shrink();
+    }
+    final expected = orderProvider.expectedStatusForSyncing(widget.orderId);
+    String message;
+    switch (expected) {
+      case 'accepted':
+        message = 'Confirmando aceitação…';
+        break;
+      case 'awaiting_confirmation':
+        message = 'Carregando comprovante, aguarde…';
+        break;
+      case 'completed':
+        message = 'Atualizando status para concluído…';
+        break;
+      case 'cancelled':
+        message = 'Atualizando cancelamento…';
+        break;
+      case 'disputed':
+        message = 'Registrando disputa…';
+        break;
+      default:
+        message = 'Sincronizando atualização…';
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: Colors.orange.withOpacity(0.10),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.orange.withOpacity(0.35)),
+        ),
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.orange,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(color: Colors.orange, fontSize: 13, fontWeight: FontWeight.w500),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1889,15 +1952,14 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
     // Calcular fees e valores
     final rawBillCode = fullOrder?.billCode ?? _orderDetails?['billCode'] ?? '';
     final billCode = BillCodeCryptoService().decrypt(rawBillCode);
-    final providerFeeBrl = fullOrder?.providerFee ?? 
-        ((_orderDetails?['providerFee'] as num?)?.toDouble() ?? 0.0);
-    final btcPrice = fullOrder?.btcPrice ?? 
-        ((_orderDetails?['btcPrice'] as num?)?.toDouble() ?? 0.0);
-    
-    // Converter para sats (taxa plataforma 2% embutida no spread)
-    final providerFeeSats = btcPrice > 0 
-        ? (providerFeeBrl / btcPrice * 100000000).round() : 0;
-    final totalSats = widget.amountSats + providerFeeSats;
+
+    // v560: Usar fórmula canônica (baseSats × 3%) — mesma usada pelo Bro ao
+    // gerar o invoice e pelo AutoPay (main.dart) ao validar. Antes usávamos
+    // providerFeeBrl / btcPrice que dava off-by-one e travava confirmação.
+    final baseSats = widget.amountSats;
+    var providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
+    if (providerFeeSats < 1 && baseSats > 0) providerFeeSats = 1;
+    final totalSats = baseSats + providerFeeSats;
     
     return Card(
       color: const Color(0xFF1A1A1A),
@@ -2403,6 +2465,38 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                     TextButton(
                       onPressed: () => _showReceiptImage(receiptUrl!),
                       child: Text(l.t('order_view')),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+            ] else if (orderProvider.isSyncing(widget.orderId)) ...[
+              // v552: Comprovante anunciado por push mas relay ainda nao
+              // entregou o evento. Mostrar placeholder para o usuario
+              // entender que esta carregando, nao que esta quebrado.
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.withOpacity(0.25)),
+                ),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.blue[300],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Carregando comprovante, aguarde…',
+                        style: TextStyle(fontSize: 13, color: Colors.blue[200]),
+                      ),
                     ),
                   ],
                 ),

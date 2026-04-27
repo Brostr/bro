@@ -584,9 +584,11 @@ class BreezProvider with ChangeNotifier {
     }
   }
 
-  /// Create a Lightning invoice
+  /// Create a Lightning invoice.
+  /// v562: [amountSats] e opcional. Se null, gera invoice de valor aberto
+  /// (qualquer valor pode ser pago).
   Future<Map<String, dynamic>?> createInvoice({
-    required int amountSats,
+    int? amountSats,
     String? description,
   }) async {
     // Garantir que SDK está inicializado
@@ -606,7 +608,7 @@ class BreezProvider with ChangeNotifier {
 
     _setError(null);
     
-    broLog('⚡ Criando invoice de $amountSats sats...');
+    broLog('⚡ Criando invoice de ${amountSats ?? "<qualquer valor>"} sats...');
     broLog('📝 Descrição: ${description ?? "Pagamento Bro"}');
 
     // Retry logic para erros transientes do SDK (como RangeError)
@@ -622,7 +624,7 @@ class BreezProvider with ChangeNotifier {
           request: spark.ReceivePaymentRequest(
             paymentMethod: spark.ReceivePaymentMethod.bolt11Invoice(
               description: description ?? 'Pagamento Bro',
-              amountSats: BigInt.from(amountSats),
+              amountSats: amountSats != null ? BigInt.from(amountSats) : null,
             ),
           ),
         ).timeout(

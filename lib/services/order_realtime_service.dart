@@ -33,6 +33,12 @@ class OrderRealtimeService {
   // Callback when a new order event arrives — triggers sync
   void Function()? onOrderEvent;
 
+  // v552: Callback when an order_update FCM push arrives.
+  // Carries the orderId + subtype so the OrderProvider can mark the order
+  // as "syncing" with an expected target status, allowing the UI to show
+  // a spinner/placeholder while the relay sync catches up.
+  void Function(String orderId, String subtype)? onOrderPush;
+
   // Nostr event kinds for orders
   static const int _kindAccept = 30079;
   static const int _kindPaymentProof = 30080;

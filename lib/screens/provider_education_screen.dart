@@ -554,12 +554,11 @@ class ProviderEducationScreen extends StatelessWidget {
           width: double.infinity,
           child: ElevatedButton.icon(
             onPressed: () async {
-              // Obter pubkey do usuário atual
-              final nostrService = NostrService();
-              final pubkey = nostrService.publicKey;
-              // Salvar que está iniciando modo provedor COM PUBKEY
-              await SecureStorageService.setProviderMode(true, userPubkey: pubkey);
-              broLog('✅ Modo provedor salvo (via Começar Agora) para pubkey: ${pubkey?.substring(0, 8) ?? "null"}');
+              // v551: NAO marcar como provedor aqui. O flag ProviderMode so
+              // deve ser ativado em tier_deposit_screen APOS o colateral ser
+              // efetivamente depositado. Marcar aqui fazia com que o backend
+              // passasse a receber broadcasts de 'Nova ordem' mesmo que o
+              // usuario desistisse sem completar o onboarding de provedor.
               Navigator.pushNamed(context, '/provider-collateral');
             },
             icon: const Icon(Icons.rocket_launch),

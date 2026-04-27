@@ -10,6 +10,8 @@
 
 const axios = require('axios');
 const nostrListener = require('./nostrListenerService');
+const db = require('../models/database');
+const paymentVerifier = require('./paymentVerifier');
 
 // ============================================
 // Configuration
@@ -225,6 +227,24 @@ class DisputeAgentService {
       alreadyResolved: disputeAnalyses.has(orderId) && disputeAnalyses.get(orderId).resolvedBy,
     };
 
+    // v557 (Audit B2): Cross-check Nostr dispute payload vs backend DB row.
+    // Tampering, missing escrow, or amount mismatches become findings.
+    const dbFindings = this._buildDbFindings(dispute);
+
+    // v557 (Audit B1): Detect order-flow anomalies from data already at hand
+    // (timestamps, status transitions, evidence presence).
+    const flowFindings = this._buildFlowFindings(dispute);
+
+    // v557 (Audit B4): Structural validation of any payment code present in the
+    // dispute payload (boleto linha digitável, PIX BR Code, PIX E2E).
+    const paymentFindings = this._buildPaymentFindings(dispute);
+
+    // Attach findings on the dispute object so they reach the LLM prompt and
+    // confidence scoring downstream.
+    dispute.db_findings = dbFindings;
+    dispute.flow_findings = flowFindings;
+    dispute.payment_findings = paymentFindings;
+
     // Step 1: Heuristic analysis
     const heuristicResult = this._runHeuristics(dispute, context);
     
@@ -252,6 +272,9 @@ class DisputeAgentService {
       meta,
       heuristicResult,
       llmResult,
+      dbFindings,
+      flowFindings,
+      paymentFindings,
       ...finalResult,
       analyzedAt: new Date().toISOString(),
       evidenceCount: 0,
@@ -275,6 +298,20 @@ class DisputeAgentService {
     // Log result
     const tierLabel = finalResult.tier === 1 ? 'AUTO' : finalResult.tier === 2 ? 'SUGGEST' : 'ESCALATE';
     console.log(`   📊 [DisputeAgent] ${tierLabel} | Confidence: ${(finalResult.confidence * 100).toFixed(0)}% | Suggestion: ${finalResult.suggestion} | ${finalResult.reason}`);
+
+    // v557 (Audit A1): Tier 1 auto-execute candidate. The actual auto-resolve
+    // path requires A2 (publishResolution helper with ADMIN_NSEC) and a
+    // daily-rate limiter. Until A2 lands, log only.
+    if (finalResult.tier === 1) {
+      const todayKey = new Date().toISOString().slice(0, 10);
+      this._autoResolvesByDay = this._autoResolvesByDay || {};
+      const used = this._autoResolvesByDay[todayKey] || 0;
+      if (used < CONFIG.maxAutoResolvesPerDay) {
+        console.log(`🤖 [DisputeAgent] Tier 1 candidate (orderId=${orderId}) — A2 publish path NOT IMPLEMENTED. Skipping auto-execute. Daily quota ${used}/${CONFIG.maxAutoResolvesPerDay}.`);
+      } else {
+        console.warn(`🤖 [DisputeAgent] Tier 1 quota exhausted today (${used}/${CONFIG.maxAutoResolvesPerDay}) — would have downgraded to Tier 2.`);
+      }
+    }
 
     return analysis;
     } finally {
@@ -311,6 +348,221 @@ class DisputeAgentService {
       confidence: 0,
       reason: 'Nenhuma regra heurística aplicável',
     };
+  }
+
+  // ============================================
+  // v557 (Audit B2): DB cross-check findings
+  // ============================================
+
+  /**
+   * Compares dispute payload (from Nostr) with backend DB row.
+   * Detects tampering, missing escrow, or amount mismatches.
+   * Returns array of findings (each: {id, severity, detail, scoreDelta}).
+   */
+  _buildDbFindings(dispute) {
+    const out = [];
+    const orderId = dispute.orderId;
+    const order = (db.orders && typeof db.orders.get === 'function') ? db.orders.get(orderId) : null;
+    const escrow = (db.escrows && typeof db.escrows.get === 'function') ? db.escrows.get(orderId) : null;
+
+    if (!order) {
+      out.push({
+        id: 'db_order_missing',
+        severity: 'medium',
+        detail: 'Ordem não encontrada no DB do servidor (pode ser ordem antiga ou nunca registrada)',
+        scoreDelta: -0.05,
+      });
+      return out;
+    }
+
+    // Amount BRL mismatch (>1 cent tolerance)
+    if (dispute.amount_brl != null && order.amountBrl != null) {
+      const a = parseFloat(dispute.amount_brl);
+      const b = parseFloat(order.amountBrl);
+      if (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) > 0.01) {
+        out.push({
+          id: 'db_amount_brl_mismatch',
+          severity: 'high',
+          detail: `BRL Nostr=${a} DB=${b}`,
+          scoreDelta: -0.30,
+        });
+      }
+    }
+
+    // Amount sats mismatch (>10 sats tolerance for rounding)
+    if (dispute.amount_sats != null && order.amountSats != null) {
+      const a = parseInt(dispute.amount_sats, 10);
+      const b = parseInt(order.amountSats, 10);
+      if (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) > 10) {
+        out.push({
+          id: 'db_amount_sats_mismatch',
+          severity: 'high',
+          detail: `sats Nostr=${a} DB=${b}`,
+          scoreDelta: -0.30,
+        });
+      }
+    }
+
+    // Payment type mismatch
+    if (dispute.payment_type && order.billType && dispute.payment_type !== order.billType) {
+      out.push({
+        id: 'db_payment_type_mismatch',
+        severity: 'high',
+        detail: `tipo Nostr=${dispute.payment_type} DB=${order.billType}`,
+        scoreDelta: -0.20,
+      });
+    }
+
+    // Escrow record missing → dispute on a never-funded order
+    if (!escrow) {
+      out.push({
+        id: 'db_no_escrow',
+        severity: 'medium',
+        detail: 'Sem registro de escrow no servidor — ordem pode não ter sido fundada',
+        scoreDelta: -0.10,
+      });
+    }
+
+    return out;
+  }
+
+  // ============================================
+  // v557 (Audit B1): Flow-compliance findings
+  // ============================================
+
+  /**
+   * Detects anomalies in the order timeline using data already in the dispute
+   * payload + order DB. Future improvement (deferred): also fetch all kind
+   * 30078/30079/30080/30081 events from relays to build a full timeline.
+   *
+   * Returns array of findings (each: {id, severity, detail, scoreDelta, favors}).
+   */
+  _buildFlowFindings(dispute) {
+    const out = [];
+    const order = (db.orders && typeof db.orders.get === 'function') ? db.orders.get(dispute.orderId) : null;
+    const now = Date.now();
+    const disputedAt = dispute.createdAt ? new Date(dispute.createdAt).getTime() : now;
+
+    // Provider opened dispute but order was never accepted (no providerId)
+    if (dispute.openedBy === 'provider' && order && !order.providerId) {
+      out.push({
+        id: 'flow_provider_dispute_unaccepted',
+        severity: 'high',
+        detail: 'Provedor abriu disputa em ordem que não foi aceita',
+        scoreDelta: -0.20,
+        favors: 'user',
+      });
+    }
+
+    // User disputed before auto-liquidation window (36h after proof)
+    if (order && order.proofReceivedAt) {
+      const proofMs = new Date(order.proofReceivedAt).getTime();
+      const hoursSinceProof = (disputedAt - proofMs) / 3600000;
+      if (dispute.openedBy === 'user' && hoursSinceProof < 36) {
+        out.push({
+          id: 'flow_user_dispute_before_window',
+          severity: 'low',
+          detail: `Usuário abriu disputa ${hoursSinceProof.toFixed(1)}h após comprovante (janela auto-liq = 36h)`,
+          scoreDelta: 0.0,
+          favors: 'neutral',
+        });
+      }
+      // Suspicious: proof submitted AFTER dispute was opened
+      if (proofMs > disputedAt + 60000) {
+        out.push({
+          id: 'flow_proof_after_dispute',
+          severity: 'high',
+          detail: 'Comprovante submetido APÓS abertura da disputa',
+          scoreDelta: -0.25,
+          favors: 'user',
+        });
+      }
+    }
+
+    // No provider response within 72h
+    if (order && order.acceptedAt) {
+      const acceptedMs = new Date(order.acceptedAt).getTime();
+      const hoursSinceAccept = (disputedAt - acceptedMs) / 3600000;
+      if (hoursSinceAccept > 72 && !order.proofReceivedAt) {
+        out.push({
+          id: 'flow_no_provider_response_72h',
+          severity: 'high',
+          detail: `Provedor aceitou há ${hoursSinceAccept.toFixed(0)}h sem submeter comprovante`,
+          scoreDelta: -0.15,
+          favors: 'user',
+        });
+      }
+    }
+
+    // No evidence at all from disputer
+    const hasEvidence = !!(dispute.user_evidence_nip44 && dispute.user_evidence_nip44.length > 100);
+    if (!hasEvidence) {
+      out.push({
+        id: 'flow_no_evidence_from_disputer',
+        severity: 'medium',
+        detail: 'Quem abriu a disputa não anexou evidência',
+        scoreDelta: -0.10,
+        favors: dispute.openedBy === 'user' ? 'provider' : 'user',
+      });
+    }
+
+    return out;
+  }
+
+  // ============================================
+  // v557 (Audit B4): Payment code structural validation
+  // ============================================
+
+  /**
+   * Validates structural shape of any payment code present in the dispute.
+   * Looks at dispute.bill_code, dispute.pix_brcode, dispute.pix_e2e (and
+   * common variants). Returns findings array compatible with other helpers.
+   */
+  _buildPaymentFindings(dispute) {
+    const out = [];
+    const codes = [
+      { value: dispute.bill_code, source: 'bill_code' },
+      { value: dispute.pix_brcode, source: 'pix_brcode' },
+      { value: dispute.pix_e2e, source: 'pix_e2e' },
+      { value: dispute.boleto_linha, source: 'boleto_linha' },
+    ].filter(c => typeof c.value === 'string' && c.value.length > 0);
+
+    for (const c of codes) {
+      let res;
+      try {
+        res = paymentVerifier.verifyAny(c.value, {
+          expectedAmountBrl: dispute.amount_brl,
+          orderCreatedAt: dispute.createdAt,
+        });
+      } catch (e) {
+        out.push({
+          id: 'payment_verify_error',
+          severity: 'low',
+          detail: `verifier crash em ${c.source}: ${e.message}`,
+          scoreDelta: 0,
+        });
+        continue;
+      }
+
+      if (res.valid) {
+        out.push({
+          id: `payment_${res.type}_valid`,
+          severity: 'info',
+          detail: `${c.source}: ${res.type} estruturalmente válido`,
+          scoreDelta: 0.05, // small boost when code passes checks
+        });
+      }
+      for (const f of (res.findings || [])) {
+        out.push({
+          id: `payment_${c.source}_${f.id}`,
+          severity: f.severity,
+          detail: f.detail,
+          scoreDelta: f.severity === 'high' ? -0.15 : (f.severity === 'medium' ? -0.05 : 0),
+        });
+      }
+    }
+
+    return out;
   }
 
   /**
@@ -370,6 +622,17 @@ class DisputeAgentService {
     const hasEvidence = dispute.user_evidence_nip44 ? 'SIM' : 'NÃO';
     const hasPixKey = dispute.pix_key ? 'Informada' : 'Não informada';
 
+    // v557 (Audit B1/B2/B4): Surface automated findings to the LLM so its
+    // reasoning is grounded in DB cross-checks, flow anomalies and payment
+    // code structural validation — not just user prose.
+    const fmtFindings = (arr) => {
+      if (!Array.isArray(arr) || arr.length === 0) return 'nenhum';
+      return arr.map(f => `[${f.severity || 'info'}] ${s(f.detail, 200)}`).join('; ');
+    };
+    const dbFindingsStr = fmtFindings(dispute.db_findings);
+    const flowFindingsStr = fmtFindings(dispute.flow_findings);
+    const paymentFindingsStr = fmtFindings(dispute.payment_findings);
+
     return `Você é um agente de mediação de disputas para o Bro, um app P2P de pagamento de contas no Brasil usando Bitcoin/Lightning.
 
 CONTEXTO DA DISPUTA:
@@ -388,6 +651,11 @@ ANÁLISE HEURÍSTICA PRÉVIA:
 - Sugestão: ${s(heuristicResult.suggestion, 30) || 'Nenhuma'}
 - Confiança: ${(heuristicResult.confidence * 100).toFixed(0)}%
 - Razão: ${s(heuristicResult.reason, 200)}
+
+ACHADOS AUTOMÁTICOS (verificações estruturais — NÃO são opinião):
+- Cruzamento com DB do servidor: ${dbFindingsStr}
+- Conformidade do fluxo (timestamps/status): ${flowFindingsStr}
+- Validação dos códigos de pagamento: ${paymentFindingsStr}
 
 REGRAS DE MEDIAÇÃO:
 1. Se o provedor não respondeu em tempo hábil, favorecer o USUÁRIO
@@ -488,6 +756,12 @@ Responda APENAS no formato JSON:
 
   /**
    * Combine heuristic and LLM results
+   *
+   * v557 (Audit B1/B2/B4 + A11): Apply scoreDelta from automated findings
+   * (DB cross-check, flow compliance, payment code validation) AND enforce a
+   * hard guard for Tier 1: requires heuristic ≥ 0.80 AND llm ≥ 0.85, otherwise
+   * demote to Tier 2 (admin must approve). Findings flagged as `favors:'user'`
+   * or `favors:'provider'` may also override the suggestion when severity=high.
    */
   _combineResults(heuristic, llm, dispute) {
     // If heuristic says skip (already resolved), honor it
@@ -502,23 +776,65 @@ Responda APENAS no formato JSON:
       };
     }
 
+    // Aggregate scoreDelta from all findings on the dispute
+    const allFindings = [
+      ...(dispute.db_findings || []),
+      ...(dispute.flow_findings || []),
+      ...(dispute.payment_findings || []),
+    ];
+    const totalDelta = allFindings.reduce((acc, f) => acc + (Number(f.scoreDelta) || 0), 0);
+    const clampedDelta = Math.max(-0.6, Math.min(0.2, totalDelta));
+
+    // Detect strong directional signal from flow findings
+    const strongFlowFavor = (dispute.flow_findings || [])
+      .filter(f => f.severity === 'high' && (f.favors === 'user' || f.favors === 'provider'))
+      .map(f => f.favors);
+    const flowOverride = strongFlowFavor.length > 0 ? strongFlowFavor[0] : null;
+
     // If LLM available, weight it more (60/40)
     if (llm && llm.suggestion) {
       const combinedConfidence = llm.confidence * 0.6 + heuristic.confidence * 0.4;
-      
-      // If both agree, boost confidence
+
       let finalConfidence = combinedConfidence;
       let finalSuggestion = llm.suggestion;
-      
+
       if (heuristic.suggestion === llm.suggestion) {
-        finalConfidence = Math.min(0.98, combinedConfidence * 1.15); // 15% boost
+        finalConfidence = Math.min(0.98, combinedConfidence * 1.15);
       } else if (llm.suggestion === 'escalate') {
         finalSuggestion = 'escalate';
         finalConfidence = Math.min(combinedConfidence, 0.5);
       }
 
-      const tier = finalConfidence >= CONFIG.autoResolveThreshold ? 1 :
-                   finalConfidence >= CONFIG.suggestThreshold ? 2 : 3;
+      // Apply automated findings delta
+      finalConfidence = Math.max(0, Math.min(0.98, finalConfidence + clampedDelta));
+
+      // Strong flow override — high-severity timeline anomaly trumps text reasoning
+      if (flowOverride === 'user' && finalSuggestion !== 'resolved_user') {
+        finalSuggestion = 'resolved_user';
+        finalConfidence = Math.min(finalConfidence, 0.75);
+      } else if (flowOverride === 'provider' && finalSuggestion !== 'resolved_provider') {
+        finalSuggestion = 'resolved_provider';
+        finalConfidence = Math.min(finalConfidence, 0.75);
+      }
+
+      // Naive tier
+      let tier = finalConfidence >= CONFIG.autoResolveThreshold ? 1 :
+                 finalConfidence >= CONFIG.suggestThreshold ? 2 : 3;
+
+      // A11 HARD GUARD: never auto-resolve (Tier 1) unless BOTH the heuristic
+      // and LLM independently expressed strong agreement. This prevents the
+      // 60/40 weighting + 15% boost from synthesizing a Tier 1 from two
+      // mediocre signals.
+      if (tier === 1) {
+        const passesGuard =
+          heuristic.confidence >= 0.80 &&
+          llm.confidence >= 0.85 &&
+          heuristic.suggestion === llm.suggestion &&
+          finalSuggestion !== 'escalate';
+        if (!passesGuard) {
+          tier = 2;
+        }
+      }
 
       return {
         tier,
@@ -530,14 +846,30 @@ Responda APENAS no formato JSON:
       };
     }
 
-    // Heuristic-only
-    const tier = heuristic.confidence >= CONFIG.autoResolveThreshold ? 1 :
-                 heuristic.confidence >= CONFIG.suggestThreshold ? 2 : 3;
+    // Heuristic-only path
+    let finalConfidence = Math.max(0, Math.min(0.98, heuristic.confidence + clampedDelta));
+    let finalSuggestion = heuristic.suggestion || 'escalate';
+
+    if (flowOverride === 'user' && finalSuggestion !== 'resolved_user') {
+      finalSuggestion = 'resolved_user';
+      finalConfidence = Math.min(finalConfidence, 0.70);
+    } else if (flowOverride === 'provider' && finalSuggestion !== 'resolved_provider') {
+      finalSuggestion = 'resolved_provider';
+      finalConfidence = Math.min(finalConfidence, 0.70);
+    }
+
+    let tier = finalConfidence >= CONFIG.autoResolveThreshold ? 1 :
+               finalConfidence >= CONFIG.suggestThreshold ? 2 : 3;
+
+    // A11 HARD GUARD (heuristic-only): never Tier 1 without LLM corroboration.
+    // Without an LLM second opinion we don't have the dual-signal needed for
+    // automatic execution.
+    if (tier === 1) tier = 2;
 
     return {
       tier,
-      suggestion: heuristic.suggestion || 'escalate',
-      confidence: heuristic.confidence,
+      suggestion: finalSuggestion,
+      confidence: finalConfidence,
       reason: heuristic.reason,
       analysis: '',
       riskFactors: [],
@@ -589,16 +921,33 @@ Responda APENAS no formato JSON:
 
   /**
    * Admin approves agent suggestion
+   *
+   * v557 (Audit A2): TODO — actually publish a kind 30080 `bro-resolucao`
+   * audit event and a kind 30081 completion to the relays so all clients
+   * converge on the resolution. This requires:
+   *   - process.env.ADMIN_NSEC : nsec1... key for the platform admin pubkey
+   *   - A small helper (similar to nostrListenerService) that signs with the
+   *     admin key and publishes to the configured relay set.
+   *   - Encrypted (NIP-44) DM to the loser explaining the decision.
+   * Until then, this only flips an in-memory flag — the apps still need a
+   * human to manually resolve via the regular admin UI.
    */
   approveAnalysis(orderId) {
     const analysis = disputeAnalyses.get(orderId);
     if (!analysis) return null;
-    
+
     analysis.resolvedBy = 'agent_approved';
     analysis.resolvedAt = new Date().toISOString();
     analysis.agentCorrect = true;
     disputeAnalyses.set(orderId, analysis);
-    
+
+    // A2 stub: signal that real publish path is pending
+    if (!process.env.ADMIN_NSEC) {
+      console.warn('⚠️ [DisputeAgent] approveAnalysis: ADMIN_NSEC not set — resolution NOT published to Nostr (admin must resolve manually). orderId=' + orderId);
+    } else {
+      console.warn('⚠️ [DisputeAgent] approveAnalysis: ADMIN_NSEC present but publishResolution() helper not yet implemented — resolution NOT published. orderId=' + orderId);
+    }
+
     return analysis;
   }
 

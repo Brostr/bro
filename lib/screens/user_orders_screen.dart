@@ -1645,13 +1645,31 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
                       color: statusInfo['color'],
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Text(
-                      statusInfo['label'],
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 12,
-                      ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // v552: spinner inline quando uma transicao foi
+                        // anunciada via FCM mas o relay ainda nao confirmou.
+                        if (context.watch<OrderProvider>().isSyncing(orderId)) ...[
+                          const SizedBox(
+                            width: 10,
+                            height: 10,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 1.5,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                        ],
+                        Text(
+                          statusInfo['label'],
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
