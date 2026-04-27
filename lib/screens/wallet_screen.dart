@@ -2325,6 +2325,9 @@ class _WalletScreenState extends State<WalletScreen> {
     String? generatedInvoice;
     bool isGenerating = false;
     String? errorMsg;
+    // v562: 3 modos -> 'sats' | 'brl' | 'any' (qualquer valor)
+    String inputMode = 'sats';
+    final btcPrice = _btcPrice; // capturado uma vez ao abrir o modal
     
     showModalBottomSheet(
       context: context,
@@ -2378,32 +2381,114 @@ class _WalletScreenState extends State<WalletScreen> {
                 const SizedBox(height: 20),
                 
                 if (generatedInvoice == null) ...[
-                  // Campo de valor
-                  TextField(
-                    controller: amountController,
-                    keyboardType: TextInputType.number,
-                    enabled: !isGenerating,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      labelText: AppLocalizations.of(context).t('wallet_quantity_sats'),
-                      labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Color(0xFF333333)),
+                  // v562: Toggle de modo (sats / BRL / qualquer valor)
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _ReceiveModeChip(
+                          label: 'sats',
+                          selected: inputMode == 'sats',
+                          onTap: isGenerating ? null : () {
+                            setModalState(() {
+                              inputMode = 'sats';
+                              errorMsg = null;
+                            });
+                          },
+                        ),
                       ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Color(0xFF333333)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _ReceiveModeChip(
+                          label: 'R\$',
+                          selected: inputMode == 'brl',
+                          onTap: (isGenerating || btcPrice <= 0) ? null : () {
+                            setModalState(() {
+                              inputMode = 'brl';
+                              errorMsg = null;
+                            });
+                          },
+                        ),
                       ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Color(0xFF4CAF50)),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _ReceiveModeChip(
+                          label: 'Qualquer valor',
+                          selected: inputMode == 'any',
+                          onTap: isGenerating ? null : () {
+                            setModalState(() {
+                              inputMode = 'any';
+                              errorMsg = null;
+                            });
+                          },
+                        ),
                       ),
-                      suffixText: 'sats',
-                      suffixStyle: const TextStyle(color: Colors.white54),
-                    ),
+                    ],
                   ),
-                  
+                  const SizedBox(height: 16),
+
+                  // Campo de valor (oculto no modo "qualquer valor")
+                  if (inputMode != 'any')
+                    TextField(
+                      controller: amountController,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      enabled: !isGenerating,
+                      style: const TextStyle(color: Colors.white),
+                      onChanged: (_) => setModalState(() {}),
+                      decoration: InputDecoration(
+                        labelText: inputMode == 'brl'
+                            ? 'Valor em reais'
+                            : AppLocalizations.of(context).t('wallet_quantity_sats'),
+                        labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: Color(0xFF333333)),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: Color(0xFF333333)),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: Color(0xFF4CAF50)),
+                        ),
+                        prefixText: inputMode == 'brl' ? 'R\$ ' : null,
+                        prefixStyle: const TextStyle(color: Colors.white54),
+                        suffixText: inputMode == 'brl' ? null : 'sats',
+                        suffixStyle: const TextStyle(color: Colors.white54),
+                      ),
+                    ),
+
+                  // Conversao live (BRL <-> sats)
+                  if (inputMode == 'brl' && btcPrice > 0 && amountController.text.trim().isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Builder(builder: (_) {
+                      final brl = double.tryParse(amountController.text.trim().replaceAll(',', '.'));
+                      if (brl == null || brl <= 0) return const SizedBox.shrink();
+                      final sats = (brl * 100000000 / btcPrice).round();
+                      return Text(
+                        '\u2248 $sats sats  \u2022  1 BTC = R\$ ${btcPrice.toStringAsFixed(0)}',
+                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                      );
+                    }),
+                  ] else if (inputMode == 'sats' && btcPrice > 0 && amountController.text.trim().isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Builder(builder: (_) {
+                      final sats = int.tryParse(amountController.text.trim());
+                      if (sats == null || sats <= 0) return const SizedBox.shrink();
+                      final brl = sats * btcPrice / 100000000;
+                      return Text(
+                        '\u2248 R\$ ${brl.toStringAsFixed(2)}',
+                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                      );
+                    }),
+                  ] else if (inputMode == 'any') ...[
+                    const SizedBox(height: 8),
+                    const Text(
+                      'O QR code ser\u00e1 v\u00e1lido para qualquer valor que o pagador escolher.',
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                  ],
+
                   if (errorMsg != null) ...[
                     const SizedBox(height: 12),
                     Container(
@@ -2435,32 +2520,54 @@ class _WalletScreenState extends State<WalletScreen> {
                     width: double.infinity,
                     child: ElevatedButton.icon(
                       onPressed: isGenerating ? null : () async {
-                        final amountText = amountController.text.trim();
-                        final amount = int.tryParse(amountText);
-                        
-                        if (amount == null || amount <= 0) {
-                          setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_enter_valid_value'));
-                          return;
+                        // v562: resolver amountSats conforme modo
+                        int? amountSats;
+                        if (inputMode == 'any') {
+                          amountSats = null;
+                        } else if (inputMode == 'brl') {
+                          if (btcPrice <= 0) {
+                            setModalState(() => errorMsg = 'Pre\u00e7o do Bitcoin indispon\u00edvel. Tente novamente.');
+                            return;
+                          }
+                          final brl = double.tryParse(amountController.text.trim().replaceAll(',', '.'));
+                          if (brl == null || brl <= 0) {
+                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_enter_valid_value'));
+                            return;
+                          }
+                          amountSats = (brl * 100000000 / btcPrice).round();
+                          if (amountSats < 100) {
+                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_minimum_100_sats'));
+                            return;
+                          }
+                        } else {
+                          // sats
+                          final amount = int.tryParse(amountController.text.trim());
+                          if (amount == null || amount <= 0) {
+                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_enter_valid_value'));
+                            return;
+                          }
+                          if (amount < 100) {
+                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_minimum_100_sats'));
+                            return;
+                          }
+                          amountSats = amount;
                         }
-                        
-                        if (amount < 100) {
-                          setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_minimum_100_sats'));
-                          return;
-                        }
-                        
+
                         setModalState(() {
                           isGenerating = true;
                           errorMsg = null;
                         });
-                        
-                        broLog('🎯 Gerando invoice de $amount sats...');
-                        
+
+                        broLog('\ud83c\udfaf Gerando invoice (modo=$inputMode, sats=${amountSats ?? "qualquer"})...');
+
                         try {
-                          // Usar LightningProvider com fallback Spark -> Liquid
                           final lightningProvider = context.read<LightningProvider>();
+                          final desc = amountSats != null
+                              ? 'Receber $amountSats sats - Bro App'
+                              : 'Receber qualquer valor - Bro App';
                           final result = await lightningProvider.createInvoice(
-                            amountSats: amount,
-                            description: 'Receber $amount sats - Bro App',
+                            amountSats: amountSats,
+                            description: desc,
                           );
                           
                           broLog('📦 Resultado createInvoice: $result');
@@ -3613,3 +3720,43 @@ class _WalletScreenState extends State<WalletScreen> {
     }
   }
 }
+
+
+/// v562: Chip de selecao de modo no dialog Receber (sats / R$ / qualquer valor)
+class _ReceiveModeChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback? onTap;
+  const _ReceiveModeChip({required this.label, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final disabled = onTap == null;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFF4CAF50).withOpacity(0.18) : const Color(0xFF222222),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: selected ? const Color(0xFF4CAF50) : const Color(0xFF333333),
+            width: 1,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: disabled ? Colors.white24 : (selected ? const Color(0xFF4CAF50) : Colors.white70),
+            fontSize: 13,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
