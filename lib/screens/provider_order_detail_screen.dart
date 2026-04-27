@@ -552,10 +552,15 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
         },
       );
     } catch (e) {
-      setState(() {
-        _isUploading = false;
-      });
       _showError(AppLocalizations.of(context)!.tp('prov_det_error_send_receipt', {'error': e.toString()}));
+    } finally {
+      // v563: sempre destravar o botão, mesmo em paths que escaparam dos catches
+      // internos (ex: setState chamado em widget desmontado, exceções não tratadas).
+      if (mounted && _isUploading) {
+        setState(() {
+          _isUploading = false;
+        });
+      }
     }
   }
 

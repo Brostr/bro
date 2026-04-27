@@ -2339,11 +2339,20 @@ class OrderProvider with ChangeNotifier {
 
 
       // Publicar conclus�?£o no Nostr
+      // v563: timeout explícito de 25s. Antes não havia timeout aqui — se um
+      // relay travasse, a função podia bloquear 90s+ levando o outer timeout
+      // do _uploadReceipt a disparar e fazer o usuário precisar reenviar.
       final success = await _nostrOrderService.completeOrderOnNostr(
         order: order,
         providerPrivateKey: privateKey,
         proofImageBase64: proof,
         providerInvoice: providerInvoice, // Invoice para receber pagamento
+      ).timeout(
+        const Duration(seconds: 25),
+        onTimeout: () {
+          broLog('[completeOrderAsProvider] timeout 25s ao publicar comprovante no Nostr');
+          return false;
+        },
       );
 
       if (!success) {
