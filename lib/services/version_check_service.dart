@@ -43,7 +43,18 @@ class VersionCheckService {
   /// Retorna true se há uma versão mais recente
   Future<bool> checkForUpdate({bool force = false}) async {
     if (_alreadyChecked && !force) return _updateAvailable;
-    
+
+    // v564: iOS NÃO usa GitHub releases — TestFlight/App Store têm seu próprio
+    // mecanismo de atualização. Antes, comparávamos o build do iOS contra o
+    // build do APK Android no GitHub, e quando subíamos uma APK nova (ex: 563)
+    // todos os iOS em TestFlight (no build 547, etc.) recebiam o popup
+    // "Nova Versão Disponível" mesmo já estando na última versão DELES.
+    if (Platform.isIOS) {
+      _alreadyChecked = true;
+      _updateAvailable = false;
+      return false;
+    }
+
     try {
       final packageInfo = await PackageInfo.fromPlatform();
       final currentBuild = int.tryParse(packageInfo.buildNumber) ?? 0;
