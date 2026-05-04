@@ -978,26 +978,29 @@ class NostrOrderService {
       }
       
       // CRÍTICO: Determinar o userPubkey correto
-      // Preferência: content.userPubkey (mais explícito)
-      // Fallback: event.pubkey (seguro pois assinatura Nostr garante autenticidade do autor)
+      // event.pubkey é AUTORITATIVO (assinatura Nostr verificada antes em _fetchFromRelay)
+      // content.userPubkey é texto livre — pode ser spoofado.
+      // v565: Para kind 30078 (criação de ordem), o signer DEVE ser o dono.
+      // Se content.userPubkey estiver presente e diferente do signer, REJEITAR (spoofing).
+      final eventPubkey = event['pubkey'] as String?;
       final contentUserPubkey = content['userPubkey'] as String?;
-      
-      String? originalUserPubkey;
-      if (contentUserPubkey != null && contentUserPubkey.isNotEmpty) {
-        // Ordem nova com userPubkey no content - CONFIÁVEL
-        originalUserPubkey = contentUserPubkey;
-      } else {
-        // Ordem legada (v1.0) sem userPubkey no content
-        // SEGURO usar event.pubkey porque a assinatura criptográfica (sig)
-        // garante que o pubkey é do autor original — relays não podem falsificar
-        final eventPubkey = event['pubkey'] as String?;
-        if (eventPubkey != null && eventPubkey.isNotEmpty) {
-          originalUserPubkey = eventPubkey;
-          broLog('ℹ️ Ordem legada: usando event.pubkey como userPubkey');
-        } else {
-          return null; // Sem nenhuma forma de identificar o dono
-        }
+
+      if (eventPubkey == null || eventPubkey.isEmpty) {
+        return null; // Sem signer não há como identificar o dono
       }
+
+      if (contentUserPubkey != null &&
+          contentUserPubkey.isNotEmpty &&
+          contentUserPubkey != eventPubkey) {
+        broLog('🚫 [SECURITY] eventToOrder: spoofed kind 30078 rejeitado — '
+            'signer=${eventPubkey.substring(0, 8)} '
+            'claim=${contentUserPubkey.substring(0, 8)} '
+            'orderId=${orderId.toString().substring(0, 8)}');
+        return null;
+      }
+
+      // Em ambos os casos válidos (campo presente == signer, ou ausente/legado), o dono é o signer
+      final String originalUserPubkey = eventPubkey;
       
       return Order(
         id: orderId,
@@ -1090,9 +1093,20 @@ class NostrOrderService {
           final eventOrderId = content['orderId'] as String?;
           
           if (eventOrderId == orderId) {
-            final contentUserPubkey = content['userPubkey'] as String? ?? event['pubkey'] as String?;
-            if (contentUserPubkey == null || contentUserPubkey.isEmpty) continue;
-            
+            // v565 SECURITY: signer (event.pubkey, assinatura verificada) é autoritativo.
+            // Se content.userPubkey existe e diverge do signer, é spoofing — pular.
+            final eventPubkey = event['pubkey'] as String?;
+            if (eventPubkey == null || eventPubkey.isEmpty) continue;
+            final claimedUserPubkey = content['userPubkey'] as String?;
+            if (claimedUserPubkey != null &&
+                claimedUserPubkey.isNotEmpty &&
+                claimedUserPubkey != eventPubkey) {
+              broLog('🚫 [SECURITY] _fetchOrderFromRelay: spoofed kind 30078 ignorado — '
+                  'signer=${eventPubkey.substring(0, 8)} claim=${claimedUserPubkey.substring(0, 8)}');
+              continue;
+            }
+            final String contentUserPubkey = eventPubkey;
+
             return {
               'id': orderId,
               'eventId': event['id'],
@@ -1118,8 +1132,18 @@ class NostrOrderService {
       if (allEvents.isNotEmpty) {
         final event = allEvents.first; // Já está ordenado — mais recente primeiro
         final content = event['parsedContent'] ?? jsonDecode(event['content']);
-        final fallbackUserPubkey = content['userPubkey'] as String? ?? event['pubkey'] as String?;
-        if (fallbackUserPubkey == null || fallbackUserPubkey.isEmpty) return null;
+        // v565 SECURITY: signer (event.pubkey) é autoritativo. Rejeitar spoofing.
+        final eventPubkey = event['pubkey'] as String?;
+        if (eventPubkey == null || eventPubkey.isEmpty) return null;
+        final claimedUserPubkey = content['userPubkey'] as String?;
+        if (claimedUserPubkey != null &&
+            claimedUserPubkey.isNotEmpty &&
+            claimedUserPubkey != eventPubkey) {
+          broLog('🚫 [SECURITY] _fetchOrderFromRelay fallback: spoofed kind 30078 ignorado — '
+              'signer=${eventPubkey.substring(0, 8)} claim=${claimedUserPubkey.substring(0, 8)}');
+          return null;
+        }
+        final String fallbackUserPubkey = eventPubkey;
         
         return {
           'id': content['orderId'] ?? orderId,

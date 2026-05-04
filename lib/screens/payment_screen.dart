@@ -247,9 +247,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
             final details = payment.details as spark.PaymentDetails_Lightning;
             final receivedAmount = payment.amount.toInt();
             
-            // Validações: payment hash deve bater E valor deve ser >= 95% do esperado
+            // Validações: payment hash deve bater E valor deve ser >= esperado - 10 sats (tolerância absoluta)
             final isCorrectHash = details.htlcDetails.paymentHash == paymentHash;
-            final isCorrectAmount = receivedAmount >= (amountSats * 0.95).round();
+            final isCorrectAmount = receivedAmount >= (amountSats - 10); // v565: era 95% — abusivo em valores altos
             
             if (isCorrectHash && isCorrectAmount) {
               isPaid = true;
