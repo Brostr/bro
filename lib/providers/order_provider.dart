@@ -528,6 +528,11 @@ class OrderProvider with ChangeNotifier {
   /// Runs both on local load and after Nostr sync to prevent re-addition.
   void _removeGhostProviderOrders(String userPubkey) {
     final before = _orders.length;
+    final now = DateTime.now();
+    // v566: Janela de tolerância para ordens recém-aceitas (sem invoice ainda).
+    // Provedor pode acabar de aceitar e ainda não ter recebido invoice do user
+    // — isso NÃO é uma ghost order, é uma legítima em propagação.
+    const recentGrace = Duration(minutes: 30);
     _orders = _orders.where((order) {
       final isMeAsProvider = order.providerId == userPubkey;
       final someoneElseIsCustomer = order.userPubkey != null &&
@@ -537,6 +542,16 @@ class OrderProvider with ChangeNotifier {
       final hasProof = (order.metadata?['proofImage'] as String?)?.isNotEmpty == true ||
           (order.metadata?['paymentProof'] as String?)?.isNotEmpty == true;
       if (isMeAsProvider && someoneElseIsCustomer && !hasProviderInvoice && !hasProof) {
+        // v566: Tolerância para aceitações recentes
+        final acceptedAt = order.acceptedAt;
+        if (acceptedAt != null && now.difference(acceptedAt) < recentGrace) {
+          broLog('⏳ Ghost-check (invoice): mantendo ordem ${order.id.substring(0, 8)} aceita há ${now.difference(acceptedAt).inSeconds}s');
+          return true;
+        }
+        if (acceptedAt == null && now.difference(order.createdAt) < recentGrace) {
+          broLog('⏳ Ghost-check (invoice): mantendo ordem ${order.id.substring(0, 8)} criada há ${now.difference(order.createdAt).inSeconds}s');
+          return true;
+        }
         broLog('🧹 Ghost order removida (providerId=me sem invoice/proof, status ${order.status}): ${order.id.substring(0, 8)}');
         return false;
       }
@@ -563,12 +578,28 @@ class OrderProvider with ChangeNotifier {
           .timeout(const Duration(seconds: 10), onTimeout: () => <String>{});
       if (acceptedIds.isEmpty) return; // can't prove anything, don't touch cache
       final before = _orders.length;
+      // v566: Tolerância de propagação Nostr — não remover ordens aceitas
+      // recentemente (< 15 min). Sem isso, o relay pode ainda não ter
+      // indexado o bro_accept do provedor e removeríamos a ordem legítima.
+      final now = DateTime.now();
+      const propagationGrace = Duration(minutes: 15);
       _orders = _orders.where((order) {
         final isMeAsProvider = order.providerId == userPubkey;
         final someoneElseIsCustomer = order.userPubkey != null &&
             order.userPubkey!.isNotEmpty &&
             order.userPubkey != userPubkey;
         if (isMeAsProvider && someoneElseIsCustomer && !acceptedIds.contains(order.id)) {
+          // Janela de tolerância: aceita há pouco tempo? Manter.
+          final acceptedAt = order.acceptedAt;
+          if (acceptedAt != null && now.difference(acceptedAt) < propagationGrace) {
+            broLog('⏳ Ghost-check: mantendo ordem ${order.id.substring(0, 8)} aceita há ${now.difference(acceptedAt).inSeconds}s (propagação Nostr)');
+            return true;
+          }
+          // v566: Sem acceptedAt mas createdAt recente também merece tolerância
+          if (acceptedAt == null && now.difference(order.createdAt) < propagationGrace) {
+            broLog('⏳ Ghost-check: mantendo ordem ${order.id.substring(0, 8)} criada há ${now.difference(order.createdAt).inSeconds}s (sem acceptedAt, propagação Nostr)');
+            return true;
+          }
           broLog('🧹 Ghost order removida via Nostr cross-check (sem bro_accept meu): ${order.id.substring(0, 8)}');
           return false;
         }
