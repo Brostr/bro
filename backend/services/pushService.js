@@ -245,9 +245,12 @@ async function sendPush(targetPubkey, data, notification = null) {
       };
     }
 
-    await messaging.send(message);
-    
-    console.log(`[PUSH] Sent to ${targetPubkey.substring(0, 16)}... type=${data.type}`);
+    const messageId = await messaging.send(message);
+
+    // v572: log FCM messageId so we can correlate server-side dispatch with
+    // device-side delivery (or the lack of it) when debugging missing pushes.
+    const subtype = data.subtype || data.type;
+    console.log(`[PUSH] Sent to ${targetPubkey.substring(0, 16)}... type=${data.type} subtype=${subtype} mid=${messageId || '?'}`);
     return true;
   } catch (e) {
     console.error(`[PUSH] Send failed for ${targetPubkey.substring(0, 16)}...: ${e.message}`);
