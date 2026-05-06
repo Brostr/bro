@@ -479,57 +479,67 @@ class NostrOrderService {
   /// 1. Ordens (kindBroOrder) onde tag #p = provedor
   /// 2. Eventos de aceitação (kindBroAccept) publicados pelo provedor
   /// 3. Eventos de comprovante (kindBroComplete) publicados pelo provedor
-  /// v390: Sequential relay fallback instead of all-relays-in-parallel (reduces 12+ WebSockets to 2-4)
+  /// v569: All relays in PARALLEL (was sequential w/ break-on-first-result).
+  /// Sequential design lost orders that existed only on relays 2/3 (relays
+  /// diverge when a publish fails to reach all of them) and added up to 16s
+  /// of latency in the worst case. Now: 3 relays × 2 queries = 6 WebSockets,
+  /// all racing with a 5s per-relay timeout. Cross-relay dedup via seenIds
+  /// guarantees no duplicates. The 15s status-update cache + Completer lock
+  /// (added in v126/v129) prevents the WebSocket fan-out that hurt before.
   Future<List<Map<String, dynamic>>> _fetchProviderOrdersRaw(String providerPubkey) async {
     final orders = <Map<String, dynamic>>[];
     final seenIds = <String>{};
     final orderIdsFromAccepts = <String>{};
 
-    // v390: Try relays SEQUENTIALLY — use first relay that returns results
-    // This reduces WebSocket connections from 12+ to 2 per sync
-    for (final relay in _relays.take(3)) {
+    // Query all relays in parallel with per-relay 5s timeout.
+    final relayTasks = _relays.take(3).map((relay) async {
       try {
-        // 2 parallel strategies per relay (reduced from 4)
         final results = await Future.wait([
           // 1. Ordens com tag #p do provedor
           _fetchFromRelay(relay, kinds: [kindBroOrder], tags: {'#p': [providerPubkey]}, limit: 100)
+            .timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[])
             .catchError((_) => <Map<String, dynamic>>[]),
           // 2. Eventos de aceitação/update/complete publicados por este provedor + disputas tagueadas
           _fetchFromRelay(relay, kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete], authors: [providerPubkey], limit: 200)
+            .timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[])
             .catchError((_) => <Map<String, dynamic>>[]),
         ]);
-        
-        for (final order in results[0]) {
-          final id = order['id'];
-          if (!seenIds.contains(id)) {
-            seenIds.add(id);
-            orders.add(order);
-          }
+        return results;
+      } catch (_) {
+        return <List<Map<String, dynamic>>>[<Map<String, dynamic>>[], <Map<String, dynamic>>[]];
+      }
+    }).toList();
+
+    final perRelay = await Future.wait(relayTasks);
+
+    // Merge results from ALL relays (cross-relay dedup via seenIds).
+    for (final relayResults in perRelay) {
+      // 1. Ordens originais do provedor
+      for (final order in relayResults[0]) {
+        final id = order['id'];
+        if (id != null && !seenIds.contains(id)) {
+          seenIds.add(id);
+          orders.add(order);
         }
-        
-        // Extrair orderIds dos eventos de aceitação/update
-        for (final event in results[1]) {
-          try {
-            final content = event['parsedContent'] ?? jsonDecode(event['content']);
-            final eventType = content['type'] as String?;
-            // v519: WHITELIST — only events that prove THIS pubkey is the real provider of the
-            // order should contribute. This blocks ghost orders from dispute resolutions,
-            // admin reimbursements, mediator messages, evidence, etc., which are authored by
-            // admin but don't mean admin is the provider.
-            const providerEventTypes = {'bro_accept', 'bro_complete'};
-            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
-                (eventType == 'bro_order_update' &&
-                    (content['providerId'] as String?) == providerPubkey);
-            if (!isProviderEvidence) continue;
-            final orderId = content['orderId'] as String?;
-            if (orderId != null) orderIdsFromAccepts.add(orderId);
-          } catch (_) {}
-        }
-        
-        // If this relay returned data, skip remaining relays
-        if (results[0].isNotEmpty || results[1].isNotEmpty) break;
-      } catch (e) {
-        // Relay failed, try next one
+      }
+
+      // 2. Extrair orderIds dos eventos de aceitação/update
+      for (final event in relayResults[1]) {
+        try {
+          final content = event['parsedContent'] ?? jsonDecode(event['content']);
+          final eventType = content['type'] as String?;
+          // v519: WHITELIST — only events that prove THIS pubkey is the real provider of the
+          // order should contribute. This blocks ghost orders from dispute resolutions,
+          // admin reimbursements, mediator messages, evidence, etc., which are authored by
+          // admin but don't mean admin is the provider.
+          const providerEventTypes = {'bro_accept', 'bro_complete'};
+          final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+              (eventType == 'bro_order_update' &&
+                  (content['providerId'] as String?) == providerPubkey);
+          if (!isProviderEvidence) continue;
+          final orderId = content['orderId'] as String?;
+          if (orderId != null) orderIdsFromAccepts.add(orderId);
+        } catch (_) {}
       }
     }
     
@@ -565,32 +575,34 @@ class NostrOrderService {
   /// bro_order_update whose content.providerId matches).
   /// Used to purge ghost provider orders from local cache when the same
   /// device has also acted as admin/mediator for other orders.
+  /// v569: Parallel relay fetch (was sequential w/ break-on-first). Sequential
+  /// pattern could miss orderIds that exist only on relays 2/3, leading to
+  /// false-positive ghost purges. Parallel + merge fixes that.
   Future<Set<String>> fetchAcceptedOrderIdsForProvider(String providerPubkey) async {
     final acceptedIds = <String>{};
-    for (final relay in _relays.take(3)) {
-      try {
-        final events = await _fetchFromRelay(
-          relay,
-          kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
-          authors: [providerPubkey],
-          limit: 300,
-        ).catchError((_) => <Map<String, dynamic>>[]);
-        for (final event in events) {
-          try {
-            final content = event['parsedContent'] ?? jsonDecode(event['content']);
-            final eventType = content['type'] as String?;
-            const providerEventTypes = {'bro_accept', 'bro_complete'};
-            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
-                (eventType == 'bro_order_update' &&
-                    (content['providerId'] as String?) == providerPubkey);
-            if (!isProviderEvidence) continue;
-            final orderId = content['orderId'] as String?;
-            if (orderId != null) acceptedIds.add(orderId);
-          } catch (_) {}
-        }
-        if (events.isNotEmpty) break;
-      } catch (_) {
-        // try next relay
+    final relayTasks = _relays.take(3).map((relay) {
+      return _fetchFromRelay(
+        relay,
+        kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
+        authors: [providerPubkey],
+        limit: 300,
+      ).timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[])
+       .catchError((_) => <Map<String, dynamic>>[]);
+    }).toList();
+    final perRelay = await Future.wait(relayTasks);
+    for (final events in perRelay) {
+      for (final event in events) {
+        try {
+          final content = event['parsedContent'] ?? jsonDecode(event['content']);
+          final eventType = content['type'] as String?;
+          const providerEventTypes = {'bro_accept', 'bro_complete'};
+          final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+              (eventType == 'bro_order_update' &&
+                  (content['providerId'] as String?) == providerPubkey);
+          if (!isProviderEvidence) continue;
+          final orderId = content['orderId'] as String?;
+          if (orderId != null) acceptedIds.add(orderId);
+        } catch (_) {}
       }
     }
     return acceptedIds;
