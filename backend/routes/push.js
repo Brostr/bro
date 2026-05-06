@@ -45,11 +45,14 @@ router.post('/register-token', registerLimiter, (req, res) => {
   const pubkey = req.verifiedPubkey;
   const { fcm_token, provider_enabled } = req.body;
   
-  if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 100 || fcm_token.length > 4096) {
+  // v570: tighter length bounds. Real FCM tokens are ~142-200 chars; APNS
+  // direct tokens are ~64-200. The previous 4096 upper bound was unnecessary
+  // attack surface (40x larger than any real token).
+  if (!fcm_token || typeof fcm_token !== 'string' || fcm_token.length < 64 || fcm_token.length > 512) {
     return res.status(400).json({ error: 'Invalid fcm_token' });
   }
   // SECURITY v448: Validate FCM token contains only base64url-safe chars + colons/dashes
-  if (!/^[A-Za-z0-9_:.-]{100,4096}$/.test(fcm_token)) {
+  if (!/^[A-Za-z0-9_:.-]{64,512}$/.test(fcm_token)) {
     return res.status(400).json({ error: 'Invalid fcm_token format' });
   }
 
