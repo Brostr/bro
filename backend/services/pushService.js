@@ -226,7 +226,13 @@ async function sendPush(targetPubkey, data, notification = null) {
         body: notification.body || '',
       };
       message.android.notification = {
-        channelId: 'bro_orders_rt',
+        // v573: align with AndroidManifest default_notification_channel_id.
+        // 'bro_orders_rt' is auto-created by flutter_local_notifications only
+        // AFTER its first .show() — if the app was killed before that ever
+        // happened, Android silently DROPS FCM notifications targeting an
+        // unknown channel. Using the manifest default guarantees delivery
+        // even on first install / cold start.
+        channelId: 'bro_app_channel',
         priority: 'high',
         defaultSound: true,
       };

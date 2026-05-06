@@ -150,6 +150,18 @@ class DisputeService {
       return existing;
     }
 
+    // v573: bound dispute string sizes to keep Nostr events under reasonable
+    // budget (relays often reject content > 64KB). Also prevents UI flooding
+    // and abuse (a malicious peer publishing megabyte-sized dispute content).
+    const _kReasonMaxLen = 200;
+    const _kDescriptionMaxLen = 2000;
+    final boundedReason = reason.length > _kReasonMaxLen
+        ? reason.substring(0, _kReasonMaxLen)
+        : reason;
+    final boundedDescription = description.length > _kDescriptionMaxLen
+        ? description.substring(0, _kDescriptionMaxLen)
+        : description;
+
     // Gerar ID único para a disputa (baseado em orderId + openedBy, sem timestamp)
     final idContent = '$orderId-$openedBy';
     final id = sha256.convert(utf8.encode(idContent)).toString().substring(0, 16);
@@ -158,8 +170,8 @@ class DisputeService {
       id: id,
       orderId: orderId,
       openedBy: openedBy,
-      reason: reason,
-      description: description,
+      reason: boundedReason,
+      description: boundedDescription,
       status: 'open',
       createdAt: DateTime.now(),
     );

@@ -1445,6 +1445,7 @@ class _DisputeDetailScreenState extends State<DisputeDetailScreen> {
                 TextField(
                   controller: descController,
                   maxLines: 3,
+                  maxLength: 2000, // v573: bound dispute description
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     hintText: 'Descrição da evidência (opcional)...',
