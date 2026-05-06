@@ -63,6 +63,13 @@ class NostrWatchtowerService {
     // evita reenviar para mesma combo ja entregue.
     this._deliveredPushes = new Map(); // key → timestamp
     this._DELIVERED_TTL = 24 * 60 * 60 * 1000; // 24h
+    // v568: Boot timestamp (sec). Events older than this won't trigger pushes.
+    // Prevents the deploy-replay phantom-push bug: each deploy restarts the
+    // service with empty _seenPushes, and historical events from the relay
+    // (since=now-600s) would otherwise re-trigger push notifications that
+    // were already delivered before the restart.
+    this._bootTime = Math.floor(Date.now() / 1000);
+    this._BOOT_GRACE_SEC = 30; // small grace for clock skew / in-flight events
   }
 
   start() {
@@ -204,6 +211,11 @@ class NostrWatchtowerService {
     // Skip events older than 5 minutes (catch-up from subscription, already delivered)
     const eventAge = Math.floor(Date.now() / 1000) - (event.created_at || 0);
     if (eventAge > 300) return;
+
+    // v568: Skip events published BEFORE this server boot. Belt-and-suspenders
+    // along with the EOSE gate below — protects against deploy-replay phantom
+    // pushes if a relay re-sends events post-EOSE on reconnect (some relays do).
+    if (this._isHistoricalEvent(event)) return;
 
     // CRITICAL FIX v509: Only process events that arrive AFTER EOSE (real-time)
     // Before EOSE, relays send historical events — these are old orders that should NOT trigger pushes
@@ -354,6 +366,17 @@ class NostrWatchtowerService {
     } catch (err) {
       console.error(`❌ [Watchtower] Error processing event ${event.id.substring(0, 8)}: ${err.message}`);
     }
+  }
+
+  /**
+   * v568: True if this event was published before the server booted. Such
+   * events should still update internal caches but MUST NOT trigger pushes:
+   * the previous instance already pushed them, and re-pushing causes phantom
+   * notifications after every deploy.
+   */
+  _isHistoricalEvent(event) {
+    if (!event || typeof event.created_at !== 'number') return false;
+    return event.created_at < (this._bootTime - this._BOOT_GRACE_SEC);
   }
 
   /**

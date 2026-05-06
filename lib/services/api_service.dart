@@ -1,6 +1,7 @@
 ﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'package:crypto/crypto.dart' as _crypto;
 import 'package:flutter/foundation.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/push_diag.dart';
@@ -33,6 +34,9 @@ class ApiService {
 
   /// v270: Expor Dio para que EscrowService possa reusar (com NIP-98 auth)
   Dio get dio => _dio;
+
+  String _sha256Hex(List<int> bytes) =>
+      _crypto.sha256.convert(bytes).toString();
 
   Future<void> init() async {
     // v536: SEMPRE usar AppConfig.defaultBackendUrl (vem de env.json no build).
@@ -72,16 +76,32 @@ class ApiService {
         final privateKey = _nostrService.privateKey;
         if (privateKey != null) {
           final publicKey = _nostrService.publicKey!;
-          
+
+          // v566: bind auth event to body via NIP-98 payload tag
+          final tags = <List<String>>[
+            ['u', '${options.baseUrl}${options.path}'],
+            ['method', options.method],
+          ];
+          final method = options.method.toUpperCase();
+          if (options.data != null && (method == 'POST' || method == 'PUT' || method == 'PATCH' || method == 'DELETE')) {
+            try {
+              String bodyStr;
+              if (options.data is String) {
+                bodyStr = options.data as String;
+              } else {
+                bodyStr = json.encode(options.data);
+              }
+              final hash = _sha256Hex(utf8.encode(bodyStr));
+              tags.add(['payload', hash]);
+            } catch (_) {/* if encoding fails, skip payload tag — server is lenient */}
+          }
+
           // Criar token JWT simplificado baseado em Nostr
           final authEvent = _nostrService.createEvent(
             privateKey: privateKey,
             kind: 22242, // NIP-98 HTTP Auth
             content: '',
-            tags: [
-              ['u', '${options.baseUrl}${options.path}'],
-              ['method', options.method],
-            ],
+            tags: tags,
           );
           
           // Enviar evento NIP-98 completo como base64 (não apenas o eventId)

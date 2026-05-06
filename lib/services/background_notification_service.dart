@@ -1,5 +1,6 @@
 ﻿import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:firebase_core/firebase_core.dart';
@@ -516,10 +517,16 @@ Future<void> _refreshFcmToken() async {
       return;
     }
 
-    // 4. Criar NIP-98 auth header (kind 27235)
+    // 4. Criar NIP-98 auth header (kind 27235) com payload tag (v566)
+    final brixBody = jsonEncode({'fcm_token': fcmToken});
+    final brixPayloadHash = crypto.sha256.convert(utf8.encode(brixBody)).toString();
     final nip98Event = Event.from(
       kind: 27235,
-      tags: [['u', url], ['method', 'POST']],
+      tags: [
+        ['u', url],
+        ['method', 'POST'],
+        ['payload', brixPayloadHash],
+      ],
       content: '',
       privkey: privateKey,
     );
@@ -541,7 +548,7 @@ Future<void> _refreshFcmToken() async {
         'Content-Type': 'application/json',
         'Authorization': authHeader,
       },
-      body: jsonEncode({'fcm_token': fcmToken}),
+      body: brixBody,
     ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
@@ -557,7 +564,7 @@ Future<void> _refreshFcmToken() async {
             'Content-Type': 'application/json',
             'Authorization': authHeader,
           },
-          body: jsonEncode({'fcm_token': fcmToken}),
+          body: brixBody,
         ).timeout(const Duration(seconds: 10));
         broLog('[BRO-BG-FCM] BRIX retry: ${retryResp.statusCode == 200 ? "OK" : "FAIL ${retryResp.statusCode}"}');
       } catch (e2) {
@@ -572,9 +579,15 @@ Future<void> _refreshFcmToken() async {
         broLog('[BRO-BG-FCM] REJECTED insecure backend URL: $backendUrl');
         return;
       }
+      final backendBody = jsonEncode({'fcm_token': fcmToken});
+      final backendPayloadHash = crypto.sha256.convert(utf8.encode(backendBody)).toString();
       final backendNip98 = Event.from(
         kind: 27235,
-        tags: [['u', backendUrl], ['method', 'POST']],
+        tags: [
+          ['u', backendUrl],
+          ['method', 'POST'],
+          ['payload', backendPayloadHash],
+        ],
         content: '',
         privkey: privateKey,
       );
@@ -595,7 +608,7 @@ Future<void> _refreshFcmToken() async {
           'Content-Type': 'application/json',
           'Authorization': backendAuth,
         },
-        body: jsonEncode({'fcm_token': fcmToken}),
+        body: backendBody,
       ).timeout(const Duration(seconds: 10));
 
       if (backendResp.statusCode == 200) {

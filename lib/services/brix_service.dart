@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:dio/dio.dart';
 import 'package:nostr/nostr.dart';
 import 'package:bro_app/services/log_utils.dart';
@@ -33,15 +34,27 @@ class BrixService {
   }
 
   /// Create Options with NIP-98 signed Authorization header.
-  Options _signedOptions(String path, String method, {String? pubkey}) {
+  /// v566: optional [body] adds NIP-98 `payload` tag = sha256(jsonEncode(body))
+  /// to bind auth event to the request body (replay protection).
+  Options _signedOptions(String path, String method, {String? pubkey, Object? body}) {
     final headers = <String, String>{};
     if (pubkey != null) headers['x-nostr-pubkey'] = pubkey;
     if (_privateKey != null) {
       try {
         final url = '$_brixServerUrl$path';
+        final tags = <List<String>>[
+          ['u', url],
+          ['method', method],
+        ];
+        if (body != null) {
+          // Must match exactly what Dio sends. Dio uses jsonEncode for Map data.
+          final bodyJson = jsonEncode(body);
+          final hash = crypto.sha256.convert(utf8.encode(bodyJson)).toString();
+          tags.add(['payload', hash]);
+        }
         final event = Event.from(
           kind: 27235,
-          tags: [['u', url], ['method', method]],
+          tags: tags,
           content: '',
           privkey: _privateKey!,
         );
@@ -205,12 +218,13 @@ class BrixService {
   /// Link a real nostr pubkey to a web-created BRIX
   Future<BrixVerifyResult> linkPubkey({required String username, required String nostrPubkey}) async {
     try {
+      final body = {
+        'username': username,
+        'nostr_pubkey': nostrPubkey,
+      };
       final response = await _dio.post('/brix/link-pubkey',
-        data: {
-          'username': username,
-          'nostr_pubkey': nostrPubkey,
-        },
-        options: _signedOptions('/brix/link-pubkey', 'POST', pubkey: nostrPubkey),
+        data: body,
+        options: _signedOptions('/brix/link-pubkey', 'POST', pubkey: nostrPubkey, body: body),
       );
       final data = response.data;
       return BrixVerifyResult(
@@ -315,9 +329,10 @@ class BrixService {
   /// Submit a generated invoice for a pending request
   Future<bool> submitInvoice(String requestId, String invoice, String pubkey) async {
     try {
+      final body = {'request_id': requestId, 'invoice': invoice};
       final response = await _dio.post('/brix/submit-invoice',
-        data: {'request_id': requestId, 'invoice': invoice},
-        options: _signedOptions('/brix/submit-invoice', 'POST', pubkey: pubkey),
+        data: body,
+        options: _signedOptions('/brix/submit-invoice', 'POST', pubkey: pubkey, body: body),
       );
       return response.data?['success'] == true;
     } catch (e) {
@@ -328,9 +343,10 @@ class BrixService {
   /// Claim a pending offline payment by submitting a recipient invoice
   Future<bool> claimPayment(String paymentId, String invoice, String pubkey) async {
     try {
+      final body = {'payment_id': paymentId, 'invoice': invoice};
       final response = await _dio.post('/brix/claim',
-        data: {'payment_id': paymentId, 'invoice': invoice},
-        options: _signedOptions('/brix/claim', 'POST', pubkey: pubkey),
+        data: body,
+        options: _signedOptions('/brix/claim', 'POST', pubkey: pubkey, body: body),
       );
       return response.data?['success'] == true;
     } catch (e) {
@@ -346,12 +362,13 @@ class BrixService {
     required String pubkey,
   }) async {
     try {
+      final body = {
+        if (phone != null && phone.isNotEmpty) 'phone': phone,
+        if (email != null && email.isNotEmpty) 'email': email,
+      };
       final response = await _dio.post('/brix/update-contact',
-        data: {
-          if (phone != null && phone.isNotEmpty) 'phone': phone,
-          if (email != null && email.isNotEmpty) 'email': email,
-        },
-        options: _signedOptions('/brix/update-contact', 'POST', pubkey: pubkey),
+        data: body,
+        options: _signedOptions('/brix/update-contact', 'POST', pubkey: pubkey, body: body),
       );
       final data = response.data;
       return BrixRegisterResult(
@@ -375,13 +392,14 @@ class BrixService {
     String? email,
   }) async {
     try {
+      final body = {
+        'code': code,
+        if (phone != null && phone.isNotEmpty) 'phone': phone,
+        if (email != null && email.isNotEmpty) 'email': email,
+      };
       final response = await _dio.post('/brix/confirm-update',
-        data: {
-          'code': code,
-          if (phone != null && phone.isNotEmpty) 'phone': phone,
-          if (email != null && email.isNotEmpty) 'email': email,
-        },
-        options: _signedOptions('/brix/confirm-update', 'POST', pubkey: pubkey),
+        data: body,
+        options: _signedOptions('/brix/confirm-update', 'POST', pubkey: pubkey, body: body),
       );
       final data = response.data;
       return BrixVerifyResult(
@@ -400,9 +418,10 @@ class BrixService {
   /// Register FCM push token with BRIX server for offline notifications
   Future<bool> registerPushToken(String fcmToken, String pubkey) async {
     try {
+      final body = {'fcm_token': fcmToken};
       final response = await _dio.post('/brix/register-push',
-        data: {'fcm_token': fcmToken},
-        options: _signedOptions('/brix/register-push', 'POST', pubkey: pubkey),
+        data: body,
+        options: _signedOptions('/brix/register-push', 'POST', pubkey: pubkey, body: body),
       );
       return response.data?['success'] == true;
     } catch (e) {

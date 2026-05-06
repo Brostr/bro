@@ -86,7 +86,11 @@ app.use(generalLimiter);
 // ============================================
 // Body Parsers
 // ============================================
-app.use(bodyParser.json({ limit: '500kb' })); // Limitar tamanho do body
+// v566: capture raw body so NIP-98 payload tag can be verified
+app.use(bodyParser.json({
+  limit: '500kb',
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // Log de requisições (sanitizado — sem IDs/tokens)

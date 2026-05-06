@@ -196,7 +196,25 @@ function verifyNip98Event(event, req) {
     // SECURITY v492: Don't leak method details to attacker
     return { valid: false, reason: 'HTTP method mismatch' };
   }
-  
+
+  // v566: NIP-98 payload tag — binds auth event to request body (replay protection).
+  // Strict when present; lenient when absent (transitional).
+  const payloadTag = (event.tags || []).find(t => t[0] === 'payload');
+  const methodHasBody = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method.toUpperCase());
+  if (payloadTag) {
+    const expected = (typeof payloadTag[1] === 'string' ? payloadTag[1] : '').toLowerCase();
+    const rawBody = (req.rawBody && req.rawBody.length) ? req.rawBody : Buffer.alloc(0);
+    const actual = require('crypto').createHash('sha256').update(rawBody).digest('hex');
+    if (expected !== actual) {
+      return { valid: false, reason: 'NIP-98 payload hash mismatch' };
+    }
+  } else if (methodHasBody && req.rawBody && req.rawBody.length > 0) {
+    // Transitional: log only. Older clients still accepted.
+    if (process.env.LOG_NIP98_PAYLOAD_WARN === '1') {
+      console.log(`[NIP98] WARN ${req.method} ${req.originalUrl}: missing payload tag (transitional)`);
+    }
+  }
+
   return { valid: true, pubkey: event.pubkey };
 }
 

@@ -2115,16 +2115,16 @@ class NostrOrderService {
     final updates = <String, Map<String, dynamic>>{}; // orderId -> latest update
     
     
-    // v507: Query ALL relays sequentially, deduplicating across relays
-    // v500 fix was supposed to remove the early-exit break but it remained
+    // v568: Query ALL relays IN PARALLEL (não mais sequencial). Antes esta
+    // operação tomava até 24s (3 relays × 8s) no pior caso, dominando a
+    // sincronização do modo provedor. Paralelizando, vai a no máx ~5s.
     final allEvents = <Map<String, dynamic>>[];
-    final seenIds = <String>{}; // v507: moved outside loop for cross-relay dedup
+    final seenIds = <String>{};
     final fourteenDaysAgo = DateTime.now().subtract(const Duration(days: 14));
     final statusSince = (fourteenDaysAgo.millisecondsSinceEpoch / 1000).floor();
-    
-    for (final relay in _relays) {
+
+    final relayTasks = _relays.map((relay) async {
       try {
-        // 2 strategies per relay
         final results = await Future.wait([
           _fetchFromRelayWithSince(
             relay,
@@ -2132,32 +2132,34 @@ class NostrOrderService {
             tags: {'#t': [broTag]},
             since: statusSince,
             limit: 500,
-          ).timeout(const Duration(seconds: 8), onTimeout: () => <Map<String, dynamic>>[]),
+          ).timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[]),
           _fetchFromRelayWithSince(
             relay,
             kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
             since: statusSince,
             limit: 500,
-          ).timeout(const Duration(seconds: 8), onTimeout: () => <Map<String, dynamic>>[]),
+          ).timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[]),
         ]);
-        
-        // Combinar and deduplicar across ALL relays
-        for (final eventList in results) {
-          for (final e in eventList) {
-            final id = e['id'];
-            if (id != null && !seenIds.contains(id)) {
-              seenIds.add(id);
-              allEvents.add(e);
-            }
-          }
+        final combined = <Map<String, dynamic>>[];
+        for (final list in results) { combined.addAll(list); }
+        return combined;
+      } catch (_) {
+        return <Map<String, dynamic>>[];
+      }
+    }).toList();
+
+    final perRelay = await Future.wait(relayTasks);
+    for (final relayEvents in perRelay) {
+      for (final e in relayEvents) {
+        final id = e['id'];
+        if (id != null && !seenIds.contains(id)) {
+          seenIds.add(id);
+          allEvents.add(e);
         }
-        // v507: NO break — query all relays to avoid missing events
-      } catch (e) {
-        // Relay failed, try next
       }
     }
-    
-    broLog('📋 _fetchAllOrderStatusUpdates: ${allEvents.length} eventos (sequential relay)');
+
+    broLog('📋 _fetchAllOrderStatusUpdates: ${allEvents.length} eventos (parallel relays)');
     
     // v406: CORREÇÃO DEFINITIVA — Acumular dados de comprovante de TODOS os eventos
     // ANTES de processar, para que proof nunca se perca por ordem de processamento.
