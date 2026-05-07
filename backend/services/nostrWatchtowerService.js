@@ -250,9 +250,44 @@ class NostrWatchtowerService {
       switch (eventType) {
         case 'bro_order': {
           // Cache userPubkey for this order (for later accept/complete events that may omit it)
-          const orderUserPubkey = content.userPubkey || senderPubkey;
+          //
+          // SECURITY v577 (Phase 1 anti-replay): only trust the
+          // self-declared `content.userPubkey` when it matches the event
+          // signer. Otherwise, an attacker could publish a `bro_order`
+          // event signed with their own key but carrying a victim's
+          // pubkey in `content.userPubkey`, which would then route all
+          // future accept/complete pushes for that orderId to the
+          // attacker's chosen target. Falling back to `senderPubkey` is
+          // safe because that is the cryptographically verified author.
+          //
+          // Also: do not OVERWRITE an existing cache entry with a
+          // different pubkey. Real `bro_order` events are
+          // parameterized-replaceable per `#d` tag and only the original
+          // author can replace them, so a conflicting userPubkey for the
+          // same orderId from a different author is necessarily
+          // malicious.
+          let orderUserPubkey;
+          if (typeof content.userPubkey === 'string' && content.userPubkey === senderPubkey) {
+            orderUserPubkey = content.userPubkey;
+          } else if (content.userPubkey && content.userPubkey !== senderPubkey) {
+            // Suspicious: signer is claiming someone else owns this order.
+            // Fall back to the signer (verified) and log for audit.
+            console.log(`⚠️ [Watchtower] order ${shortId} userPubkey mismatch: signer=${senderPubkey.substring(0,8)} claimed=${String(content.userPubkey).substring(0,8)} — using signer`);
+            orderUserPubkey = senderPubkey;
+          } else {
+            orderUserPubkey = senderPubkey;
+          }
+
           if (isValidPubkey(orderUserPubkey)) {
-            this._orderUsers.set(orderId, orderUserPubkey);
+            const existing = this._orderUsers.get(orderId);
+            if (!existing) {
+              this._orderUsers.set(orderId, orderUserPubkey);
+            } else if (existing !== orderUserPubkey) {
+              // Different pubkey already cached for this orderId — keep
+              // the original and log. This blocks late-arriving forged
+              // events from hijacking routing for an existing order.
+              console.log(`⚠️ [Watchtower] order ${shortId} cache conflict: kept=${existing.substring(0,8)} ignored=${orderUserPubkey.substring(0,8)}`);
+            }
             // Memory management — keep last 2K orders
             if (this._orderUsers.size > 4000) {
               const entries = Array.from(this._orderUsers.entries());
@@ -268,7 +303,15 @@ class NostrWatchtowerService {
         case 'bro_accept': {
           // Provider accepted — notify the order creator
           // v512: Fallback to cached userPubkey (provider's accept event may omit userPubkey from content)
-          const userPubkeyA = content.userPubkey || this._orderUsers.get(orderId);
+          // SECURITY v577: PREFER cache over content.userPubkey. The cache
+          // entry came from a `bro_order` whose userPubkey was validated
+          // against the signer. Trusting `content.userPubkey` from a
+          // `bro_accept` event would let any signer redirect the
+          // "accepted" push to an arbitrary pubkey by lying in their
+          // event payload.
+          const cachedUser = this._orderUsers.get(orderId);
+          const userPubkeyA = (isValidPubkey(cachedUser) ? cachedUser : null)
+            || (typeof content.userPubkey === 'string' && isValidPubkey(content.userPubkey) ? content.userPubkey : null);
           if (isValidPubkey(userPubkeyA) && userPubkeyA !== senderPubkey) {
             await this._sendOrderPush(userPubkeyA, senderPubkey, 'accepted', orderId, shortId);
             // v574: also send a SILENT data-only push to wake the buyer's
@@ -292,13 +335,21 @@ class NostrWatchtowerService {
           //   - Statuses the PROVIDER cares about → always notify provider
           //   - Cancel/dispute → notify the party that didn't initiate
           const status = content.status;
-          const userPubkey = content.userPubkey || this._orderUsers.get(orderId);
+          // SECURITY v577: prefer cache over content for userPubkey
+          // routing (see bro_accept rationale).
+          const cachedUserU = this._orderUsers.get(orderId);
+          const userPubkey = (isValidPubkey(cachedUserU) ? cachedUserU : null)
+            || (typeof content.userPubkey === 'string' && isValidPubkey(content.userPubkey) ? content.userPubkey : null);
           const providerId = content.providerId;
 
           if (!status) break;
 
           // Cache userPubkey if we see it for the first time
-          if (isValidPubkey(userPubkey) && !this._orderUsers.has(orderId)) {
+          // SECURITY v577: only seed cache from this event if the signer
+          // IS that user (legitimate self-published status update).
+          // Otherwise we'd let a malicious provider seed a forged user
+          // pubkey for an order that never had a `bro_order` event seen.
+          if (isValidPubkey(userPubkey) && !this._orderUsers.has(orderId) && userPubkey === senderPubkey) {
             this._orderUsers.set(orderId, userPubkey);
           }
 
