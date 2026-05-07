@@ -27,6 +27,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'log_utils.dart';
 import 'nostr_order_service.dart';
+import 'orders_storage.dart';
 import 'storage_service.dart';
 
 /// Returns true on success (event was accepted by at least 1 relay), false
@@ -79,7 +80,8 @@ Future<bool> handleAcceptRelayInBackground(Map<String, dynamic> data) async {
   }
 
   // Load my orders from disk. OrderProvider persists under 'orders_<pubkey>'.
-  final ordersJson = prefs.getString('orders_$myPubkey');
+  // v578: read via OrdersStorage (transparently decrypts).
+  final ordersJson = await OrdersStorage.read(prefs, myPubkey);
   if (ordersJson == null || ordersJson.isEmpty) {
     broLog('[BG-Relay] no local orders for pubkey, skipping');
     return false;

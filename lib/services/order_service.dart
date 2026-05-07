@@ -2,6 +2,7 @@
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
 import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/orders_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config.dart';
 
@@ -60,7 +61,9 @@ class OrderService {
       final allKeys = prefs.getKeys();
       for (final key in allKeys) {
         if (key.startsWith('orders_')) {
-          final ordersJson = prefs.getString(key);
+          // v578: route through OrdersStorage so encrypted blobs decrypt.
+          final pubkey = key.substring('orders_'.length);
+          final ordersJson = await OrdersStorage.read(prefs, pubkey);
           if (ordersJson != null) {
             final List<dynamic> ordersList = json.decode(ordersJson);
             final order = ordersList.firstWhere(

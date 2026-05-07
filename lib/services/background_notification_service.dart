@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/order_reminder_service.dart';
+import 'package:bro_app/services/orders_storage.dart';
 import 'package:workmanager/workmanager.dart';
 
 /// v262: Servico de notificacoes em background
@@ -691,8 +692,8 @@ Future<void> _checkAutoLiquidationBackground() async {
     
     // 3. Ler ordens do SharedPreferences
     final prefs = await SharedPreferences.getInstance();
-    final ordersKey = 'orders_$userPubkey';
-    final ordersJson = prefs.getString(ordersKey);
+    // v578: read via OrdersStorage (transparently decrypts).
+    final ordersJson = await OrdersStorage.read(prefs, userPubkey);
     if (ordersJson == null || ordersJson.isEmpty) {
       broLog('[BRO-BG-LIQ] Sem ordens locais');
       return;
@@ -821,7 +822,8 @@ Future<void> _checkAutoLiquidationBackground() async {
     }
 
     if (successCount > 0) {
-      await prefs.setString(ordersKey, jsonEncode(ordersList));
+      // v578: persist via OrdersStorage so the rewrite stays encrypted.
+      await OrdersStorage.write(prefs, userPubkey, jsonEncode(ordersList));
 
       // 9. Notificacao local
       await _initNotifications();
@@ -872,7 +874,8 @@ Future<void> _checkOrderRemindersBackground() async {
     if (userPubkey == null || userPubkey.isEmpty) return;
 
     final prefs = await SharedPreferences.getInstance();
-    final ordersJson = prefs.getString('orders_$userPubkey');
+    // v578: read via OrdersStorage (transparently decrypts).
+    final ordersJson = await OrdersStorage.read(prefs, userPubkey);
     if (ordersJson == null || ordersJson.isEmpty) return;
 
     final rawList = jsonDecode(ordersJson);

@@ -11,6 +11,7 @@ import '../services/nostr_order_service.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
 import '../services/order_reminder_service.dart';
+import '../services/orders_storage.dart';
 import '../models/order.dart';
 import '../config.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -654,7 +655,9 @@ class OrderProvider with ChangeNotifier {
     
     try {
       final prefs = await SharedPreferences.getInstance();
-      final ordersJson = prefs.getString(_ordersKey);
+      // v578: read via OrdersStorage (decrypts encrypted blobs, passes
+      // through legacy plaintext for one-time migration on next save).
+      final ordersJson = await OrdersStorage.read(prefs, _currentUserPubkey!);
       
       if (ordersJson != null) {
         final List<dynamic> ordersList = json.decode(ordersJson);
@@ -886,7 +889,8 @@ class OrderProvider with ChangeNotifier {
       
       final prefs = await SharedPreferences.getInstance();
       final ordersJson = json.encode(userOrders.map((o) => o.toJson()).toList());
-      await prefs.setString(_ordersKey, ordersJson);
+      // v578: write encrypted-at-rest via OrdersStorage.
+      await OrdersStorage.write(prefs, _currentUserPubkey!, ordersJson);
       
       // Log de cada ordem salva
       for (var order in userOrders) {
@@ -920,7 +924,8 @@ class OrderProvider with ChangeNotifier {
       
       final prefs = await SharedPreferences.getInstance();
       final ordersJson = json.encode(userOrders.map((o) => o.toJson()).toList());
-      await prefs.setString(_ordersKey, ordersJson);
+      // v578: write encrypted-at-rest via OrdersStorage.
+      await OrdersStorage.write(prefs, _currentUserPubkey!, ordersJson);
       
       // PROTE�?�?��?�?O: Atualizar cache local para proteger contra regress�?£o de status
       for (final order in userOrders) {
