@@ -36,6 +36,12 @@ function _loadTokens() {
               token: entry.token,
               updatedAt: entry.updatedAt || Date.now(),
               providerEnabled: entry.providerEnabled === true,
+              // v576: persisted appBuild & nudge throttle across restarts so
+              // we don't spam users with "update your app" pushes.
+              appBuild: typeof entry.appBuild === 'number' ? entry.appBuild : undefined,
+              lastUpdateNudgeAt: typeof entry.lastUpdateNudgeAt === 'number'
+                ? entry.lastUpdateNudgeAt
+                : 0,
             });
           }
         }
@@ -129,8 +135,14 @@ function init() {
 
 /**
  * Register or update FCM token for a pubkey
+ *
+ * v576: appBuild is the client's build number (parsed from PackageInfo on
+ * the device). Stored on the token entry so we can flag clients running
+ * outdated versions that may not understand newer protocol fields (e.g.
+ * NIP-44-only billCode introduced in v575). Returns the entry's
+ * appBuild so callers can decide to send an "update your app" push.
  */
-function registerToken(pubkey, fcmToken, providerEnabled) {
+function registerToken(pubkey, fcmToken, providerEnabled, appBuild) {
   if (!pubkey || !fcmToken) return false;
 
   // Evict oldest entry if at capacity (and not updating existing)
@@ -152,14 +164,26 @@ function registerToken(pubkey, fcmToken, providerEnabled) {
     ? providerEnabled
     : (previous ? previous.providerEnabled === true : false);
 
+  // v576: track app build. Older clients (pre-v576) won't send this and we
+  // explicitly store undefined so we can distinguish "never seen" from
+  // "explicitly old".
+  const finalAppBuild = (typeof appBuild === 'number' && appBuild > 0 && appBuild < 100000)
+    ? appBuild
+    : (previous ? previous.appBuild : undefined);
+
   tokenStore.set(pubkey, {
     token: fcmToken,
     updatedAt: Date.now(),
     providerEnabled: finalProviderEnabled,
+    appBuild: finalAppBuild,
+    // Preserve the throttle timestamp across registrations so we don't
+    // re-nudge every time the app reconnects (token re-registration runs
+    // every ~1h on the client).
+    lastUpdateNudgeAt: previous ? previous.lastUpdateNudgeAt : 0,
   });
 
   _saveTokens();
-  console.log(`[PUSH] Token registered for ${pubkey.substring(0, 16)}... provider=${finalProviderEnabled} (${tokenStore.size} total)`);
+  console.log(`[PUSH] Token registered for ${pubkey.substring(0, 16)}... provider=${finalProviderEnabled} build=${finalAppBuild ?? '?'} (${tokenStore.size} total)`);
   return true;
 }
 
@@ -342,7 +366,58 @@ function hasToken(pubkey) {
     updatedAt: entry.updatedAt,
     ageSeconds: Math.floor((Date.now() - entry.updatedAt) / 1000),
     providerEnabled: entry.providerEnabled === true,
+    appBuild: entry.appBuild,
   };
 }
 
-module.exports = { init, registerToken, setProviderStatus, sendPush, isEnabled, getTokenCount, getAllPubkeys, getProviderPubkeys, hasToken };
+/**
+ * v576: Send an "update your app" push if the registered build is below
+ * `minBuild`. Throttled to 1 nudge per 24h per pubkey via a persisted
+ * timestamp on the token entry, so users don't get nagged on every
+ * 1h token re-registration cycle.
+ *
+ * Returns true if a nudge was actually sent, false otherwise.
+ *
+ * The push is a visible notification (title+body) so it works even when
+ * the app is killed. Data field carries the type so the app can deep-link
+ * to the update screen if needed.
+ */
+async function maybeNudgeForUpdate(pubkey, minBuild) {
+  const entry = tokenStore.get(pubkey);
+  if (!entry) return false;
+
+  // Build is sufficient → no nudge
+  if (typeof entry.appBuild === 'number' && entry.appBuild >= minBuild) {
+    return false;
+  }
+
+  // Throttle: 1 nudge per 24h per pubkey
+  const NUDGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+  const lastNudge = entry.lastUpdateNudgeAt || 0;
+  if (Date.now() - lastNudge < NUDGE_INTERVAL_MS) {
+    return false;
+  }
+
+  const ok = await sendPush(
+    pubkey,
+    {
+      type: 'order_update',
+      subtype: 'app_update_available',
+      sender_pubkey: pubkey, // self-addressed informational push
+      source: 'version_gate',
+    },
+    {
+      title: '🔄 Atualize o Bro',
+      body: 'Novas ordens podem não aparecer corretamente sem a versão mais recente. Toque para atualizar.',
+    },
+  );
+
+  if (ok) {
+    entry.lastUpdateNudgeAt = Date.now();
+    _saveTokens();
+    console.log(`[PUSH] Update nudge sent to ${pubkey.substring(0, 16)}... (build=${entry.appBuild ?? 'unknown'} < ${minBuild})`);
+  }
+  return ok;
+}
+
+module.exports = { init, registerToken, setProviderStatus, sendPush, isEnabled, getTokenCount, getAllPubkeys, getProviderPubkeys, hasToken, maybeNudgeForUpdate };

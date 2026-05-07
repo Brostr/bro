@@ -38,16 +38,18 @@ const ALLOWED_TYPES = new Set(['order_update', 'brix_invoice_request']);
 // after a provider accepts. It wakes the background isolate so it can encrypt
 // the billCode via NIP-44 and publish kind 30080 — without requiring the app
 // to be open. Plaintext billCode in kind 30078 still works for backward compat.
-const ALLOWED_SUBTYPES = new Set(['accepted', 'accept_relay', 'billcode_encrypted', 'payment_received', 'completed', 'disputed', 'cancelled']);
+// v576: 'app_update_available' is a self-addressed informational push so the
+// server can nudge users on outdated builds (pre-v575) to update.
+const ALLOWED_SUBTYPES = new Set(['accepted', 'accept_relay', 'app_update_available', 'billcode_encrypted', 'payment_received', 'completed', 'disputed', 'cancelled']);
 
 /**
  * POST /push/register-token
  * Body: { fcm_token: string }
  * Auth: NIP-98 (req.verifiedPubkey)
  */
-router.post('/register-token', registerLimiter, (req, res) => {
+router.post('/register-token', registerLimiter, async (req, res) => {
   const pubkey = req.verifiedPubkey;
-  const { fcm_token, provider_enabled } = req.body;
+  const { fcm_token, provider_enabled, app_build } = req.body;
   
   // v570: tighter length bounds. Real FCM tokens are ~142-200 chars; APNS
   // direct tokens are ~64-200. The previous 4096 upper bound was unnecessary
@@ -62,7 +64,26 @@ router.post('/register-token', registerLimiter, (req, res) => {
 
   // v544: provider_enabled is optional; when omitted, existing flag is preserved
   const providerFlag = (typeof provider_enabled === 'boolean') ? provider_enabled : undefined;
-  const ok = pushService.registerToken(pubkey, fcm_token, providerFlag);
+
+  // v576: app_build is optional integer (1..99999). Older clients won't send
+  // it; treat as outdated for nudge purposes.
+  let buildNum;
+  if (typeof app_build === 'number' && Number.isInteger(app_build) && app_build > 0 && app_build < 100000) {
+    buildNum = app_build;
+  }
+
+  const ok = pushService.registerToken(pubkey, fcm_token, providerFlag, buildNum);
+
+  // v576: Fire-and-forget update nudge if registered build is below the
+  // minimum recommended. Self-throttled to 1/24h inside maybeNudgeForUpdate
+  // so we don't spam on the 1h token re-registration cycle.
+  // MIN_RECOMMENDED_BUILD is set to 575 — the first build that omits plaintext
+  // billCode from kind 30078 and uses NIP-44 only.
+  const MIN_RECOMMENDED_BUILD = 575;
+  pushService.maybeNudgeForUpdate(pubkey, MIN_RECOMMENDED_BUILD).catch((e) => {
+    console.log(`[PUSH] maybeNudgeForUpdate error for ${pubkey.substring(0, 16)}...: ${e.message}`);
+  });
+
   res.json({ ok, push_enabled: pushService.isEnabled() });
 });
 
