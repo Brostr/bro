@@ -34,7 +34,11 @@ const registerLimiter = rateLimit({
 
 // Allowed push types and subtypes
 const ALLOWED_TYPES = new Set(['order_update', 'brix_invoice_request']);
-const ALLOWED_SUBTYPES = new Set(['accepted', 'billcode_encrypted', 'payment_received', 'completed', 'disputed', 'cancelled']);
+// v574: 'accept_relay' is a SILENT data-only push sent to the order creator
+// after a provider accepts. It wakes the background isolate so it can encrypt
+// the billCode via NIP-44 and publish kind 30080 — without requiring the app
+// to be open. Plaintext billCode in kind 30078 still works for backward compat.
+const ALLOWED_SUBTYPES = new Set(['accepted', 'accept_relay', 'billcode_encrypted', 'payment_received', 'completed', 'disputed', 'cancelled']);
 
 /**
  * POST /push/register-token

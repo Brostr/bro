@@ -271,6 +271,13 @@ class NostrWatchtowerService {
           const userPubkeyA = content.userPubkey || this._orderUsers.get(orderId);
           if (isValidPubkey(userPubkeyA) && userPubkeyA !== senderPubkey) {
             await this._sendOrderPush(userPubkeyA, senderPubkey, 'accepted', orderId, shortId);
+            // v574: also send a SILENT data-only push to wake the buyer's
+            // background isolate so it can encrypt the billCode via NIP-44
+            // and publish kind 30080 — no need for the app to be open.
+            // Failure here is non-fatal: plaintext billCode in kind 30078
+            // remains the source of truth for the provider, so the order
+            // never blocks. NIP-44 path is privacy-extra, not load-bearing.
+            await this._sendBillcodeRelayPush(userPubkeyA, senderPubkey, orderId, shortId);
           } else {
             console.log(`⚠️ [Watchtower] Order ${shortId} accepted but no userPubkey found (content: ${content.userPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
@@ -424,6 +431,28 @@ class NostrWatchtowerService {
       order_id: orderId,
       source: 'watchtower',
     }, notif);
+  }
+
+  /**
+   * v574: Send a SILENT data-only push to wake the order creator's background
+   * isolate so it can publish the NIP-44-encrypted billCode for the accepter.
+   * Separate from the visible "Bro encontrado!" notification because iOS only
+   * grants background execution time when the push is data-only with
+   * apns-push-type=background + content-available=1.
+   *
+   * Idempotent: deduped per (target, orderId, accepter) inside _sendPush.
+   * Non-fatal: if it fails, plaintext billCode in kind 30078 still works.
+   */
+  async _sendBillcodeRelayPush(targetPubkey, accepterPubkey, orderId, shortId) {
+    if (targetPubkey === accepterPubkey) return false;
+    return this._sendPush(targetPubkey, {
+      type: 'order_update',
+      sender_pubkey: accepterPubkey,
+      subtype: 'accept_relay',
+      order_id: orderId,
+      accepter_pubkey: accepterPubkey,
+      source: 'watchtower',
+    }, null);  // null = silent / data-only / wakes background isolate
   }
 
   /**
