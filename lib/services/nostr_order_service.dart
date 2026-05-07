@@ -158,6 +158,25 @@ class NostrOrderService {
   static const int kindBroComplete = 30081;
   static const int kindBroProviderTier = 30082; // Tier do provedor
 
+  // v575: Buyer omits plaintext billCode from kind 30078 to keep PIX private
+  // from relay scrapers. The billCode is delivered to the accepter via
+  // NIP-44-encrypted kind 30080 (`billCode_nip44` field) AFTER the provider
+  // accepts (kind 30079). The background relay (v574) wakes the buyer's
+  // device via FCM so the encrypted publish happens even if the app is
+  // killed/locked, and the foreground sync
+  // (`_sendEncryptedBillCodeForAcceptedOrders`) re-tries on app open.
+  //
+  // Backward compatibility:
+  //   - NEW buyer (v575+) + NEW provider (v438+): NIP-44 path. ✓
+  //   - OLD buyer (pre-v575)              + any provider: plaintext path. ✓
+  //   - NEW buyer + ANCIENT provider (<v438): provider never sees billCode.
+  //     Acceptable: v438 shipped many builds ago, ancient providers are rare.
+  //
+  // The `billCodeProtocol` content field tells providers/buyers to expect
+  // NIP-44 delivery rather than waiting indefinitely for plaintext.
+  static const bool _omitPlaintextBillCode = true;
+  static const String _billCodeProtocolNip44 = 'nip44';
+
   // Tag para identificar ordens do app
   static const String broTag = 'bro-order';
   static const String broAppTag = 'bro-app';
@@ -190,13 +209,19 @@ class NostrOrderService {
       // TODO: Reativar quando provider-side tiver decrypt: _billCodeCrypto.encrypt(billCode)
       broLog('📡 _publishOrderRaw: orderId=${orderId.substring(0, 8)}, billType=$billType, billCode=${billCode.isNotEmpty ? "SET" : "EMPTY"}, encrypted=DISABLED');
       
+      // v575: omit plaintext billCode from kind 30078 when flag is on. The
+      // accepter receives it via NIP-44 (kind 30080) after accepting. We keep
+      // the billCode field present (empty string) for parser backward
+      // compatibility — old code does `content['billCode']?.toString() ?? ''`.
+      final publishedBillCode = _omitPlaintextBillCode ? '' : encryptedBillCode;
       final content = jsonEncode({
         'type': 'bro_order',
         'version': '1.0',
         'orderId': orderId,
         'userPubkey': keychain.public,
         'billType': billType,
-        'billCode': encryptedBillCode,
+        'billCode': publishedBillCode,
+        'billCodeProtocol': _omitPlaintextBillCode ? _billCodeProtocolNip44 : 'plaintext',
         'amount': amount,
         'btcAmount': btcAmount,
         'btcPrice': btcPrice,
@@ -1398,7 +1423,10 @@ class NostrOrderService {
         'orderId': order.id,
         'userPubkey': keychain.public,
         'billType': order.billType,
-        'billCode': order.billCode, // v437: BRO1 encryption DESATIVADA até todos dispositivos atualizarem
+        // v575: omit plaintext on republish too. Buyer always has the billCode
+        // locally; the accepter gets it via NIP-44 (kind 30080).
+        'billCode': _omitPlaintextBillCode ? '' : order.billCode,
+        'billCodeProtocol': _omitPlaintextBillCode ? _billCodeProtocolNip44 : 'plaintext',
         'amount': order.amount,
         'btcAmount': order.btcAmount,
         'btcPrice': order.btcPrice,

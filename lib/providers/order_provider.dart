@@ -2271,7 +2271,32 @@ class OrderProvider with ChangeNotifier {
 
       broLog('ðŸ�?�µ [acceptOrderAsProvider] Resultado da publica�?§�?£o: $success');
 
-      if (!success) {
+      // v575: VERIFY-AFTER-PUBLISH. Relays under load (Damus rate limits, NIP-98
+      // verification stalls) sometimes accept and store the event but fail to
+      // ACK within our 15s websocket timeout, causing acceptOrderOnNostr to
+      // return false even though the watchtower already saw the event and
+      // dispatched the 'accepted' push to the buyer. Without this re-check,
+      // the user sees "Falha ao publicar" and retries — second attempt
+      // creates a duplicate accept (or reuses cached event id) and "works".
+      // Side effect today: buyer received a notification while provider's
+      // UI showed an error. Now: if our pubkey is on the relay as the
+      // accepter, treat as success regardless of the websocket-level outcome.
+      bool acceptVerified = success;
+      if (!success && providerPubkey != null) {
+        try {
+          final landed = await _nostrOrderService
+              .fetchOrderProviderPubkey(orderId)
+              .timeout(const Duration(seconds: 6), onTimeout: () => null);
+          if (landed != null && landed.toLowerCase() == providerPubkey.toLowerCase()) {
+            broLog('✅ [acceptOrderAsProvider] verify-after-publish: event landed despite ACK timeout');
+            acceptVerified = true;
+          }
+        } catch (e) {
+          broLog('⚠️ [acceptOrderAsProvider] verify-after-publish failed: $e');
+        }
+      }
+
+      if (!acceptVerified) {
         _error = 'Falha ao publicar aceita�?§�?£o no Nostr';
         _isLoading = false;
         _immediateNotify();
