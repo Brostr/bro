@@ -1887,6 +1887,10 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
           MaterialPageRoute(builder: (context) => DisputeDetailScreen(dispute: dispute)),
         );
       },
+      // v579: long-press to archive stale disputes (e.g. legacy disputes whose
+      // resolution event was never published or was lost from the relay).
+      // Marks resolved locally so it disappears from the "open" tab.
+      onLongPress: () => _confirmArchiveStaleDispute(orderId),
       child: Container(
         margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(14),
@@ -1980,7 +1984,7 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
               children: [
                 Icon(Icons.touch_app, color: Colors.orange, size: 14),
                 SizedBox(width: 4),
-                Text('Toque para ver detalhes e mediar', style: TextStyle(color: Colors.orange, fontSize: 11)),
+                Text('Toque para mediar — segure p/ arquivar antiga', style: TextStyle(color: Colors.orange, fontSize: 11)),
               ],
             ),
           ],
@@ -2500,6 +2504,52 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
         ],
       ),
     );
+  }
+
+  /// v579: Manual archive for stale legacy disputes whose resolution event
+  /// was never published or was lost from relays. Marks resolved locally.
+  void _confirmArchiveStaleDispute(String orderId) async {
+    if (orderId.isEmpty) return;
+    final shortId = orderId.length > 8 ? orderId.substring(0, 8) : orderId;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: const Text('Arquivar disputa', style: TextStyle(color: Colors.white)),
+        content: Text(
+          'Marcar a disputa $shortId como resolvida localmente?\n\n'
+          'Use apenas para disputas antigas que não foram resolvidas via Nostr '
+          '(sem evento bro-resolucao). A disputa sairá da aba "Abertas" — o '
+          'histórico permanece.',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFFF6B6B)),
+            child: const Text('Arquivar'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    try {
+      await StorageService().markDisputeResolved(orderId, 'archived_manually');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Disputa $shortId arquivada localmente')),
+      );
+      await _loadData();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erro ao arquivar: $e'), backgroundColor: Colors.red),
+      );
+    }
   }
 
   void _showCancelDisputeDialog(Dispute dispute) {

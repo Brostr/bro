@@ -2287,6 +2287,7 @@ class OrderProvider with ChangeNotifier {
       // UI showed an error. Now: if our pubkey is on the relay as the
       // accepter, treat as success regardless of the websocket-level outcome.
       bool acceptVerified = success;
+      String? raceWinner; // v579: pubkey of provider that won the race (if any)
       if (!success && providerPubkey != null) {
         try {
           final landed = await _nostrOrderService
@@ -2295,6 +2296,10 @@ class OrderProvider with ChangeNotifier {
           if (landed != null && landed.toLowerCase() == providerPubkey.toLowerCase()) {
             broLog('✅ [acceptOrderAsProvider] verify-after-publish: event landed despite ACK timeout');
             acceptVerified = true;
+          } else if (landed != null) {
+            // v579: another provider's accept landed for this orderId — race lost.
+            raceWinner = landed;
+            broLog('🏁 [acceptOrderAsProvider] race lost: ${landed.substring(0, 8)} accepted first');
           }
         } catch (e) {
           broLog('⚠️ [acceptOrderAsProvider] verify-after-publish failed: $e');
@@ -2302,7 +2307,13 @@ class OrderProvider with ChangeNotifier {
       }
 
       if (!acceptVerified) {
-        _error = 'Falha ao publicar aceita�?§�?£o no Nostr';
+        // v579: distinguish race-loss from publish failure for clearer UX.
+        if (raceWinner != null) {
+          _error = '❌ Esta ordem já foi aceita por outro provedor';
+          _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
+        } else {
+          _error = 'Falha ao publicar aceitação no Nostr';
+        }
         _isLoading = false;
         _immediateNotify();
         return false;
