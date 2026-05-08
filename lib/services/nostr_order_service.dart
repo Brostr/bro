@@ -158,6 +158,20 @@ class NostrOrderService {
   static const int kindBroComplete = 30081;
   static const int kindBroProviderTier = 30082; // Tier do provedor
 
+  // v580 (Phase 2 / NIP-40): build an ["expiration", "<unix>"] tag so relays
+  // SHOULD drop events past this time. Reduces stale order pollution and
+  // makes accidental data exposure self-clean. Each kind has a distinct TTL:
+  //   - 30078 (order)  / 30079 (accept) → 7 days
+  //   - 30080 (update/billcode/proof)   → 30 days (disputes need a window)
+  //   - 30081 (complete)                → 30 days
+  // Some relays (Damus, primal, nos.lol) honor NIP-40, others ignore it. It
+  // is purely advisory: the events are still valid until expiration. Old
+  // clients without NIP-40 awareness simply ignore the tag.
+  static List<String> _expirationTag(int days) {
+    final unix = DateTime.now().add(Duration(days: days)).millisecondsSinceEpoch ~/ 1000;
+    return ['expiration', unix.toString()];
+  }
+
   // v575: Buyer omits plaintext billCode from kind 30078 to keep PIX private
   // from relay scrapers. The billCode is delivered to the accepter via
   // NIP-44-encrypted kind 30080 (`billCode_nip44` field) AFTER the provider
@@ -242,6 +256,7 @@ class NostrOrderService {
           ['t', billType],
           ['amount', amount.toStringAsFixed(2)],
           ['status', 'pending'],
+          _expirationTag(7), // v580: NIP-40 — kind 30078 expires in 7d
         ],
         content: content,
         privkey: keychain.private,
@@ -314,6 +329,7 @@ class NostrOrderService {
         ['t', 'status-$newStatus'], // Tag pesquisável por status
         ['r', orderId], // CRÍTICO: Tag 'r' (reference) para busca por orderId nos relays
         ['orderId', orderId], // Tag customizada (não filtrável por relays, só para leitura)
+        _expirationTag(30), // v580: NIP-40 — status updates expire in 30d
       ];
       
       // v257: CORREÇÃO CRÍTICA — Garantir que AMBAS as partes (provedor E usuário)
@@ -409,6 +425,7 @@ class NostrOrderService {
         ['t', 'bro-republish-request'],
         ['r', orderId],
         ['p', customerPubkey],
+        _expirationTag(7), // v580: NIP-40 — republish requests expire in 7d
       ];
 
       final event = Event.from(
@@ -471,6 +488,7 @@ class NostrOrderService {
         ['t', 'bro-billcode'],
         ['r', orderId],
         ['p', providerPubkey],
+        _expirationTag(7), // v580: NIP-40 — encrypted billCode expires in 7d
       ];
 
       final event = Event.from(
@@ -1348,6 +1366,7 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-invoice-refresh'],
         ['orderId', orderId],
+        _expirationTag(7), // v580: NIP-40 — invoice refresh expires in 7d
       ];
 
       final event = Event.from(
@@ -1448,6 +1467,7 @@ class NostrOrderService {
           ['t', order.billType],
           ['amount', order.amount.toStringAsFixed(2)],
           ['status', newStatus],
+          _expirationTag(7), // v580: NIP-40 — republished order expires in 7d
         ],
         content: content,
         privkey: keychain.private,
@@ -1490,6 +1510,7 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-accept'],
         ['orderId', order.id],
+        _expirationTag(7), // v580: NIP-40 — accept expires in 7d
       ];
       // Só adicionar tag 'e' se eventId for válido (64 chars hex)
       if (order.eventId != null && order.eventId!.length == 64) {
@@ -1638,6 +1659,7 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-complete'],
         ['orderId', order.id],
+        _expirationTag(30), // v580: NIP-40 — complete event expires in 30d
       ];
       // Só adicionar tag 'e' se eventId for válido (64 chars hex)
       if (order.eventId != null && order.eventId!.length == 64) {
