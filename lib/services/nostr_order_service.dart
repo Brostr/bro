@@ -488,7 +488,10 @@ class NostrOrderService {
         ['t', 'bro-billcode'],
         ['r', orderId],
         ['p', providerPubkey],
-        _expirationTag(7), // v580: NIP-40 — encrypted billCode expires in 7d
+        // v581: NIP-40 expiration REMOVED from encrypted billcode. v580 had
+        // 7d expiration but relays sometimes failed to deliver expiration-
+        // tagged kind 30080 events to the provider, leaving the provider
+        // stuck on "Obtendo dados de pagamento...".
       ];
 
       final event = Event.from(
@@ -1510,7 +1513,10 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-accept'],
         ['orderId', order.id],
-        _expirationTag(7), // v580: NIP-40 — accept expires in 7d
+        // v581: NIP-40 expiration REMOVED from accept events. v580 added it
+        // but the watchtower/relays sometimes failed to forward expiration-
+        // tagged accept events, breaking the billcode delivery push chain.
+        // Short-lived (kind 30079) accept events don't need expiration anyway.
       ];
       // Só adicionar tag 'e' se eventId for válido (64 chars hex)
       if (order.eventId != null && order.eventId!.length == 64) {

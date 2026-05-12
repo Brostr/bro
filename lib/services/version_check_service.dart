@@ -35,6 +35,8 @@ class VersionCheckService {
   bool _alreadyChecked = false;
   bool _updateAvailable = false;
   String? _latestVersion;
+  int _latestBuild = 0;   // v581: track build number explicitly
+  int _currentBuild = 0;  // v581: track build number explicitly
   String? _downloadUrl;
   String? _releaseNotes;
   bool _isCritical = false;
@@ -113,9 +115,19 @@ class VersionCheckService {
       // Extrair versão do tag mais recente
       final versionMatch = RegExp(r'v?([\d.]+)').firstMatch(highestTag);
       _latestVersion = versionMatch?.group(1) ?? highestTag;
-      
-      // v438: URL de download — APK direto do release asset, fallback para releases page
-      _downloadUrl = bestApkUrl ?? 'https://github.com/$_repoOwner/$_repoName/releases';
+      _latestBuild = highestBuild;
+      _currentBuild = currentBuild;
+
+      // v581: URL de download — APK direto do release asset, com cache-busting
+      // para evitar que o browser sirva uma APK antiga do cache HTTP
+      // (releases v563 e v564 têm o mesmo nome `bro-app.apk` — cache pode
+      // confundir os dois).
+      if (bestApkUrl != null) {
+        final sep = bestApkUrl.contains('?') ? '&' : '?';
+        _downloadUrl = '$bestApkUrl${sep}v=$highestBuild';
+      } else {
+        _downloadUrl = 'https://github.com/$_repoOwner/$_repoName/releases';
+      }
       _releaseNotes = bestReleaseNotes ?? '';
       
       _updateAvailable = highestBuild > currentBuild;
@@ -195,10 +207,18 @@ class VersionCheckService {
                 const SizedBox(height: 12),
               ],
               Text(
-                'Versão disponível: $_latestVersion',
+                'Versão disponível: $_latestVersion (build $_latestBuild)',
                 style: TextStyle(
                   fontWeight: FontWeight.w600,
                   color: _isCritical ? Colors.white70 : null,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Você tem: $_latestVersion (build $_currentBuild)',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _isCritical ? Colors.white54 : Colors.grey[600],
                 ),
               ),
               if (_releaseNotes != null && _releaseNotes!.isNotEmpty) ...[
