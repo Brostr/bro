@@ -70,6 +70,17 @@ class NostrWatchtowerService {
     // were already delivered before the restart.
     this._bootTime = Math.floor(Date.now() / 1000);
     this._BOOT_GRACE_SEC = 30; // small grace for clock skew / in-flight events
+    // v582: Backfill loop. The primary subscription is real-time only — if a
+    // relay momentarily drops the event between WS frames, the watchtower
+    // misses the push trigger forever. This happened in production for order
+    // 33138e28 (accept never logged, provider stuck on "Obtendo dados de
+    // pagamento"). Every BACKFILL_INTERVAL we send a transient REQ for
+    // accept/update events in the last BACKFILL_WINDOW seconds. Dedup via
+    // _seenEvents + _seenPushes prevents double-notification.
+    this._backfillSubs = new Set(); // subIds awaiting EOSE so we can CLOSE
+    this._backfillTimer = null;
+    this._BACKFILL_INTERVAL_MS = 60_000;
+    this._BACKFILL_WINDOW_SEC = 180;
   }
 
   start() {
@@ -80,10 +91,17 @@ class NostrWatchtowerService {
     for (const relay of RELAYS) {
       this._connectToRelay(relay);
     }
+
+    // v582: start backfill loop after initial connections settle
+    this._backfillTimer = setInterval(() => this._backfillRecent(), this._BACKFILL_INTERVAL_MS);
   }
 
   stop() {
     this._running = false;
+    if (this._backfillTimer) {
+      clearInterval(this._backfillTimer);
+      this._backfillTimer = null;
+    }
     for (const [, ws] of this._connections) {
       try { ws.close(); } catch (_) { /* ignore */ }
     }
@@ -153,6 +171,44 @@ class NostrWatchtowerService {
     }
   }
 
+  /**
+   * v582: Periodic backfill. Sends a transient REQ for accept/update events
+   * in the recent past to catch anything the live subscription dropped.
+   * Dedup (_seenEvents + _seenPushes) means already-handled events are no-ops.
+   * Subscription is closed automatically on EOSE.
+   */
+  _backfillRecent() {
+    if (!this._running) return;
+    const since = Math.floor(Date.now() / 1000) - this._BACKFILL_WINDOW_SEC;
+    for (const [relayUrl, ws] of this._connections) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) continue;
+      if (!this._eoseReceived.has(relayUrl)) continue; // wait until initial sub past EOSE
+      const subId = `bro-wt-bf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      this._backfillSubs.add(subId);
+      try {
+        ws.send(JSON.stringify(['REQ', subId,
+          {
+            kinds: [KIND_ACCEPT, KIND_PAYMENT_PROOF, KIND_COMPLETE],
+            '#t': ['bro-order'],
+            since,
+          },
+          {
+            kinds: [KIND_ACCEPT, KIND_PAYMENT_PROOF, KIND_COMPLETE],
+            '#t': ['bro-update'],
+            since,
+          },
+        ]));
+      } catch (e) {
+        this._backfillSubs.delete(subId);
+      }
+    }
+    // Memory cap on outstanding backfill subs (in case relay never sends EOSE)
+    if (this._backfillSubs.size > 50) {
+      const arr = Array.from(this._backfillSubs);
+      this._backfillSubs = new Set(arr.slice(-25));
+    }
+  }
+
   _scheduleReconnect(relayUrl) {
     if (!this._running) return;
     const delay = 15000 + Math.random() * 10000; // 15-25s
@@ -174,6 +230,14 @@ class NostrWatchtowerService {
       if (!this._eoseReceived.has(relayUrl)) {
         this._eoseReceived.add(relayUrl);
         console.log(`\u2705 [Watchtower] EOSE from ${relayUrl} \u2014 now processing real-time events only`);
+      }
+      // v582: backfill subscriptions are transient — CLOSE on EOSE
+      if (this._backfillSubs.has(subId)) {
+        this._backfillSubs.delete(subId);
+        const ws = this._connections.get(relayUrl);
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify(['CLOSE', subId])); } catch (_) { /* ignore */ }
+        }
       }
       return;
     }

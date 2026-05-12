@@ -3941,6 +3941,20 @@ class OrderProvider with ChangeNotifier {
       } catch (e) {
         broLog('⚠️ _autoNudgeStuckOrders exception: $e');
       }
+
+      // v582: Provider auto-nudge para billCode AUSENTE. Distinto do nudge
+      // de awaiting_confirmation: aqui o provedor acabou de aceitar e ainda
+      // não recebeu o billCode encriptado (status=accepted, billCode vazio).
+      // Sem isso, se o accept_relay push falhar, o provedor fica preso em
+      // "Obtendo dados de pagamento..." indefinidamente.
+      try {
+        await _autoNudgeMissingBillCode().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => broLog('⏱️ _autoNudgeMissingBillCode timeout (10s)'),
+        );
+      } catch (e) {
+        broLog('⚠️ _autoNudgeMissingBillCode exception: $e');
+      }
       
       // Ordenar por data (mais recente primeiro)
       _orders.sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -4016,6 +4030,81 @@ class OrderProvider with ChangeNotifier {
     }
   }
 
+  /// v582: Provider-side fast nudge para o caso "billCode ausente após aceitar".
+  /// Quando aceitamos uma ordem mas o billCode encriptado nunca chega via
+  /// `accept_relay` push, ficamos presos em "Obtendo dados de pagamento".
+  /// A cada sync, se >20s desde o accept e ainda sem billCode, pedimos para
+  /// o buyer republicar. Cooldown de 60s (mais agressivo que o nudge geral)
+  /// porque o usuário está olhando para um spinner.
+  final Map<String, DateTime> _billCodeNudges = {};
+
+  /// v582: Versão manual disparada por botão na UI (escape hatch).
+  Future<bool> requestBillCodeAgain(String orderId) async {
+    final privateKey = _nostrService.privateKey;
+    if (privateKey == null || privateKey.isEmpty) return false;
+    final order = _orders.firstWhere(
+      (o) => o.id == orderId,
+      orElse: () => Order(id: '', billType: '', billCode: '', amount: 0, btcAmount: 0, btcPrice: 0, providerFee: 0, platformFee: 0, total: 0, status: '', createdAt: DateTime.now()),
+    );
+    if (order.id.isEmpty) return false;
+    if (order.userPubkey == null || order.userPubkey!.isEmpty) return false;
+    try {
+      final ok = await _nostrOrderService.publishRepublishRequest(
+        privateKey: privateKey,
+        orderId: order.id,
+        customerPubkey: order.userPubkey!,
+      );
+      if (ok) _billCodeNudges[order.id] = DateTime.now();
+      return ok;
+    } catch (e) {
+      broLog('⚠️ requestBillCodeAgain exception: $e');
+      return false;
+    }
+  }
+
+  Future<void> _autoNudgeMissingBillCode() async {
+    if (_currentUserPubkey == null) return;
+    final privateKey = _nostrService.privateKey;
+    if (privateKey == null || privateKey.isEmpty) return;
+
+    final now = DateTime.now();
+    final stuck = _orders.where((o) {
+      if (o.status != 'accepted') return false;
+      if (o.providerId != _currentUserPubkey) return false;
+      if (o.userPubkey == null || o.userPubkey!.isEmpty) return false;
+      if (o.userPubkey == _currentUserPubkey) return false;
+      if (o.billCode.isNotEmpty) return false; // já temos o código
+      final accepted = o.acceptedAt;
+      if (accepted == null) return false;
+      // janela: entre 20s e 1h depois do accept
+      final age = now.difference(accepted);
+      if (age.inSeconds < 20 || age.inMinutes > 60) return false;
+      // throttle: 60s entre nudges para o mesmo orderId
+      final last = _billCodeNudges[o.id];
+      if (last != null && now.difference(last).inSeconds < 60) return false;
+      return true;
+    }).toList();
+
+    if (stuck.isEmpty) return;
+    broLog('🟧 _autoNudgeMissingBillCode: ${stuck.length} ordens sem billCode, pedindo republish');
+
+    for (final order in stuck) {
+      try {
+        final ok = await _nostrOrderService.publishRepublishRequest(
+          privateKey: privateKey,
+          orderId: order.id,
+          customerPubkey: order.userPubkey!,
+        );
+        if (ok) {
+          _billCodeNudges[order.id] = now;
+          broLog('✅ billCode nudge enviado para ${order.id.substring(0, 8)}');
+        }
+      } catch (e) {
+        broLog('⚠️ billCode nudge falhou para ${order.id.substring(0, 8)}: $e');
+      }
+    }
+  }
+
   /// v437: Customer auto-respond — detecta bro_republish_request do provider
   /// e re-publica o completed para ordens que já estão completed localmente.
   Future<void> _handleIncomingRepublishRequests() async {
@@ -4037,13 +4126,42 @@ class OrderProvider with ChangeNotifier {
       );
       if (order.id.isEmpty) continue;
 
+      // Só re-publicar se somos o criador da ordem
+      if (order.userPubkey != _currentUserPubkey) continue;
+
+      // v582: Se a ordem está accepted SEM billCode entregue, re-enviar
+      // o billCode encriptado direto (provider está preso em "Obtendo dados").
+      if (order.status == 'accepted' &&
+          order.providerId != null &&
+          order.providerId!.isNotEmpty &&
+          order.billCode.isNotEmpty) {
+        try {
+          final ok = await _nostrOrderService.publishEncryptedBillCode(
+            privateKey: privateKey,
+            orderId: order.id,
+            billCode: order.billCode,
+            providerPubkey: order.providerId!,
+            orderUserPubkey: _currentUserPubkey!,
+          );
+          broLog('${ok ? "✅" : "⚠️"} v582 re-send billCode nip44 para ${orderId.substring(0, 8)} (ok=$ok)');
+          // Marca como sent independente de ok — próximo sync tenta de novo.
+          final idx = _orders.indexWhere((o) => o.id == order.id);
+          if (idx != -1) {
+            final meta = Map<String, dynamic>.from(_orders[idx].metadata ?? {});
+            meta['billCode_nip44_sent'] = true;
+            _orders[idx] = _orders[idx].copyWith(metadata: meta);
+          }
+        } catch (e) {
+          broLog('⚠️ v582 re-send billCode exception: $e');
+        }
+        continue;
+      }
+
       // Só re-publicar se a ordem está completed localmente
       if (order.status != 'completed') {
         broLog('⏭️ Nudge para ${orderId.substring(0, 8)}: status local é ${order.status}, ignorando');
         continue;
       }
-      // Só re-publicar se somos o criador da ordem
-      if (order.userPubkey != _currentUserPubkey) continue;
 
       try {
         await _nostrOrderService.updateOrderStatus(

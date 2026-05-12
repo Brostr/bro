@@ -67,6 +67,10 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
   
   // Timer para polling automático de updates de status
   Timer? _statusPollingTimer;
+  // v582: timestamp em que entramos no estado "accepted sem billCode" — para
+  // mostrar o botão de re-pedir manualmente após 15s.
+  DateTime? _waitingBillCodeSince;
+  bool _isRerequestingBillCode = false;
 
   @override
   void initState() {
@@ -288,6 +292,14 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
           }
           
           broLog('🔍 Ordem ${widget.orderId.substring(0, 8)}: status=$orderStatus, providerId=$orderProviderId, _orderAccepted=$_orderAccepted');
+          // v582: track quando entramos no estado "accepted sem billCode"
+          final billCodeStr = order?['billCode'] as String? ?? '';
+          final isAcceptedNoBillCode = (orderStatus == 'accepted') && billCodeStr.isEmpty;
+          if (isAcceptedNoBillCode) {
+            _waitingBillCodeSince ??= DateTime.now();
+          } else {
+            _waitingBillCodeSince = null;
+          }
           _isLoading = false;
         });
       }
@@ -298,6 +310,29 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
           _isLoading = false;
         });
       }
+    }
+  }
+
+  // v582: Botão manual para re-solicitar billCode quando spinner está há >15s.
+  Future<void> _requestBillCodeAgain() async {
+    if (_isRerequestingBillCode) return;
+    setState(() => _isRerequestingBillCode = true);
+    try {
+      final orderProvider = context.read<OrderProvider>();
+      final ok = await orderProvider.requestBillCodeAgain(widget.orderId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppLocalizations.of(context)!.t('prov_det_pix_re_requested')),
+          backgroundColor: ok ? Colors.green : Colors.orange,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      // Força sync logo após a solicitação para tentar buscar o billCode novo
+      await Future.delayed(const Duration(seconds: 2));
+      if (mounted) await _loadOrderDetails(forceSync: true);
+    } finally {
+      if (mounted) setState(() => _isRerequestingBillCode = false);
     }
   }
 
@@ -911,6 +946,31 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                         fontSize: 12,
                       ),
                     ),
+                    // v582: Escape hatch — após 15s, mostrar botão pra solicitar de novo
+                    if (_waitingBillCodeSince != null &&
+                        DateTime.now().difference(_waitingBillCodeSince!).inSeconds >= 15) ...[
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: _isRerequestingBillCode ? null : _requestBillCodeAgain,
+                        icon: _isRerequestingBillCode
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange),
+                              )
+                            : const Icon(Icons.refresh, size: 16, color: Colors.orange),
+                        label: Text(
+                          _isRerequestingBillCode
+                              ? AppLocalizations.of(context)!.t('prov_det_requesting_pix_again')
+                              : AppLocalizations.of(context)!.t('prov_det_request_pix_again'),
+                          style: const TextStyle(color: Colors.orange, fontSize: 12),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(color: Colors.orange.withOpacity(0.5)),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
