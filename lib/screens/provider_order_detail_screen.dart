@@ -1693,11 +1693,15 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
 
       broLog('✅ [RegenInvoice] Novo invoice gerado: ${newInvoice.substring(0, 30)}...');
 
-      // Publicar novo evento COMPLETE no Nostr com o invoice atualizado
-      final success = await orderProvider.completeOrderAsProvider(
+      // v584: ANTES chamávamos completeOrderAsProvider com proof placeholder,
+      // o que SOBRESCREVIA o bro_complete original e DESTRUÍA o proofImage.
+      // Agora publicamos apenas um evento bro_invoice_refresh leve (~500B),
+      // preservando o complete original. Isso é exatamente o que resolve o
+      // caso do leandrogehlen (issue #6) — invoice circula em todos relays
+      // sem o peso do proof cifrado.
+      final success = await orderProvider.republishInvoiceForOrder(
         widget.orderId,
-        'invoice_regenerated', // proof placeholder — não é um novo comprovante
-        providerInvoice: newInvoice,
+        newInvoice,
       );
 
       if (success && mounted) {

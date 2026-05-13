@@ -2774,6 +2774,56 @@ class OrderProvider with ChangeNotifier {
     }
   }
 
+  /// v584: Reenvia ao cliente um invoice fresco de cobran�?§a (sem mexer no
+  /// bro_complete original). Usa kind 30081 com d-tag `${orderId}_invoice_refresh`,
+  /// preservando o complete que cont�?©m o proof.
+  /// Resolve o caso do leandrogehlen (issue #6): provedor pode forçar a
+  /// recobran�?§a se desconfia que o cliente nunca recebeu o invoice original.
+  Future<bool> republishInvoiceForOrder(String orderId, String newInvoice) async {
+    try {
+      final order = getOrderById(orderId);
+      if (order == null) {
+        broLog('[republishInvoice] ordem $orderId n�?£o encontrada');
+        return false;
+      }
+      final userPubkey = order.userPubkey;
+      if (userPubkey == null || userPubkey.isEmpty) {
+        broLog('[republishInvoice] ordem sem userPubkey');
+        return false;
+      }
+      final privKey = _nostrService.privateKey;
+      if (privKey == null) {
+        broLog('[republishInvoice] chave privada indispon�?­vel');
+        return false;
+      }
+      final ok = await _nostrOrderService.publishInvoiceRefresh(
+        orderId: orderId,
+        providerPrivateKey: privKey,
+        providerInvoice: newInvoice,
+        orderUserPubkey: userPubkey,
+      );
+      if (ok) {
+        // Atualizar metadata local com novo invoice
+        final idx = _orders.indexWhere((o) => o.id == orderId);
+        if (idx != -1) {
+          _orders[idx] = _orders[idx].copyWith(
+            metadata: {
+              ...(_orders[idx].metadata ?? {}),
+              'providerInvoice': newInvoice,
+              'invoiceRefreshedAt': DateTime.now().toIso8601String(),
+            },
+          );
+          await _saveOrders();
+          _immediateNotify();
+        }
+      }
+      return ok;
+    } catch (e) {
+      broLog('[republishInvoice] erro: $e');
+      return false;
+    }
+  }
+
   /// Auto-liquida�?§�?£o quando usu�?¡rio n�?£o confirma em 36h
   /// Marca a ordem como 'liquidated' e notifica o usu�?¡rio
   Future<bool> autoLiquidateOrder(String orderId, String proof) async {
@@ -2858,15 +2908,37 @@ class OrderProvider with ChangeNotifier {
     try {
       // Encontrar ordens liquidadas onde EU sou o USU�RIO (n�o o provedor)
       // e que ainda n�o tiveram auto-pagamento completado
+      // v584: tamb�m varremos status='completed' e 'awaiting_confirmation'.
+      // O bug do leandrogehlen (order 92a2fdeb) mostrou que o cliente pode
+      // marcar a ordem como 'completed' sem nunca ter passado por 'liquidated',
+      // deixando o provedor sem receber sats. Mantemos autoPaymentCompleted
+      // como guarda contra pagar duas vezes.
+      const autopayEligibleStatuses = {
+        'liquidated',
+        'completed',
+        'awaiting_confirmation',
+      };
       final unpaidLiquidated = _orders.where((order) {
-        if (order.status != 'liquidated') return false;
+        if (!autopayEligibleStatuses.contains(order.status)) return false;
         // Sou o criador da ordem (usu�rio que precisa pagar)
         if (order.userPubkey != _currentUserPubkey) return false;
         // Sou o provedor? Ent�o n�o preciso pagar a mim mesmo
         final providerId = order.providerId ?? order.metadata?['providerId'] ?? order.metadata?['provider_id'] ?? '';
         if (providerId == _currentUserPubkey) return false;
+        if (providerId.toString().isEmpty) return false; // sem provedor identificado
         // J� paguei?
         if (order.metadata?['autoPaymentCompleted'] == true) return false;
+        // v584: pra status != 'liquidated', exigir alguma evid�ncia que o
+        // provedor agiu (proof ou invoice candidato) pra n�o disparar
+        // pagamento por transi��o de estado antiga/corrompida.
+        if (order.status != 'liquidated') {
+          final meta = order.metadata ?? const {};
+          final hasProof = (meta['proofImage'] != null && meta['proofImage'].toString().isNotEmpty)
+              || (meta['proofImage_nip44'] != null && meta['proofImage_nip44'].toString().isNotEmpty)
+              || (meta['paymentProof'] != null && meta['paymentProof'].toString().isNotEmpty);
+          final hasInvoiceCandidate = (meta['providerInvoice'] != null && meta['providerInvoice'].toString().isNotEmpty);
+          if (!hasProof && !hasInvoiceCandidate) return false;
+        }
         return true;
       }).toList();
       

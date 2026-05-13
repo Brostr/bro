@@ -1275,11 +1275,15 @@ class NostrOrderService {
   /// Retorna um Map com os dados do evento COMPLETE incluindo providerInvoice
   Future<Map<String, dynamic>?> fetchOrderCompleteEvent(String orderId) async {
     
-    // PERFORMANCE: Buscar em todos os relays EM PARALELO
-    // v519: cada relay retorna (data, timestamp) para que possamos pegar o mais recente
-    // entre TODOS os relays, não apenas o primeiro que responder.
+    // v584: ANTES buscava só em `_relays.take(3)`. Isso causou o bug do
+    // leandrogehlen (order 92a2fdeb): o complete só foi aceito por 1 relay
+    // (damus.io) por causa do tamanho (88KB). Se o cliente não conseguia
+    // chegar nele, o autopay nunca rodava. Agora consultamos TODOS os
+    // relays principais + os de fallback pra maximizar a chance de encontrar
+    // o providerInvoice (que também é replicado via invoice_refresh leve).
+    final allRelays = <String>[..._relays, ..._fallbackRelays];
     final results = await Future.wait(
-      _relays.take(3).map((relay) async {
+      allRelays.map((relay) async {
         try {
           // Buscar todas estratégias em paralelo (complete + invoice_refresh)
           final fetches = await Future.wait([
@@ -1711,6 +1715,30 @@ class NostrOrderService {
         _addToBlocklist({order.id});
         _statusUpdatesCache = null;
         _statusUpdatesCacheTime = null;
+      }
+
+      // v584: bro_complete inclui proofImage cifrado e pode ficar grande (~80KB+),
+      // o que faz alguns relays rejeitarem silenciosamente. Publicamos o
+      // providerInvoice em UM EVENTO SEPARADO LEVE (~500 bytes) em paralelo,
+      // pra garantir que o cliente sempre recebe o invoice mesmo se o complete
+      // for descartado por size limit em algum relay.
+      // Era exatamente o bug do leandrogehlen (order 92a2fdeb): complete só
+      // aceito em 1 de 6 relays; cliente em outros relays nunca viu o invoice
+      // e nunca disparou autopay.
+      if (anySuccess && providerInvoice != null && providerInvoice.isNotEmpty &&
+          (order.userPubkey ?? '').isNotEmpty) {
+        unawaited(
+          publishInvoiceRefresh(
+            orderId: order.id,
+            providerPrivateKey: providerPrivateKey,
+            providerInvoice: providerInvoice,
+            orderUserPubkey: order.userPubkey!,
+          ).then((ok) {
+            broLog('[completeOrderOnNostr] invoice_refresh paralelo: $ok');
+          }).catchError((e) {
+            broLog('[completeOrderOnNostr] erro invoice_refresh paralelo: $e');
+          }),
+        );
       }
 
       return anySuccess;
