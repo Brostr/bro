@@ -4076,12 +4076,14 @@ class OrderProvider with ChangeNotifier {
       if (o.billCode.isNotEmpty) return false; // já temos o código
       final accepted = o.acceptedAt;
       if (accepted == null) return false;
-      // janela: entre 20s e 1h depois do accept
+      // janela: entre 8s e 1h depois do accept (v583: era 20s, baixado para
+      // detectar billCode ausente mais rápido — provider detail screen
+      // polla a cada 10s, então primeiro nudge sai em ~10s pós-accept)
       final age = now.difference(accepted);
-      if (age.inSeconds < 20 || age.inMinutes > 60) return false;
-      // throttle: 60s entre nudges para o mesmo orderId
+      if (age.inSeconds < 8 || age.inMinutes > 60) return false;
+      // throttle: 15s entre nudges para o mesmo orderId (v583: era 60s)
       final last = _billCodeNudges[o.id];
-      if (last != null && now.difference(last).inSeconds < 60) return false;
+      if (last != null && now.difference(last).inSeconds < 15) return false;
       return true;
     }).toList();
 
