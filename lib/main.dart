@@ -20,6 +20,8 @@ import 'screens/provider_education_screen.dart';
 import 'screens/provider_collateral_screen.dart';
 import 'screens/provider_orders_screen.dart';
 import 'screens/provider_order_detail_screen.dart';
+import 'screens/notifications_inbox_screen.dart';
+import 'models/notification_item.dart';
 import 'screens/provider_my_orders_screen.dart';
 import 'screens/provider_order_history_screen.dart';
 import 'screens/provider_balance_screen.dart';
@@ -402,6 +404,21 @@ void main() async {
         // Recebido" + "Comprovante recebido" em iOS).
         if (dedupKey != null) {
           NotificationService().markShown(dedupKey);
+        }
+
+        // Persiste no inbox de notificacoes (independente de plataforma).
+        // Mesmo se o sistema ja exibiu nativamente, queremos a entrada salva.
+        {
+          final notif = message.notification;
+          final title = notif?.title?.trim() ?? '';
+          final body = notif?.body?.trim() ?? '';
+          if (title.isNotEmpty || body.isNotEmpty) {
+            NotificationInbox.addRaw(
+              title: title.isNotEmpty ? title : 'Bro',
+              body: body,
+              payload: dedupKey,
+            );
+          }
         }
 
         // v545: Android nao exibe automaticamente o campo 'notification' do FCM
@@ -879,6 +896,7 @@ class BroApp extends StatelessWidget {
               '/provider-balance': (context) => const ProviderBalanceScreen(),
               '/platform-balance': (context) => const PlatformBalanceScreen(),
                 '/admin-bro-2024': (context) => const PlatformAdminScreen(),
+              '/notifications': (context) => const NotificationsInboxScreen(),
             },
           );
             },

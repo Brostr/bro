@@ -14,6 +14,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/order_reminder_service.dart';
 import 'package:bro_app/services/orders_storage.dart';
+import 'package:bro_app/models/notification_item.dart';
 import 'package:workmanager/workmanager.dart';
 
 /// v262: Servico de notificacoes em background
@@ -445,6 +446,7 @@ Future<void> _showNotificationForEvent(Map<String, dynamic> event, String userPu
   final notificationId = (orderId.hashCode + kind) % 2147483647; // Max int32
   
   await _bgNotifications!.show(notificationId, title, body, details, payload: payload);
+  await NotificationInbox.addRaw(title: title, body: body, payload: payload);
   broLog('[BRO-BG] Notificacao enviada: $title — $body');
 }
 
@@ -830,8 +832,7 @@ Future<void> _checkAutoLiquidationBackground() async {
       await _bgNotifications?.show(
         'auto_liq'.hashCode % 2147483647,
         '⚡ Auto-liquidação concluída',
-        '$successCount ordem(ns) liquidada(s) automaticamente. Seus ganhos foram liberados.',
-        const NotificationDetails(
+        '$successCount ordem(ns) liquidada(s) automaticamente. Seus ganhos foram liberados.',        const NotificationDetails(
           android: AndroidNotificationDetails(
             'bro_app_channel',
             'Bro App',
@@ -846,6 +847,11 @@ Future<void> _checkAutoLiquidationBackground() async {
             presentSound: true,
           ),
         ),
+      );
+      await NotificationInbox.addRaw(
+        title: '⚡ Auto-liquidação concluída',
+        body: '$successCount ordem(ns) liquidada(s) automaticamente. Seus ganhos foram liberados.',
+        payload: 'liquidated:auto_liq_${DateTime.now().millisecondsSinceEpoch}',
       );
       
       broLog('[BRO-BG-LIQ] $successCount ordens auto-liquidadas com sucesso');

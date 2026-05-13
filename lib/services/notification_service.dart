@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../models/notification_item.dart';
 
 /// Servico de notificacoes locais para alertar o usuario sobre eventos importantes
 class NotificationService {
@@ -435,6 +436,7 @@ class NotificationService {
     );
 
     await _notifications.show(id, title, body, details, payload: payload);
+    await NotificationInbox.addRaw(title: title, body: body, payload: payload);
     broLog('📤 Notificação enviada: $title');
   }
 
