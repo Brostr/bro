@@ -19,6 +19,8 @@ import '../config.dart';
 import '../l10n/app_localizations.dart';
 import '../services/brix_service.dart';
 import '../services/brix_relay_service.dart';
+import 'provider_order_detail_screen.dart';
+import 'user_order_detail_screen.dart';
 
 /// Tela de Carteira Lightning - Apenas BOLT11 (invoice)
 /// Funções: Ver saldo, Enviar pagamento, Receber (gerar invoice)
@@ -3180,6 +3182,17 @@ class _WalletScreenState extends State<WalletScreen> {
                     fontSize: 13,
                   ),
                 ),
+                if (_btcPrice > 0)
+                  Text(
+                    AppLocalizations.of(context).tp(
+                      'wallet_amount_brl_approx',
+                      {'brl': (displayAmount / 100000000 * _btcPrice).toStringAsFixed(2)},
+                    ),
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.55),
+                      fontSize: 11,
+                    ),
+                  ),
                 Icon(
                   Icons.chevron_right,
                   color: Colors.white.withOpacity(0.3),
@@ -3396,6 +3409,17 @@ class _WalletScreenState extends State<WalletScreen> {
                               fontWeight: FontWeight.bold,
                             ),
                           ),
+                          if (_btcPrice > 0)
+                            Text(
+                              AppLocalizations.of(context).tp(
+                                'wallet_amount_brl_approx',
+                                {'brl': (detailAmount / 100000000 * _btcPrice).toStringAsFixed(2)},
+                              ),
+                              style: TextStyle(
+                                color: Colors.white.withOpacity(0.6),
+                                fontSize: 13,
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -3579,6 +3603,46 @@ class _WalletScreenState extends State<WalletScreen> {
                 
                 const SizedBox(height: 24),
                 
+                // Botão "Ver detalhes da ordem" — só quando há ordem correlacionada
+                if (correlatedOrder != null) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        Navigator.pop(context);
+                        final isProvider = correlatedOrder!.providerId == currentPubkey &&
+                            correlatedOrder!.userPubkey != currentPubkey;
+                        if (isProvider) {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => ProviderOrderDetailScreen(
+                                orderId: correlatedOrder!.id,
+                                providerId: currentPubkey ?? '',
+                              ),
+                            ),
+                          );
+                        } else {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => UserOrderDetailScreen(orderId: correlatedOrder!.id),
+                            ),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.receipt_long, size: 18),
+                      label: Text(AppLocalizations.of(context).t('wallet_view_order_details')),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFFF9800),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
                 // Botão de copiar tudo
                 SizedBox(
                   width: double.infinity,

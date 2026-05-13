@@ -22,7 +22,9 @@ import 'login_screen.dart';
 import 'settings_screen.dart';
 import 'nostr_conversations_screen.dart';
 import 'order_status_screen.dart';
+import 'notifications_inbox_screen.dart';
 import '../models/order.dart';
+import '../models/notification_item.dart';
 import '../services/chat_service.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -541,6 +543,48 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ],
       ),
       actions: [
+        // Notificacoes (inbox)
+        FutureBuilder<int>(
+          future: NotificationInbox.unreadCount(),
+          builder: (context, snap) {
+            final unread = snap.data ?? 0;
+            return Stack(
+              alignment: Alignment.center,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.notifications_none, color: Colors.white),
+                  tooltip: AppLocalizations.of(context).t('notifications_title'),
+                  onPressed: () async {
+                    await Navigator.pushNamed(context, '/notifications');
+                    if (mounted) setState(() {});
+                  },
+                ),
+                if (unread > 0)
+                  Positioned(
+                    right: 8,
+                    top: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF3B30),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                      child: Text(
+                        unread > 9 ? '9+' : '$unread',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
         // Carteira Lightning
         IconButton(
           icon: const Icon(Icons.account_balance_wallet, color: Colors.orange),
