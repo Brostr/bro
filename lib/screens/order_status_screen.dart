@@ -583,6 +583,18 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         // v490: Parar polling em estados FINAIS apenas se proof já foi carregado
         // Se proof ainda não chegou, continuar polling para buscar do relay
         if (status == 'completed' || status == 'cancelled' || status == 'liquidated') {
+          // v579: Always dismiss the "Processando confirmação..." loading
+          // snackbar when we observe a terminal status from background sync.
+          // Without this, if the local _handleConfirmPayment finished setState
+          // but the snackbar was queued/replaced or the screen rebuilt, the
+          // 120s loader could outlive its purpose.
+          if (_isConfirming) {
+            _isConfirming = false;
+          }
+          try {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+          } catch (_) {}
+
           final hasProof = order?.metadata?['proofImage'] != null &&
               (order!.metadata!['proofImage'] as String).isNotEmpty &&
               !(order.metadata!['proofImage'] as String).startsWith('[encrypted:');
@@ -4278,7 +4290,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
           ],
         ),
         backgroundColor: const Color(0xFFFF6B6B),
-        duration: Duration(seconds: 120), // v512: Match payment timeout
+        duration: Duration(seconds: 30), // v579: 30s is enough; we hide explicitly on success/failure/terminal-sync
       ),
     );
 

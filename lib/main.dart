@@ -32,6 +32,7 @@ import 'screens/relay_management_screen.dart';
 import 'screens/nostr_profile_screen.dart';
 import 'screens/nip06_backup_screen.dart';
 import 'screens/privacy_settings_screen.dart';
+import 'screens/diagnostics_screen.dart';
 import 'screens/wallet_screen.dart';
 import 'screens/marketplace_screen.dart';
 import 'screens/brix_screen.dart';
@@ -58,6 +59,7 @@ import 'services/brix_service.dart';
 import 'services/brix_relay_service.dart';
 import 'services/push_diag.dart';
 import 'services/secure_storage_service.dart';
+import 'services/background_billcode_relay.dart';
 import 'config.dart';
 import 'config/breez_config.dart';
 
@@ -74,6 +76,24 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   // The system (Android/iOS) shows the notification automatically — no local notification needed
   // This fixes background notification delivery on BOTH platforms (data-only was "best effort")
   if (message.data['type'] == 'order_update') {
+    final subtype = message.data['subtype']?.toString() ?? '';
+
+    // v574: 'accept_relay' is a SILENT push that wakes us so we can publish
+    // the NIP-44-encrypted billCode for the provider that just accepted —
+    // even if the app is killed. Non-fatal: if it fails, the foreground
+    // sync (`_sendEncryptedBillCodeForAcceptedOrders`) retries on next open
+    // AND plaintext billCode in kind 30078 keeps the order working for the
+    // provider regardless. Returns early so we don't fall through to
+    // notification dedup logic (no visible notification for accept_relay).
+    if (subtype == 'accept_relay') {
+      try {
+        await handleAcceptRelayInBackground(message.data);
+      } catch (e) {
+        broLog('[FCM-BG] accept_relay handler crashed: $e');
+      }
+      return;
+    }
+
     broLog('[FCM-BG] order_update received — system notification handles display');
 
     // v553: Marca a chave de dedup como ja exibida pelo sistema. Quando o
@@ -82,7 +102,7 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     // gravando a chave no set de notificadas antes que isso aconteca.
     try {
       final orderId = message.data['order_id']?.toString() ?? '';
-      final subtype = message.data['subtype']?.toString() ?? '';
+      final subtype2 = message.data['subtype']?.toString() ?? '';
       const subtypeToPayload = {
         'accepted': 'order_accepted',
         'awaiting_confirmation': 'payment_received',
@@ -93,7 +113,7 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         'liquidated': 'order_liquidated',
         'new_order': 'new_order',
       };
-      final prefix = subtypeToPayload[subtype] ?? subtype;
+      final prefix = subtypeToPayload[subtype2] ?? subtype2;
       if (orderId.isNotEmpty && prefix.isNotEmpty) {
         await NotificationService().markShown('$prefix:$orderId');
       }
@@ -849,6 +869,7 @@ class BroApp extends StatelessWidget {
               '/nostr-profile': (context) => const NostrProfileScreen(),
               '/nip06-backup': (context) => const Nip06BackupScreen(),
               '/privacy-settings': (context) => const PrivacySettingsScreen(),
+              '/diagnostics': (context) => const DiagnosticsScreen(),
               '/wallet': (context) => const WalletScreen(),
               '/marketplace': (context) => const MarketplaceScreen(),
               '/brix': (context) => const BrixScreen(),

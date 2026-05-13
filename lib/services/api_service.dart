@@ -1,7 +1,9 @@
 ﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'package:crypto/crypto.dart' as _crypto;
 import 'package:flutter/foundation.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/push_diag.dart';
 import 'package:dio/dio.dart';
@@ -33,6 +35,9 @@ class ApiService {
 
   /// v270: Expor Dio para que EscrowService possa reusar (com NIP-98 auth)
   Dio get dio => _dio;
+
+  String _sha256Hex(List<int> bytes) =>
+      _crypto.sha256.convert(bytes).toString();
 
   Future<void> init() async {
     // v536: SEMPRE usar AppConfig.defaultBackendUrl (vem de env.json no build).
@@ -72,16 +77,32 @@ class ApiService {
         final privateKey = _nostrService.privateKey;
         if (privateKey != null) {
           final publicKey = _nostrService.publicKey!;
-          
+
+          // v566: bind auth event to body via NIP-98 payload tag
+          final tags = <List<String>>[
+            ['u', '${options.baseUrl}${options.path}'],
+            ['method', options.method],
+          ];
+          final method = options.method.toUpperCase();
+          if (options.data != null && (method == 'POST' || method == 'PUT' || method == 'PATCH' || method == 'DELETE')) {
+            try {
+              String bodyStr;
+              if (options.data is String) {
+                bodyStr = options.data as String;
+              } else {
+                bodyStr = json.encode(options.data);
+              }
+              final hash = _sha256Hex(utf8.encode(bodyStr));
+              tags.add(['payload', hash]);
+            } catch (_) {/* if encoding fails, skip payload tag — server is lenient */}
+          }
+
           // Criar token JWT simplificado baseado em Nostr
           final authEvent = _nostrService.createEvent(
             privateKey: privateKey,
             kind: 22242, // NIP-98 HTTP Auth
             content: '',
-            tags: [
-              ['u', '${options.baseUrl}${options.path}'],
-              ['method', options.method],
-            ],
+            tags: tags,
           );
           
           // Enviar evento NIP-98 completo como base64 (não apenas o eventId)
@@ -896,13 +917,30 @@ class ApiService {
 
   // ===== PUSH NOTIFICATION ENDPOINTS =====
 
+  // v576: cached build number, populated lazily on first registerPushToken call
+  // so the server can warn users on outdated apps that may not handle the
+  // NIP-44-only billCode protocol (v575+).
+  static int? _cachedAppBuild;
+  Future<int?> _getAppBuild() async {
+    if (_cachedAppBuild != null) return _cachedAppBuild;
+    try {
+      final info = await PackageInfo.fromPlatform();
+      _cachedAppBuild = int.tryParse(info.buildNumber);
+    } catch (_) {
+      // Non-fatal: server tolerates missing app_build (treats as outdated)
+    }
+    return _cachedAppBuild;
+  }
+
   /// Register FCM token with the backend for order push notifications
   Future<bool> registerPushToken(String fcmToken, {bool? providerEnabled}) async {
     try {
       PushDiag.log('api: POST /push/register-token base=$_baseUrl');
+      final appBuild = await _getAppBuild();
       final response = await _dio.post('/push/register-token', data: {
         'fcm_token': fcmToken,
         if (providerEnabled != null) 'provider_enabled': providerEnabled,
+        if (appBuild != null) 'app_build': appBuild,
       });
       final ok = response.data?['ok'] == true;
       broLog('[PUSH] Backend token registered: $ok (push_enabled=${response.data?['push_enabled']})');

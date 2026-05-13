@@ -125,7 +125,7 @@ class PaymentMonitorService {
         if (isRecent &&
             payment['type'] == 'received' && 
             payment['amountSats'] != null &&
-            (payment['amountSats'] as int) >= expectedSats * 0.95) { // 5% margem
+            (payment['amountSats'] as int) >= expectedSats - 10) { // v565: tolância absoluta de 10 sats (era 5% — abusivo em valores altos)
           
           broLog('✅ Pagamento onchain $paymentId detectado!');
           callback(PaymentStatus.confirmed, payment);

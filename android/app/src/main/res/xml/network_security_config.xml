@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  v573: cleartext disabled globally + system trust anchors only.
+
+  CERTIFICATE PINNING WAS CONSIDERED AND REJECTED:
+  - We considered pinning bro-api.fly.dev / brix.fly.dev to Let's Encrypt
+    roots (ISRG Root X1 + X2). LE roots are valid 9-14 more years.
+  - REJECTION REASON: Fly.io controls cert issuance and could switch CA
+    at any time. If Fly ever moves away from LE (e.g., to ZeroSSL or
+    Cloudflare-issued), pinned builds would BRICK irreparably until
+    every user installs a hotfix. Coverage is impossible — some users
+    never update.
+  - For a payment app, brick risk > marginal MITM protection. We already
+    have HTTPS + HSTS + cleartextTrafficPermitted=false. The remaining
+    threat (rogue CA in device trust store) requires either targeted
+    malware or corporate proxy — both already low probability for our
+    Brazilian P2P Bitcoin user base.
+  - Future option: Trust-on-First-Use SPKI tracking in custom Dart code
+    that warns the user (rather than hard-fails) on certificate change.
+
+  This config remains because:
+  1. It locks the application to system trust anchors only (no user
+     CAs trusted), blocking custom-CA MITM via Settings > Security
+     install. (debug-overrides removed for release.)
+  2. Provides a clear hook for future TLS hardening.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

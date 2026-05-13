@@ -158,6 +158,39 @@ class NostrOrderService {
   static const int kindBroComplete = 30081;
   static const int kindBroProviderTier = 30082; // Tier do provedor
 
+  // v580 (Phase 2 / NIP-40): build an ["expiration", "<unix>"] tag so relays
+  // SHOULD drop events past this time. Reduces stale order pollution and
+  // makes accidental data exposure self-clean. Each kind has a distinct TTL:
+  //   - 30078 (order)  / 30079 (accept) → 7 days
+  //   - 30080 (update/billcode/proof)   → 30 days (disputes need a window)
+  //   - 30081 (complete)                → 30 days
+  // Some relays (Damus, primal, nos.lol) honor NIP-40, others ignore it. It
+  // is purely advisory: the events are still valid until expiration. Old
+  // clients without NIP-40 awareness simply ignore the tag.
+  static List<String> _expirationTag(int days) {
+    final unix = DateTime.now().add(Duration(days: days)).millisecondsSinceEpoch ~/ 1000;
+    return ['expiration', unix.toString()];
+  }
+
+  // v575: Buyer omits plaintext billCode from kind 30078 to keep PIX private
+  // from relay scrapers. The billCode is delivered to the accepter via
+  // NIP-44-encrypted kind 30080 (`billCode_nip44` field) AFTER the provider
+  // accepts (kind 30079). The background relay (v574) wakes the buyer's
+  // device via FCM so the encrypted publish happens even if the app is
+  // killed/locked, and the foreground sync
+  // (`_sendEncryptedBillCodeForAcceptedOrders`) re-tries on app open.
+  //
+  // Backward compatibility:
+  //   - NEW buyer (v575+) + NEW provider (v438+): NIP-44 path. ✓
+  //   - OLD buyer (pre-v575)              + any provider: plaintext path. ✓
+  //   - NEW buyer + ANCIENT provider (<v438): provider never sees billCode.
+  //     Acceptable: v438 shipped many builds ago, ancient providers are rare.
+  //
+  // The `billCodeProtocol` content field tells providers/buyers to expect
+  // NIP-44 delivery rather than waiting indefinitely for plaintext.
+  static const bool _omitPlaintextBillCode = true;
+  static const String _billCodeProtocolNip44 = 'nip44';
+
   // Tag para identificar ordens do app
   static const String broTag = 'bro-order';
   static const String broAppTag = 'bro-app';
@@ -190,13 +223,19 @@ class NostrOrderService {
       // TODO: Reativar quando provider-side tiver decrypt: _billCodeCrypto.encrypt(billCode)
       broLog('📡 _publishOrderRaw: orderId=${orderId.substring(0, 8)}, billType=$billType, billCode=${billCode.isNotEmpty ? "SET" : "EMPTY"}, encrypted=DISABLED');
       
+      // v575: omit plaintext billCode from kind 30078 when flag is on. The
+      // accepter receives it via NIP-44 (kind 30080) after accepting. We keep
+      // the billCode field present (empty string) for parser backward
+      // compatibility — old code does `content['billCode']?.toString() ?? ''`.
+      final publishedBillCode = _omitPlaintextBillCode ? '' : encryptedBillCode;
       final content = jsonEncode({
         'type': 'bro_order',
         'version': '1.0',
         'orderId': orderId,
         'userPubkey': keychain.public,
         'billType': billType,
-        'billCode': encryptedBillCode,
+        'billCode': publishedBillCode,
+        'billCodeProtocol': _omitPlaintextBillCode ? _billCodeProtocolNip44 : 'plaintext',
         'amount': amount,
         'btcAmount': btcAmount,
         'btcPrice': btcPrice,
@@ -217,6 +256,7 @@ class NostrOrderService {
           ['t', billType],
           ['amount', amount.toStringAsFixed(2)],
           ['status', 'pending'],
+          _expirationTag(7), // v580: NIP-40 — kind 30078 expires in 7d
         ],
         content: content,
         privkey: keychain.private,
@@ -289,6 +329,7 @@ class NostrOrderService {
         ['t', 'status-$newStatus'], // Tag pesquisável por status
         ['r', orderId], // CRÍTICO: Tag 'r' (reference) para busca por orderId nos relays
         ['orderId', orderId], // Tag customizada (não filtrável por relays, só para leitura)
+        _expirationTag(30), // v580: NIP-40 — status updates expire in 30d
       ];
       
       // v257: CORREÇÃO CRÍTICA — Garantir que AMBAS as partes (provedor E usuário)
@@ -384,6 +425,7 @@ class NostrOrderService {
         ['t', 'bro-republish-request'],
         ['r', orderId],
         ['p', customerPubkey],
+        _expirationTag(7), // v580: NIP-40 — republish requests expire in 7d
       ];
 
       final event = Event.from(
@@ -446,6 +488,10 @@ class NostrOrderService {
         ['t', 'bro-billcode'],
         ['r', orderId],
         ['p', providerPubkey],
+        // v581: NIP-40 expiration REMOVED from encrypted billcode. v580 had
+        // 7d expiration but relays sometimes failed to deliver expiration-
+        // tagged kind 30080 events to the provider, leaving the provider
+        // stuck on "Obtendo dados de pagamento...".
       ];
 
       final event = Event.from(
@@ -479,57 +525,67 @@ class NostrOrderService {
   /// 1. Ordens (kindBroOrder) onde tag #p = provedor
   /// 2. Eventos de aceitação (kindBroAccept) publicados pelo provedor
   /// 3. Eventos de comprovante (kindBroComplete) publicados pelo provedor
-  /// v390: Sequential relay fallback instead of all-relays-in-parallel (reduces 12+ WebSockets to 2-4)
+  /// v569: All relays in PARALLEL (was sequential w/ break-on-first-result).
+  /// Sequential design lost orders that existed only on relays 2/3 (relays
+  /// diverge when a publish fails to reach all of them) and added up to 16s
+  /// of latency in the worst case. Now: 3 relays × 2 queries = 6 WebSockets,
+  /// all racing with a 5s per-relay timeout. Cross-relay dedup via seenIds
+  /// guarantees no duplicates. The 15s status-update cache + Completer lock
+  /// (added in v126/v129) prevents the WebSocket fan-out that hurt before.
   Future<List<Map<String, dynamic>>> _fetchProviderOrdersRaw(String providerPubkey) async {
     final orders = <Map<String, dynamic>>[];
     final seenIds = <String>{};
     final orderIdsFromAccepts = <String>{};
 
-    // v390: Try relays SEQUENTIALLY — use first relay that returns results
-    // This reduces WebSocket connections from 12+ to 2 per sync
-    for (final relay in _relays.take(3)) {
+    // Query all relays in parallel with per-relay 5s timeout.
+    final relayTasks = _relays.take(3).map((relay) async {
       try {
-        // 2 parallel strategies per relay (reduced from 4)
         final results = await Future.wait([
           // 1. Ordens com tag #p do provedor
           _fetchFromRelay(relay, kinds: [kindBroOrder], tags: {'#p': [providerPubkey]}, limit: 100)
+            .timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[])
             .catchError((_) => <Map<String, dynamic>>[]),
           // 2. Eventos de aceitação/update/complete publicados por este provedor + disputas tagueadas
           _fetchFromRelay(relay, kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete], authors: [providerPubkey], limit: 200)
+            .timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[])
             .catchError((_) => <Map<String, dynamic>>[]),
         ]);
-        
-        for (final order in results[0]) {
-          final id = order['id'];
-          if (!seenIds.contains(id)) {
-            seenIds.add(id);
-            orders.add(order);
-          }
+        return results;
+      } catch (_) {
+        return <List<Map<String, dynamic>>>[<Map<String, dynamic>>[], <Map<String, dynamic>>[]];
+      }
+    }).toList();
+
+    final perRelay = await Future.wait(relayTasks);
+
+    // Merge results from ALL relays (cross-relay dedup via seenIds).
+    for (final relayResults in perRelay) {
+      // 1. Ordens originais do provedor
+      for (final order in relayResults[0]) {
+        final id = order['id'];
+        if (id != null && !seenIds.contains(id)) {
+          seenIds.add(id);
+          orders.add(order);
         }
-        
-        // Extrair orderIds dos eventos de aceitação/update
-        for (final event in results[1]) {
-          try {
-            final content = event['parsedContent'] ?? jsonDecode(event['content']);
-            final eventType = content['type'] as String?;
-            // v519: WHITELIST — only events that prove THIS pubkey is the real provider of the
-            // order should contribute. This blocks ghost orders from dispute resolutions,
-            // admin reimbursements, mediator messages, evidence, etc., which are authored by
-            // admin but don't mean admin is the provider.
-            const providerEventTypes = {'bro_accept', 'bro_complete'};
-            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
-                (eventType == 'bro_order_update' &&
-                    (content['providerId'] as String?) == providerPubkey);
-            if (!isProviderEvidence) continue;
-            final orderId = content['orderId'] as String?;
-            if (orderId != null) orderIdsFromAccepts.add(orderId);
-          } catch (_) {}
-        }
-        
-        // If this relay returned data, skip remaining relays
-        if (results[0].isNotEmpty || results[1].isNotEmpty) break;
-      } catch (e) {
-        // Relay failed, try next one
+      }
+
+      // 2. Extrair orderIds dos eventos de aceitação/update
+      for (final event in relayResults[1]) {
+        try {
+          final content = event['parsedContent'] ?? jsonDecode(event['content']);
+          final eventType = content['type'] as String?;
+          // v519: WHITELIST — only events that prove THIS pubkey is the real provider of the
+          // order should contribute. This blocks ghost orders from dispute resolutions,
+          // admin reimbursements, mediator messages, evidence, etc., which are authored by
+          // admin but don't mean admin is the provider.
+          const providerEventTypes = {'bro_accept', 'bro_complete'};
+          final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+              (eventType == 'bro_order_update' &&
+                  (content['providerId'] as String?) == providerPubkey);
+          if (!isProviderEvidence) continue;
+          final orderId = content['orderId'] as String?;
+          if (orderId != null) orderIdsFromAccepts.add(orderId);
+        } catch (_) {}
       }
     }
     
@@ -565,32 +621,34 @@ class NostrOrderService {
   /// bro_order_update whose content.providerId matches).
   /// Used to purge ghost provider orders from local cache when the same
   /// device has also acted as admin/mediator for other orders.
+  /// v569: Parallel relay fetch (was sequential w/ break-on-first). Sequential
+  /// pattern could miss orderIds that exist only on relays 2/3, leading to
+  /// false-positive ghost purges. Parallel + merge fixes that.
   Future<Set<String>> fetchAcceptedOrderIdsForProvider(String providerPubkey) async {
     final acceptedIds = <String>{};
-    for (final relay in _relays.take(3)) {
-      try {
-        final events = await _fetchFromRelay(
-          relay,
-          kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
-          authors: [providerPubkey],
-          limit: 300,
-        ).catchError((_) => <Map<String, dynamic>>[]);
-        for (final event in events) {
-          try {
-            final content = event['parsedContent'] ?? jsonDecode(event['content']);
-            final eventType = content['type'] as String?;
-            const providerEventTypes = {'bro_accept', 'bro_complete'};
-            final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
-                (eventType == 'bro_order_update' &&
-                    (content['providerId'] as String?) == providerPubkey);
-            if (!isProviderEvidence) continue;
-            final orderId = content['orderId'] as String?;
-            if (orderId != null) acceptedIds.add(orderId);
-          } catch (_) {}
-        }
-        if (events.isNotEmpty) break;
-      } catch (_) {
-        // try next relay
+    final relayTasks = _relays.take(3).map((relay) {
+      return _fetchFromRelay(
+        relay,
+        kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
+        authors: [providerPubkey],
+        limit: 300,
+      ).timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[])
+       .catchError((_) => <Map<String, dynamic>>[]);
+    }).toList();
+    final perRelay = await Future.wait(relayTasks);
+    for (final events in perRelay) {
+      for (final event in events) {
+        try {
+          final content = event['parsedContent'] ?? jsonDecode(event['content']);
+          final eventType = content['type'] as String?;
+          const providerEventTypes = {'bro_accept', 'bro_complete'};
+          final bool isProviderEvidence = providerEventTypes.contains(eventType) ||
+              (eventType == 'bro_order_update' &&
+                  (content['providerId'] as String?) == providerPubkey);
+          if (!isProviderEvidence) continue;
+          final orderId = content['orderId'] as String?;
+          if (orderId != null) acceptedIds.add(orderId);
+        } catch (_) {}
       }
     }
     return acceptedIds;
@@ -978,26 +1036,29 @@ class NostrOrderService {
       }
       
       // CRÍTICO: Determinar o userPubkey correto
-      // Preferência: content.userPubkey (mais explícito)
-      // Fallback: event.pubkey (seguro pois assinatura Nostr garante autenticidade do autor)
+      // event.pubkey é AUTORITATIVO (assinatura Nostr verificada antes em _fetchFromRelay)
+      // content.userPubkey é texto livre — pode ser spoofado.
+      // v565: Para kind 30078 (criação de ordem), o signer DEVE ser o dono.
+      // Se content.userPubkey estiver presente e diferente do signer, REJEITAR (spoofing).
+      final eventPubkey = event['pubkey'] as String?;
       final contentUserPubkey = content['userPubkey'] as String?;
-      
-      String? originalUserPubkey;
-      if (contentUserPubkey != null && contentUserPubkey.isNotEmpty) {
-        // Ordem nova com userPubkey no content - CONFIÁVEL
-        originalUserPubkey = contentUserPubkey;
-      } else {
-        // Ordem legada (v1.0) sem userPubkey no content
-        // SEGURO usar event.pubkey porque a assinatura criptográfica (sig)
-        // garante que o pubkey é do autor original — relays não podem falsificar
-        final eventPubkey = event['pubkey'] as String?;
-        if (eventPubkey != null && eventPubkey.isNotEmpty) {
-          originalUserPubkey = eventPubkey;
-          broLog('ℹ️ Ordem legada: usando event.pubkey como userPubkey');
-        } else {
-          return null; // Sem nenhuma forma de identificar o dono
-        }
+
+      if (eventPubkey == null || eventPubkey.isEmpty) {
+        return null; // Sem signer não há como identificar o dono
       }
+
+      if (contentUserPubkey != null &&
+          contentUserPubkey.isNotEmpty &&
+          contentUserPubkey != eventPubkey) {
+        broLog('🚫 [SECURITY] eventToOrder: spoofed kind 30078 rejeitado — '
+            'signer=${eventPubkey.substring(0, 8)} '
+            'claim=${contentUserPubkey.substring(0, 8)} '
+            'orderId=${orderId.toString().substring(0, 8)}');
+        return null;
+      }
+
+      // Em ambos os casos válidos (campo presente == signer, ou ausente/legado), o dono é o signer
+      final String originalUserPubkey = eventPubkey;
       
       return Order(
         id: orderId,
@@ -1090,9 +1151,20 @@ class NostrOrderService {
           final eventOrderId = content['orderId'] as String?;
           
           if (eventOrderId == orderId) {
-            final contentUserPubkey = content['userPubkey'] as String? ?? event['pubkey'] as String?;
-            if (contentUserPubkey == null || contentUserPubkey.isEmpty) continue;
-            
+            // v565 SECURITY: signer (event.pubkey, assinatura verificada) é autoritativo.
+            // Se content.userPubkey existe e diverge do signer, é spoofing — pular.
+            final eventPubkey = event['pubkey'] as String?;
+            if (eventPubkey == null || eventPubkey.isEmpty) continue;
+            final claimedUserPubkey = content['userPubkey'] as String?;
+            if (claimedUserPubkey != null &&
+                claimedUserPubkey.isNotEmpty &&
+                claimedUserPubkey != eventPubkey) {
+              broLog('🚫 [SECURITY] _fetchOrderFromRelay: spoofed kind 30078 ignorado — '
+                  'signer=${eventPubkey.substring(0, 8)} claim=${claimedUserPubkey.substring(0, 8)}');
+              continue;
+            }
+            final String contentUserPubkey = eventPubkey;
+
             return {
               'id': orderId,
               'eventId': event['id'],
@@ -1118,8 +1190,18 @@ class NostrOrderService {
       if (allEvents.isNotEmpty) {
         final event = allEvents.first; // Já está ordenado — mais recente primeiro
         final content = event['parsedContent'] ?? jsonDecode(event['content']);
-        final fallbackUserPubkey = content['userPubkey'] as String? ?? event['pubkey'] as String?;
-        if (fallbackUserPubkey == null || fallbackUserPubkey.isEmpty) return null;
+        // v565 SECURITY: signer (event.pubkey) é autoritativo. Rejeitar spoofing.
+        final eventPubkey = event['pubkey'] as String?;
+        if (eventPubkey == null || eventPubkey.isEmpty) return null;
+        final claimedUserPubkey = content['userPubkey'] as String?;
+        if (claimedUserPubkey != null &&
+            claimedUserPubkey.isNotEmpty &&
+            claimedUserPubkey != eventPubkey) {
+          broLog('🚫 [SECURITY] _fetchOrderFromRelay fallback: spoofed kind 30078 ignorado — '
+              'signer=${eventPubkey.substring(0, 8)} claim=${claimedUserPubkey.substring(0, 8)}');
+          return null;
+        }
+        final String fallbackUserPubkey = eventPubkey;
         
         return {
           'id': content['orderId'] ?? orderId,
@@ -1193,11 +1275,15 @@ class NostrOrderService {
   /// Retorna um Map com os dados do evento COMPLETE incluindo providerInvoice
   Future<Map<String, dynamic>?> fetchOrderCompleteEvent(String orderId) async {
     
-    // PERFORMANCE: Buscar em todos os relays EM PARALELO
-    // v519: cada relay retorna (data, timestamp) para que possamos pegar o mais recente
-    // entre TODOS os relays, não apenas o primeiro que responder.
+    // v584: ANTES buscava só em `_relays.take(3)`. Isso causou o bug do
+    // leandrogehlen (order 92a2fdeb): o complete só foi aceito por 1 relay
+    // (damus.io) por causa do tamanho (88KB). Se o cliente não conseguia
+    // chegar nele, o autopay nunca rodava. Agora consultamos TODOS os
+    // relays principais + os de fallback pra maximizar a chance de encontrar
+    // o providerInvoice (que também é replicado via invoice_refresh leve).
+    final allRelays = <String>[..._relays, ..._fallbackRelays];
     final results = await Future.wait(
-      _relays.take(3).map((relay) async {
+      allRelays.map((relay) async {
         try {
           // Buscar todas estratégias em paralelo (complete + invoice_refresh)
           final fetches = await Future.wait([
@@ -1287,6 +1373,7 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-invoice-refresh'],
         ['orderId', orderId],
+        _expirationTag(7), // v580: NIP-40 — invoice refresh expires in 7d
       ];
 
       final event = Event.from(
@@ -1362,7 +1449,10 @@ class NostrOrderService {
         'orderId': order.id,
         'userPubkey': keychain.public,
         'billType': order.billType,
-        'billCode': order.billCode, // v437: BRO1 encryption DESATIVADA até todos dispositivos atualizarem
+        // v575: omit plaintext on republish too. Buyer always has the billCode
+        // locally; the accepter gets it via NIP-44 (kind 30080).
+        'billCode': _omitPlaintextBillCode ? '' : order.billCode,
+        'billCodeProtocol': _omitPlaintextBillCode ? _billCodeProtocolNip44 : 'plaintext',
         'amount': order.amount,
         'btcAmount': order.btcAmount,
         'btcPrice': order.btcPrice,
@@ -1384,6 +1474,7 @@ class NostrOrderService {
           ['t', order.billType],
           ['amount', order.amount.toStringAsFixed(2)],
           ['status', newStatus],
+          _expirationTag(7), // v580: NIP-40 — republished order expires in 7d
         ],
         content: content,
         privkey: keychain.private,
@@ -1426,6 +1517,10 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-accept'],
         ['orderId', order.id],
+        // v581: NIP-40 expiration REMOVED from accept events. v580 added it
+        // but the watchtower/relays sometimes failed to forward expiration-
+        // tagged accept events, breaking the billcode delivery push chain.
+        // Short-lived (kind 30079) accept events don't need expiration anyway.
       ];
       // Só adicionar tag 'e' se eventId for válido (64 chars hex)
       if (order.eventId != null && order.eventId!.length == 64) {
@@ -1574,6 +1669,7 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-complete'],
         ['orderId', order.id],
+        _expirationTag(30), // v580: NIP-40 — complete event expires in 30d
       ];
       // Só adicionar tag 'e' se eventId for válido (64 chars hex)
       if (order.eventId != null && order.eventId!.length == 64) {
@@ -1619,6 +1715,30 @@ class NostrOrderService {
         _addToBlocklist({order.id});
         _statusUpdatesCache = null;
         _statusUpdatesCacheTime = null;
+      }
+
+      // v584: bro_complete inclui proofImage cifrado e pode ficar grande (~80KB+),
+      // o que faz alguns relays rejeitarem silenciosamente. Publicamos o
+      // providerInvoice em UM EVENTO SEPARADO LEVE (~500 bytes) em paralelo,
+      // pra garantir que o cliente sempre recebe o invoice mesmo se o complete
+      // for descartado por size limit em algum relay.
+      // Era exatamente o bug do leandrogehlen (order 92a2fdeb): complete só
+      // aceito em 1 de 6 relays; cliente em outros relays nunca viu o invoice
+      // e nunca disparou autopay.
+      if (anySuccess && providerInvoice != null && providerInvoice.isNotEmpty &&
+          (order.userPubkey ?? '').isNotEmpty) {
+        unawaited(
+          publishInvoiceRefresh(
+            orderId: order.id,
+            providerPrivateKey: providerPrivateKey,
+            providerInvoice: providerInvoice,
+            orderUserPubkey: order.userPubkey!,
+          ).then((ok) {
+            broLog('[completeOrderOnNostr] invoice_refresh paralelo: $ok');
+          }).catchError((e) {
+            broLog('[completeOrderOnNostr] erro invoice_refresh paralelo: $e');
+          }),
+        );
       }
 
       return anySuccess;
@@ -2091,16 +2211,16 @@ class NostrOrderService {
     final updates = <String, Map<String, dynamic>>{}; // orderId -> latest update
     
     
-    // v507: Query ALL relays sequentially, deduplicating across relays
-    // v500 fix was supposed to remove the early-exit break but it remained
+    // v568: Query ALL relays IN PARALLEL (não mais sequencial). Antes esta
+    // operação tomava até 24s (3 relays × 8s) no pior caso, dominando a
+    // sincronização do modo provedor. Paralelizando, vai a no máx ~5s.
     final allEvents = <Map<String, dynamic>>[];
-    final seenIds = <String>{}; // v507: moved outside loop for cross-relay dedup
+    final seenIds = <String>{};
     final fourteenDaysAgo = DateTime.now().subtract(const Duration(days: 14));
     final statusSince = (fourteenDaysAgo.millisecondsSinceEpoch / 1000).floor();
-    
-    for (final relay in _relays) {
+
+    final relayTasks = _relays.map((relay) async {
       try {
-        // 2 strategies per relay
         final results = await Future.wait([
           _fetchFromRelayWithSince(
             relay,
@@ -2108,32 +2228,34 @@ class NostrOrderService {
             tags: {'#t': [broTag]},
             since: statusSince,
             limit: 500,
-          ).timeout(const Duration(seconds: 8), onTimeout: () => <Map<String, dynamic>>[]),
+          ).timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[]),
           _fetchFromRelayWithSince(
             relay,
             kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete],
             since: statusSince,
             limit: 500,
-          ).timeout(const Duration(seconds: 8), onTimeout: () => <Map<String, dynamic>>[]),
+          ).timeout(const Duration(seconds: 5), onTimeout: () => <Map<String, dynamic>>[]),
         ]);
-        
-        // Combinar and deduplicar across ALL relays
-        for (final eventList in results) {
-          for (final e in eventList) {
-            final id = e['id'];
-            if (id != null && !seenIds.contains(id)) {
-              seenIds.add(id);
-              allEvents.add(e);
-            }
-          }
+        final combined = <Map<String, dynamic>>[];
+        for (final list in results) { combined.addAll(list); }
+        return combined;
+      } catch (_) {
+        return <Map<String, dynamic>>[];
+      }
+    }).toList();
+
+    final perRelay = await Future.wait(relayTasks);
+    for (final relayEvents in perRelay) {
+      for (final e in relayEvents) {
+        final id = e['id'];
+        if (id != null && !seenIds.contains(id)) {
+          seenIds.add(id);
+          allEvents.add(e);
         }
-        // v507: NO break — query all relays to avoid missing events
-      } catch (e) {
-        // Relay failed, try next
       }
     }
-    
-    broLog('📋 _fetchAllOrderStatusUpdates: ${allEvents.length} eventos (sequential relay)');
+
+    broLog('📋 _fetchAllOrderStatusUpdates: ${allEvents.length} eventos (parallel relays)');
     
     // v406: CORREÇÃO DEFINITIVA — Acumular dados de comprovante de TODOS os eventos
     // ANTES de processar, para que proof nunca se perca por ordem de processamento.

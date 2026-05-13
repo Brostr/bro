@@ -37,7 +37,38 @@ class NotificationService {
       settings,
       onDidReceiveNotificationResponse: _onNotificationTapped,
     );
-    
+
+    // v573: explicitly create the FCM default channel so push notifications
+    // sent by the backend (channelId=bro_app_channel) render even on cold
+    // start before any local notification has been shown. Without this, FCM
+    // pushes were dropped silently on first run / fresh install.
+    try {
+      final androidImpl = _notifications.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImpl != null) {
+        await androidImpl.createNotificationChannel(
+          const AndroidNotificationChannel(
+            'bro_app_channel',
+            'Bro App',
+            description: 'Notificacoes do Bro App',
+            importance: Importance.high,
+            playSound: true,
+          ),
+        );
+        await androidImpl.createNotificationChannel(
+          const AndroidNotificationChannel(
+            'bro_orders_rt',
+            'Order Updates',
+            description: 'Atualizacoes de ordens em tempo real',
+            importance: Importance.high,
+            playSound: true,
+          ),
+        );
+      }
+    } catch (e) {
+      broLog('⚠️ createNotificationChannel falhou: $e');
+    }
+
     _isInitialized = true;
     broLog('🔔 NotificationService inicializado');
   }

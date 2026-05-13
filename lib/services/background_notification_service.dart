@@ -1,5 +1,6 @@
 ﻿import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show Color;
 import 'package:firebase_core/firebase_core.dart';
@@ -12,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/order_reminder_service.dart';
+import 'package:bro_app/services/orders_storage.dart';
 import 'package:workmanager/workmanager.dart';
 
 /// v262: Servico de notificacoes em background
@@ -516,10 +518,16 @@ Future<void> _refreshFcmToken() async {
       return;
     }
 
-    // 4. Criar NIP-98 auth header (kind 27235)
+    // 4. Criar NIP-98 auth header (kind 27235) com payload tag (v566)
+    final brixBody = jsonEncode({'fcm_token': fcmToken});
+    final brixPayloadHash = crypto.sha256.convert(utf8.encode(brixBody)).toString();
     final nip98Event = Event.from(
       kind: 27235,
-      tags: [['u', url], ['method', 'POST']],
+      tags: [
+        ['u', url],
+        ['method', 'POST'],
+        ['payload', brixPayloadHash],
+      ],
       content: '',
       privkey: privateKey,
     );
@@ -541,7 +549,7 @@ Future<void> _refreshFcmToken() async {
         'Content-Type': 'application/json',
         'Authorization': authHeader,
       },
-      body: jsonEncode({'fcm_token': fcmToken}),
+      body: brixBody,
     ).timeout(const Duration(seconds: 10));
 
     if (response.statusCode == 200) {
@@ -557,7 +565,7 @@ Future<void> _refreshFcmToken() async {
             'Content-Type': 'application/json',
             'Authorization': authHeader,
           },
-          body: jsonEncode({'fcm_token': fcmToken}),
+          body: brixBody,
         ).timeout(const Duration(seconds: 10));
         broLog('[BRO-BG-FCM] BRIX retry: ${retryResp.statusCode == 200 ? "OK" : "FAIL ${retryResp.statusCode}"}');
       } catch (e2) {
@@ -572,9 +580,15 @@ Future<void> _refreshFcmToken() async {
         broLog('[BRO-BG-FCM] REJECTED insecure backend URL: $backendUrl');
         return;
       }
+      final backendBody = jsonEncode({'fcm_token': fcmToken});
+      final backendPayloadHash = crypto.sha256.convert(utf8.encode(backendBody)).toString();
       final backendNip98 = Event.from(
         kind: 27235,
-        tags: [['u', backendUrl], ['method', 'POST']],
+        tags: [
+          ['u', backendUrl],
+          ['method', 'POST'],
+          ['payload', backendPayloadHash],
+        ],
         content: '',
         privkey: privateKey,
       );
@@ -595,7 +609,7 @@ Future<void> _refreshFcmToken() async {
           'Content-Type': 'application/json',
           'Authorization': backendAuth,
         },
-        body: jsonEncode({'fcm_token': fcmToken}),
+        body: backendBody,
       ).timeout(const Duration(seconds: 10));
 
       if (backendResp.statusCode == 200) {
@@ -678,8 +692,8 @@ Future<void> _checkAutoLiquidationBackground() async {
     
     // 3. Ler ordens do SharedPreferences
     final prefs = await SharedPreferences.getInstance();
-    final ordersKey = 'orders_$userPubkey';
-    final ordersJson = prefs.getString(ordersKey);
+    // v578: read via OrdersStorage (transparently decrypts).
+    final ordersJson = await OrdersStorage.read(prefs, userPubkey);
     if (ordersJson == null || ordersJson.isEmpty) {
       broLog('[BRO-BG-LIQ] Sem ordens locais');
       return;
@@ -746,7 +760,29 @@ Future<void> _checkAutoLiquidationBackground() async {
     for (final order in expiredOrders) {
       final orderId = order['id'] as String;
       final orderUserPubkey = order['userPubkey'] as String? ?? '';
-      
+
+      // v569b: SAFETY GUARD — Before publishing liquidation, query Nostr for
+      // the current canonical status of this order. If the order is already
+      // in a terminal/locked state (liquidated, completed, cancelled, disputed)
+      // we MUST NOT re-publish 'liquidated', otherwise:
+      //   - watchtower re-pushes auto-liquidation notifications periodically
+      //   - the local cache may be stale (status='awaiting_confirmation')
+      //     because the app hasn't been opened to sync since the dispute.
+      // Mark as done either way so we don't retry every 15min.
+      try {
+        final terminalStatus = await _fetchTerminalStatusFromNostr(orderId);
+        if (terminalStatus != null) {
+          broLog('[BRO-BG-LIQ] ⏭️  ${orderId.substring(0, 8)} já está $terminalStatus no Nostr — pulando');
+          doneIds.add(orderId);
+          // Reflect remote status locally so future bg runs and UI agree.
+          order['status'] = terminalStatus;
+          continue;
+        }
+      } catch (e) {
+        broLog('[BRO-BG-LIQ] ⚠️ Falha ao verificar status remoto de ${orderId.substring(0, 8)}: $e — abortando publish para evitar duplicata');
+        continue; // Conservative: don't publish if we can't verify.
+      }
+
       try {
         final success = await _publishAutoLiquidation(
           privateKey: privateKey,
@@ -774,16 +810,21 @@ Future<void> _checkAutoLiquidationBackground() async {
     }
     
     // 8. Salvar ordens atualizadas e IDs processados
-    if (successCount > 0) {
-      await prefs.setString(ordersKey, jsonEncode(ordersList));
-      
+    // v569b: Persist doneIds even when nothing was published, to skip
+    // already-terminal orders on subsequent runs.
+    if (doneIds.isNotEmpty) {
       // Manter apenas ultimos 200 IDs
       final recentDone = doneIds.toList();
       if (recentDone.length > 200) {
         recentDone.removeRange(0, recentDone.length - 200);
       }
       await prefs.setString(_bgAutoLiqKey, jsonEncode(recentDone));
-      
+    }
+
+    if (successCount > 0) {
+      // v578: persist via OrdersStorage so the rewrite stays encrypted.
+      await OrdersStorage.write(prefs, userPubkey, jsonEncode(ordersList));
+
       // 9. Notificacao local
       await _initNotifications();
       await _bgNotifications?.show(
@@ -833,7 +874,8 @@ Future<void> _checkOrderRemindersBackground() async {
     if (userPubkey == null || userPubkey.isEmpty) return;
 
     final prefs = await SharedPreferences.getInstance();
-    final ordersJson = prefs.getString('orders_$userPubkey');
+    // v578: read via OrdersStorage (transparently decrypts).
+    final ordersJson = await OrdersStorage.read(prefs, userPubkey);
     if (ordersJson == null || ordersJson.isEmpty) return;
 
     final rawList = jsonDecode(ordersJson);
@@ -850,6 +892,73 @@ Future<void> _checkOrderRemindersBackground() async {
   } catch (e) {
     broLog('[BRO-BG-REMINDER] Erro: $e');
   }
+}
+
+/// v569b: Verifica no Nostr se uma ordem já está em estado terminal
+/// (liquidated, completed, cancelled, disputed). Retorna o status terminal
+/// encontrado, ou null se nenhum evento terminal foi encontrado.
+///
+/// Usado pelo bg isolate ANTES de publicar auto-liquidação para evitar
+/// re-publicar quando a ordem já foi disputada/concluída por outro caminho.
+/// Cache local pode estar stale se o app não foi aberto desde então.
+Future<String?> _fetchTerminalStatusFromNostr(String orderId) async {
+  const terminalStatuses = {'liquidated', 'completed', 'cancelled', 'disputed'};
+  for (final relay in _relays.take(3)) {
+    try {
+      final channel = WebSocketChannel.connect(Uri.parse(relay));
+      try {
+        await channel.ready.timeout(const Duration(seconds: 3));
+      } catch (_) {
+        try { channel.sink.close(); } catch (_) {}
+        continue;
+      }
+
+      final subId = 'bg-tstatus-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}';
+      // Query para eventos kind 30080/30081 desta orderId.
+      final filter = {
+        'kinds': [_kindBroPaymentProof, _kindBroComplete],
+        '#orderId': [orderId],
+        'limit': 30,
+      };
+      channel.sink.add(jsonEncode(['REQ', subId, filter]));
+
+      String? foundStatus;
+      try {
+        await for (final msg in channel.stream.timeout(
+          const Duration(seconds: 4),
+          onTimeout: (sink) => sink.close(),
+        )) {
+          try {
+            final response = jsonDecode(msg.toString());
+            if (response is! List || response.isEmpty) continue;
+            if (response[0] == 'EOSE') break;
+            if (response[0] != 'EVENT' || response.length < 3) continue;
+            final eventData = response[2];
+            if (eventData is! Map) continue;
+            final contentRaw = eventData['content'];
+            if (contentRaw is! String) continue;
+            try {
+              final content = jsonDecode(contentRaw);
+              if (content is! Map) continue;
+              final status = content['status'] as String?;
+              if (status != null && terminalStatuses.contains(status)) {
+                foundStatus = status;
+                break;
+              }
+            } catch (_) {}
+          } catch (_) {}
+        }
+      } catch (_) {}
+
+      try { channel.sink.add(jsonEncode(['CLOSE', subId])); } catch (_) {}
+      try { channel.sink.close(); } catch (_) {}
+
+      if (foundStatus != null) return foundStatus;
+    } catch (_) {
+      // tenta próximo relay
+    }
+  }
+  return null;
 }
 
 /// Publica evento Nostr kind 30080 com status 'liquidated'

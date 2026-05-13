@@ -11,6 +11,7 @@ import '../services/nostr_order_service.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
 import '../services/order_reminder_service.dart';
+import '../services/orders_storage.dart';
 import '../models/order.dart';
 import '../config.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -528,6 +529,11 @@ class OrderProvider with ChangeNotifier {
   /// Runs both on local load and after Nostr sync to prevent re-addition.
   void _removeGhostProviderOrders(String userPubkey) {
     final before = _orders.length;
+    final now = DateTime.now();
+    // v566: Janela de tolerância para ordens recém-aceitas (sem invoice ainda).
+    // Provedor pode acabar de aceitar e ainda não ter recebido invoice do user
+    // — isso NÃO é uma ghost order, é uma legítima em propagação.
+    const recentGrace = Duration(minutes: 30);
     _orders = _orders.where((order) {
       final isMeAsProvider = order.providerId == userPubkey;
       final someoneElseIsCustomer = order.userPubkey != null &&
@@ -537,6 +543,16 @@ class OrderProvider with ChangeNotifier {
       final hasProof = (order.metadata?['proofImage'] as String?)?.isNotEmpty == true ||
           (order.metadata?['paymentProof'] as String?)?.isNotEmpty == true;
       if (isMeAsProvider && someoneElseIsCustomer && !hasProviderInvoice && !hasProof) {
+        // v566: Tolerância para aceitações recentes
+        final acceptedAt = order.acceptedAt;
+        if (acceptedAt != null && now.difference(acceptedAt) < recentGrace) {
+          broLog('⏳ Ghost-check (invoice): mantendo ordem ${order.id.substring(0, 8)} aceita há ${now.difference(acceptedAt).inSeconds}s');
+          return true;
+        }
+        if (acceptedAt == null && now.difference(order.createdAt) < recentGrace) {
+          broLog('⏳ Ghost-check (invoice): mantendo ordem ${order.id.substring(0, 8)} criada há ${now.difference(order.createdAt).inSeconds}s');
+          return true;
+        }
         broLog('🧹 Ghost order removida (providerId=me sem invoice/proof, status ${order.status}): ${order.id.substring(0, 8)}');
         return false;
       }
@@ -563,12 +579,28 @@ class OrderProvider with ChangeNotifier {
           .timeout(const Duration(seconds: 10), onTimeout: () => <String>{});
       if (acceptedIds.isEmpty) return; // can't prove anything, don't touch cache
       final before = _orders.length;
+      // v566: Tolerância de propagação Nostr — não remover ordens aceitas
+      // recentemente (< 15 min). Sem isso, o relay pode ainda não ter
+      // indexado o bro_accept do provedor e removeríamos a ordem legítima.
+      final now = DateTime.now();
+      const propagationGrace = Duration(minutes: 15);
       _orders = _orders.where((order) {
         final isMeAsProvider = order.providerId == userPubkey;
         final someoneElseIsCustomer = order.userPubkey != null &&
             order.userPubkey!.isNotEmpty &&
             order.userPubkey != userPubkey;
         if (isMeAsProvider && someoneElseIsCustomer && !acceptedIds.contains(order.id)) {
+          // Janela de tolerância: aceita há pouco tempo? Manter.
+          final acceptedAt = order.acceptedAt;
+          if (acceptedAt != null && now.difference(acceptedAt) < propagationGrace) {
+            broLog('⏳ Ghost-check: mantendo ordem ${order.id.substring(0, 8)} aceita há ${now.difference(acceptedAt).inSeconds}s (propagação Nostr)');
+            return true;
+          }
+          // v566: Sem acceptedAt mas createdAt recente também merece tolerância
+          if (acceptedAt == null && now.difference(order.createdAt) < propagationGrace) {
+            broLog('⏳ Ghost-check: mantendo ordem ${order.id.substring(0, 8)} criada há ${now.difference(order.createdAt).inSeconds}s (sem acceptedAt, propagação Nostr)');
+            return true;
+          }
           broLog('🧹 Ghost order removida via Nostr cross-check (sem bro_accept meu): ${order.id.substring(0, 8)}');
           return false;
         }
@@ -623,7 +655,9 @@ class OrderProvider with ChangeNotifier {
     
     try {
       final prefs = await SharedPreferences.getInstance();
-      final ordersJson = prefs.getString(_ordersKey);
+      // v578: read via OrdersStorage (decrypts encrypted blobs, passes
+      // through legacy plaintext for one-time migration on next save).
+      final ordersJson = await OrdersStorage.read(prefs, _currentUserPubkey!);
       
       if (ordersJson != null) {
         final List<dynamic> ordersList = json.decode(ordersJson);
@@ -855,7 +889,8 @@ class OrderProvider with ChangeNotifier {
       
       final prefs = await SharedPreferences.getInstance();
       final ordersJson = json.encode(userOrders.map((o) => o.toJson()).toList());
-      await prefs.setString(_ordersKey, ordersJson);
+      // v578: write encrypted-at-rest via OrdersStorage.
+      await OrdersStorage.write(prefs, _currentUserPubkey!, ordersJson);
       
       // Log de cada ordem salva
       for (var order in userOrders) {
@@ -889,7 +924,8 @@ class OrderProvider with ChangeNotifier {
       
       final prefs = await SharedPreferences.getInstance();
       final ordersJson = json.encode(userOrders.map((o) => o.toJson()).toList());
-      await prefs.setString(_ordersKey, ordersJson);
+      // v578: write encrypted-at-rest via OrdersStorage.
+      await OrdersStorage.write(prefs, _currentUserPubkey!, ordersJson);
       
       // PROTE�?�?��?�?O: Atualizar cache local para proteger contra regress�?£o de status
       for (final order in userOrders) {
@@ -2240,8 +2276,44 @@ class OrderProvider with ChangeNotifier {
 
       broLog('ðŸ�?�µ [acceptOrderAsProvider] Resultado da publica�?§�?£o: $success');
 
-      if (!success) {
-        _error = 'Falha ao publicar aceita�?§�?£o no Nostr';
+      // v575: VERIFY-AFTER-PUBLISH. Relays under load (Damus rate limits, NIP-98
+      // verification stalls) sometimes accept and store the event but fail to
+      // ACK within our 15s websocket timeout, causing acceptOrderOnNostr to
+      // return false even though the watchtower already saw the event and
+      // dispatched the 'accepted' push to the buyer. Without this re-check,
+      // the user sees "Falha ao publicar" and retries — second attempt
+      // creates a duplicate accept (or reuses cached event id) and "works".
+      // Side effect today: buyer received a notification while provider's
+      // UI showed an error. Now: if our pubkey is on the relay as the
+      // accepter, treat as success regardless of the websocket-level outcome.
+      bool acceptVerified = success;
+      String? raceWinner; // v579: pubkey of provider that won the race (if any)
+      if (!success && providerPubkey != null) {
+        try {
+          final landed = await _nostrOrderService
+              .fetchOrderProviderPubkey(orderId)
+              .timeout(const Duration(seconds: 6), onTimeout: () => null);
+          if (landed != null && landed.toLowerCase() == providerPubkey.toLowerCase()) {
+            broLog('✅ [acceptOrderAsProvider] verify-after-publish: event landed despite ACK timeout');
+            acceptVerified = true;
+          } else if (landed != null) {
+            // v579: another provider's accept landed for this orderId — race lost.
+            raceWinner = landed;
+            broLog('🏁 [acceptOrderAsProvider] race lost: ${landed.substring(0, 8)} accepted first');
+          }
+        } catch (e) {
+          broLog('⚠️ [acceptOrderAsProvider] verify-after-publish failed: $e');
+        }
+      }
+
+      if (!acceptVerified) {
+        // v579: distinguish race-loss from publish failure for clearer UX.
+        if (raceWinner != null) {
+          _error = '❌ Esta ordem já foi aceita por outro provedor';
+          _availableOrdersForProvider.removeWhere((o) => o.id == orderId);
+        } else {
+          _error = 'Falha ao publicar aceitação no Nostr';
+        }
         _isLoading = false;
         _immediateNotify();
         return false;
@@ -2702,6 +2774,56 @@ class OrderProvider with ChangeNotifier {
     }
   }
 
+  /// v584: Reenvia ao cliente um invoice fresco de cobran�?§a (sem mexer no
+  /// bro_complete original). Usa kind 30081 com d-tag `${orderId}_invoice_refresh`,
+  /// preservando o complete que cont�?©m o proof.
+  /// Resolve o caso do leandrogehlen (issue #6): provedor pode forçar a
+  /// recobran�?§a se desconfia que o cliente nunca recebeu o invoice original.
+  Future<bool> republishInvoiceForOrder(String orderId, String newInvoice) async {
+    try {
+      final order = getOrderById(orderId);
+      if (order == null) {
+        broLog('[republishInvoice] ordem $orderId n�?£o encontrada');
+        return false;
+      }
+      final userPubkey = order.userPubkey;
+      if (userPubkey == null || userPubkey.isEmpty) {
+        broLog('[republishInvoice] ordem sem userPubkey');
+        return false;
+      }
+      final privKey = _nostrService.privateKey;
+      if (privKey == null) {
+        broLog('[republishInvoice] chave privada indispon�?­vel');
+        return false;
+      }
+      final ok = await _nostrOrderService.publishInvoiceRefresh(
+        orderId: orderId,
+        providerPrivateKey: privKey,
+        providerInvoice: newInvoice,
+        orderUserPubkey: userPubkey,
+      );
+      if (ok) {
+        // Atualizar metadata local com novo invoice
+        final idx = _orders.indexWhere((o) => o.id == orderId);
+        if (idx != -1) {
+          _orders[idx] = _orders[idx].copyWith(
+            metadata: {
+              ...(_orders[idx].metadata ?? {}),
+              'providerInvoice': newInvoice,
+              'invoiceRefreshedAt': DateTime.now().toIso8601String(),
+            },
+          );
+          await _saveOrders();
+          _immediateNotify();
+        }
+      }
+      return ok;
+    } catch (e) {
+      broLog('[republishInvoice] erro: $e');
+      return false;
+    }
+  }
+
   /// Auto-liquida�?§�?£o quando usu�?¡rio n�?£o confirma em 36h
   /// Marca a ordem como 'liquidated' e notifica o usu�?¡rio
   Future<bool> autoLiquidateOrder(String orderId, String proof) async {
@@ -2786,15 +2908,37 @@ class OrderProvider with ChangeNotifier {
     try {
       // Encontrar ordens liquidadas onde EU sou o USU�RIO (n�o o provedor)
       // e que ainda n�o tiveram auto-pagamento completado
+      // v584: tamb�m varremos status='completed' e 'awaiting_confirmation'.
+      // O bug do leandrogehlen (order 92a2fdeb) mostrou que o cliente pode
+      // marcar a ordem como 'completed' sem nunca ter passado por 'liquidated',
+      // deixando o provedor sem receber sats. Mantemos autoPaymentCompleted
+      // como guarda contra pagar duas vezes.
+      const autopayEligibleStatuses = {
+        'liquidated',
+        'completed',
+        'awaiting_confirmation',
+      };
       final unpaidLiquidated = _orders.where((order) {
-        if (order.status != 'liquidated') return false;
+        if (!autopayEligibleStatuses.contains(order.status)) return false;
         // Sou o criador da ordem (usu�rio que precisa pagar)
         if (order.userPubkey != _currentUserPubkey) return false;
         // Sou o provedor? Ent�o n�o preciso pagar a mim mesmo
         final providerId = order.providerId ?? order.metadata?['providerId'] ?? order.metadata?['provider_id'] ?? '';
         if (providerId == _currentUserPubkey) return false;
+        if (providerId.toString().isEmpty) return false; // sem provedor identificado
         // J� paguei?
         if (order.metadata?['autoPaymentCompleted'] == true) return false;
+        // v584: pra status != 'liquidated', exigir alguma evid�ncia que o
+        // provedor agiu (proof ou invoice candidato) pra n�o disparar
+        // pagamento por transi��o de estado antiga/corrompida.
+        if (order.status != 'liquidated') {
+          final meta = order.metadata ?? const {};
+          final hasProof = (meta['proofImage'] != null && meta['proofImage'].toString().isNotEmpty)
+              || (meta['proofImage_nip44'] != null && meta['proofImage_nip44'].toString().isNotEmpty)
+              || (meta['paymentProof'] != null && meta['paymentProof'].toString().isNotEmpty);
+          final hasInvoiceCandidate = (meta['providerInvoice'] != null && meta['providerInvoice'].toString().isNotEmpty);
+          if (!hasProof && !hasInvoiceCandidate) return false;
+        }
         return true;
       }).toList();
       
@@ -3869,6 +4013,20 @@ class OrderProvider with ChangeNotifier {
       } catch (e) {
         broLog('⚠️ _autoNudgeStuckOrders exception: $e');
       }
+
+      // v582: Provider auto-nudge para billCode AUSENTE. Distinto do nudge
+      // de awaiting_confirmation: aqui o provedor acabou de aceitar e ainda
+      // não recebeu o billCode encriptado (status=accepted, billCode vazio).
+      // Sem isso, se o accept_relay push falhar, o provedor fica preso em
+      // "Obtendo dados de pagamento..." indefinidamente.
+      try {
+        await _autoNudgeMissingBillCode().timeout(
+          const Duration(seconds: 10),
+          onTimeout: () => broLog('⏱️ _autoNudgeMissingBillCode timeout (10s)'),
+        );
+      } catch (e) {
+        broLog('⚠️ _autoNudgeMissingBillCode exception: $e');
+      }
       
       // Ordenar por data (mais recente primeiro)
       _orders.sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -3944,6 +4102,83 @@ class OrderProvider with ChangeNotifier {
     }
   }
 
+  /// v582: Provider-side fast nudge para o caso "billCode ausente após aceitar".
+  /// Quando aceitamos uma ordem mas o billCode encriptado nunca chega via
+  /// `accept_relay` push, ficamos presos em "Obtendo dados de pagamento".
+  /// A cada sync, se >20s desde o accept e ainda sem billCode, pedimos para
+  /// o buyer republicar. Cooldown de 60s (mais agressivo que o nudge geral)
+  /// porque o usuário está olhando para um spinner.
+  final Map<String, DateTime> _billCodeNudges = {};
+
+  /// v582: Versão manual disparada por botão na UI (escape hatch).
+  Future<bool> requestBillCodeAgain(String orderId) async {
+    final privateKey = _nostrService.privateKey;
+    if (privateKey == null || privateKey.isEmpty) return false;
+    final order = _orders.firstWhere(
+      (o) => o.id == orderId,
+      orElse: () => Order(id: '', billType: '', billCode: '', amount: 0, btcAmount: 0, btcPrice: 0, providerFee: 0, platformFee: 0, total: 0, status: '', createdAt: DateTime.now()),
+    );
+    if (order.id.isEmpty) return false;
+    if (order.userPubkey == null || order.userPubkey!.isEmpty) return false;
+    try {
+      final ok = await _nostrOrderService.publishRepublishRequest(
+        privateKey: privateKey,
+        orderId: order.id,
+        customerPubkey: order.userPubkey!,
+      );
+      if (ok) _billCodeNudges[order.id] = DateTime.now();
+      return ok;
+    } catch (e) {
+      broLog('⚠️ requestBillCodeAgain exception: $e');
+      return false;
+    }
+  }
+
+  Future<void> _autoNudgeMissingBillCode() async {
+    if (_currentUserPubkey == null) return;
+    final privateKey = _nostrService.privateKey;
+    if (privateKey == null || privateKey.isEmpty) return;
+
+    final now = DateTime.now();
+    final stuck = _orders.where((o) {
+      if (o.status != 'accepted') return false;
+      if (o.providerId != _currentUserPubkey) return false;
+      if (o.userPubkey == null || o.userPubkey!.isEmpty) return false;
+      if (o.userPubkey == _currentUserPubkey) return false;
+      if (o.billCode.isNotEmpty) return false; // já temos o código
+      final accepted = o.acceptedAt;
+      if (accepted == null) return false;
+      // janela: entre 8s e 1h depois do accept (v583: era 20s, baixado para
+      // detectar billCode ausente mais rápido — provider detail screen
+      // polla a cada 10s, então primeiro nudge sai em ~10s pós-accept)
+      final age = now.difference(accepted);
+      if (age.inSeconds < 8 || age.inMinutes > 60) return false;
+      // throttle: 15s entre nudges para o mesmo orderId (v583: era 60s)
+      final last = _billCodeNudges[o.id];
+      if (last != null && now.difference(last).inSeconds < 15) return false;
+      return true;
+    }).toList();
+
+    if (stuck.isEmpty) return;
+    broLog('🟧 _autoNudgeMissingBillCode: ${stuck.length} ordens sem billCode, pedindo republish');
+
+    for (final order in stuck) {
+      try {
+        final ok = await _nostrOrderService.publishRepublishRequest(
+          privateKey: privateKey,
+          orderId: order.id,
+          customerPubkey: order.userPubkey!,
+        );
+        if (ok) {
+          _billCodeNudges[order.id] = now;
+          broLog('✅ billCode nudge enviado para ${order.id.substring(0, 8)}');
+        }
+      } catch (e) {
+        broLog('⚠️ billCode nudge falhou para ${order.id.substring(0, 8)}: $e');
+      }
+    }
+  }
+
   /// v437: Customer auto-respond — detecta bro_republish_request do provider
   /// e re-publica o completed para ordens que já estão completed localmente.
   Future<void> _handleIncomingRepublishRequests() async {
@@ -3965,13 +4200,42 @@ class OrderProvider with ChangeNotifier {
       );
       if (order.id.isEmpty) continue;
 
+      // Só re-publicar se somos o criador da ordem
+      if (order.userPubkey != _currentUserPubkey) continue;
+
+      // v582: Se a ordem está accepted SEM billCode entregue, re-enviar
+      // o billCode encriptado direto (provider está preso em "Obtendo dados").
+      if (order.status == 'accepted' &&
+          order.providerId != null &&
+          order.providerId!.isNotEmpty &&
+          order.billCode.isNotEmpty) {
+        try {
+          final ok = await _nostrOrderService.publishEncryptedBillCode(
+            privateKey: privateKey,
+            orderId: order.id,
+            billCode: order.billCode,
+            providerPubkey: order.providerId!,
+            orderUserPubkey: _currentUserPubkey!,
+          );
+          broLog('${ok ? "✅" : "⚠️"} v582 re-send billCode nip44 para ${orderId.substring(0, 8)} (ok=$ok)');
+          // Marca como sent independente de ok — próximo sync tenta de novo.
+          final idx = _orders.indexWhere((o) => o.id == order.id);
+          if (idx != -1) {
+            final meta = Map<String, dynamic>.from(_orders[idx].metadata ?? {});
+            meta['billCode_nip44_sent'] = true;
+            _orders[idx] = _orders[idx].copyWith(metadata: meta);
+          }
+        } catch (e) {
+          broLog('⚠️ v582 re-send billCode exception: $e');
+        }
+        continue;
+      }
+
       // Só re-publicar se a ordem está completed localmente
       if (order.status != 'completed') {
         broLog('⏭️ Nudge para ${orderId.substring(0, 8)}: status local é ${order.status}, ignorando');
         continue;
       }
-      // Só re-publicar se somos o criador da ordem
-      if (order.userPubkey != _currentUserPubkey) continue;
 
       try {
         await _nostrOrderService.updateOrderStatus(

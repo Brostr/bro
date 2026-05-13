@@ -41,10 +41,15 @@ class StorageService {
   // Migrar dados de SharedPreferences para SecureStorage
   Future<void> _migrateToSecureStorage() async {
     try {
-      // Verificar se já migrou
+      // v565: Migração XOR de backups legados é executada SEMPRE (idempotente)
+      // mesmo se _migrated_to_secure_v1 estiver setado. Bug histórico: usuário
+      // que nunca chamou getBreezMnemonic mantinha bm_backup_* em SharedPrefs.
+      await _eagerMigrateLegacyXorBackups();
+
+      // Verificar se já migrou (chaves Nostr e mnemonic genérica — uma única vez)
       final migrated = _prefs?.getBool('_migrated_to_secure_v1') ?? false;
       if (migrated) return;
-      
+
       // Migrar chaves Nostr
       final oldPrivKey = _prefs?.getString('nostr_private_key');
       final oldPubKey = _prefs?.getString('nostr_public_key');
@@ -72,6 +77,94 @@ class StorageService {
       broLog('✅ Migração para armazenamento seguro concluída');
     } catch (e) {
       broLog('⚠️ Erro na migração: $e');
+    }
+  }
+
+  /// v565 SECURITY: Varre TODAS as chaves SharedPreferences e migra qualquer
+  /// backup XOR-obfuscated de seed para SecureStorage, removendo o original.
+  ///
+  /// Por que precisa: o fix de v268 só migrava on-demand em getBreezMnemonic().
+  /// Usuários que nunca chamaram esse método (ex: app só fazendo polling em
+  /// background) mantinham seeds em SharedPreferences vulneráveis a backup
+  /// extraction (adb backup, Google Drive, malware com READ_EXTERNAL_STORAGE).
+  ///
+  /// Idempotente: se nada para migrar, no-op silencioso.
+  /// Fail-safe: nunca remove de SharedPrefs sem confirmar leitura em SecureStorage.
+  Future<void> _eagerMigrateLegacyXorBackups() async {
+    if (_prefs == null) return;
+    try {
+      final allKeys = _prefs!.getKeys();
+      // Coletar candidatos a backup XOR (não modificar mapa durante iteração)
+      final candidates = allKeys.where((k) =>
+          k.startsWith('bm_backup_') ||
+          k == 'MASTER_SEED_PREFS' ||
+          k == 'SEED_BACKUP_EMERGENCY').toList();
+
+      if (candidates.isEmpty) return;
+
+      int migrated = 0;
+      for (final key in candidates) {
+        try {
+          final raw = _prefs!.getString(key);
+          if (raw == null || raw.isEmpty) {
+            await _prefs!.remove(key);
+            continue;
+          }
+          final mnemonic = _deobfuscateSeed(raw);
+          if (mnemonic.isEmpty || mnemonic.split(' ').length != 12) {
+            // Não é uma seed válida — remover (lixo) sem migrar
+            await _prefs!.remove(key);
+            continue;
+          }
+
+          // Determinar destino na SecureStorage:
+          // - bm_backup_<prefix> → breez_seed_<prefix> (mantém isolamento por usuário)
+          // - MASTER_SEED_PREFS / SEED_BACKUP_EMERGENCY → MASTER_SEED_BACKUP
+          String secureKey;
+          if (key.startsWith('bm_backup_')) {
+            secureKey = key.replaceFirst('bm_backup_', 'breez_seed_');
+          } else {
+            secureKey = _masterSeedKey;
+          }
+
+          // FAIL-SAFE: Só apaga SharedPrefs depois de confirmar leitura em SecureStorage.
+          // Se já existe valor diferente em SecureStorage (caso raro: seed
+          // diferente já migrada), preserva o existente — NUNCA sobrescreve seed.
+          final existing = await _secureStorage.read(key: secureKey);
+          if (existing != null && existing.isNotEmpty) {
+            if (existing.split(' ').take(2).join(' ') !=
+                mnemonic.split(' ').take(2).join(' ')) {
+              broLog('🛡️ [MIGRATE] $secureKey já tem seed diferente — preservando, descartando backup XOR');
+              await _prefs!.remove(key);
+              continue;
+            }
+            // Seeds idênticas — só limpar SharedPrefs
+            await _prefs!.remove(key);
+            migrated++;
+            continue;
+          }
+
+          await _secureStorage.write(key: secureKey, value: mnemonic);
+          // Confirmar leitura
+          final verify = await _secureStorage.read(key: secureKey);
+          if (verify == mnemonic) {
+            await _prefs!.remove(key);
+            migrated++;
+            broLog('🔐 [MIGRATE] Seed legada migrada para SecureStorage: $secureKey');
+          } else {
+            broLog('⚠️ [MIGRATE] Falha ao verificar SecureStorage para $secureKey — backup XOR mantido');
+          }
+        } catch (e) {
+          broLog('⚠️ [MIGRATE] Erro processando $key: $e');
+          // Não remove em caso de erro inesperado — preserva dado para próxima tentativa
+        }
+      }
+
+      if (migrated > 0) {
+        broLog('✅ [MIGRATE] $migrated seed(s) legada(s) migrada(s) e backup XOR removido');
+      }
+    } catch (e) {
+      broLog('⚠️ [MIGRATE] Erro geral em _eagerMigrateLegacyXorBackups: $e');
     }
   }
 
