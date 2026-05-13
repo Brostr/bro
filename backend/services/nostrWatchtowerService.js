@@ -81,6 +81,17 @@ class NostrWatchtowerService {
     this._backfillTimer = null;
     this._BACKFILL_INTERVAL_MS = 60_000;
     this._BACKFILL_WINDOW_SEC = 180;
+    // v584: Tracking de pagamentos pendentes. Quando o provedor publica
+    // bro_complete com providerInvoice, registramos aqui. Se em > 6h o
+    // cliente não publicar status='completed'/'liquidated', re-pusha pra
+    // forçar o app a sincronizar (em v584+ dispara autopay; em v564 só
+    // notifica o cliente). Resolve casos como issue #6 (leandrogehlen).
+    this._pendingInvoicePayments = new Map(); // orderId → { userPubkey, providerId, completedAt, attempts, lastAttemptAt }
+    this._invoiceRetryTimer = null;
+    this._INVOICE_RETRY_INTERVAL_MS = 60 * 60 * 1000;   // checa a cada 1h
+    this._INVOICE_RETRY_FIRST_DELAY_MS = 6 * 60 * 60 * 1000;  // primeira tentativa só após 6h
+    this._INVOICE_RETRY_MAX_ATTEMPTS = 24;              // ~24h de retries
+    this._INVOICE_RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // desiste após 7d
   }
 
   start() {
@@ -94,6 +105,9 @@ class NostrWatchtowerService {
 
     // v582: start backfill loop after initial connections settle
     this._backfillTimer = setInterval(() => this._backfillRecent(), this._BACKFILL_INTERVAL_MS);
+
+    // v584: retry job pra pagamentos pendentes (bro_complete sem confirm do cliente)
+    this._invoiceRetryTimer = setInterval(() => this._retryPendingInvoicePushes(), this._INVOICE_RETRY_INTERVAL_MS);
   }
 
   stop() {
@@ -101,6 +115,10 @@ class NostrWatchtowerService {
     if (this._backfillTimer) {
       clearInterval(this._backfillTimer);
       this._backfillTimer = null;
+    }
+    if (this._invoiceRetryTimer) {
+      clearInterval(this._invoiceRetryTimer);
+      this._invoiceRetryTimer = null;
     }
     for (const [, ws] of this._connections) {
       try { ws.close(); } catch (_) { /* ignore */ }
@@ -207,6 +225,49 @@ class NostrWatchtowerService {
       const arr = Array.from(this._backfillSubs);
       this._backfillSubs = new Set(arr.slice(-25));
     }
+  }
+
+  /**
+   * v584: Job que re-pusha ordens cujo bro_complete foi visto mas o cliente
+   * nunca publicou status=completed/liquidated. Resolve casos onde o evento
+   * bro_complete (que carrega proof cifrado, ~80KB+) foi rejeitado por
+   * tamanho em alguns relays e o cliente nunca viu o providerInvoice.
+   * Em v584+ o push força sync → autopay automático.
+   * Em v564 o push força sync → cliente vê a tela com ordem aguardando.
+   */
+  async _retryPendingInvoicePushes() {
+    if (!this._running) return;
+    if (this._pendingInvoicePayments.size === 0) return;
+    const now = Date.now();
+    const toDelete = [];
+    for (const [orderId, info] of this._pendingInvoicePayments) {
+      const age = now - info.completedAt;
+      if (age > this._INVOICE_RETRY_MAX_AGE_MS) { toDelete.push(orderId); continue; }
+      if (info.attempts >= this._INVOICE_RETRY_MAX_ATTEMPTS) { toDelete.push(orderId); continue; }
+      if (age < this._INVOICE_RETRY_FIRST_DELAY_MS) continue;
+      if (info.lastAttemptAt && now - info.lastAttemptAt < this._INVOICE_RETRY_INTERVAL_MS - 60_000) continue;
+
+      try {
+        const ok = await this._sendPush(info.userPubkey, {
+          type: 'order_update',
+          sender_pubkey: info.providerId,
+          // Subtype único por tentativa pra burlar dedup 24h (cada retry é
+          // independente; o intervalo é controlado pelo próprio job).
+          subtype: `invoice_payment_due_${info.attempts + 1}`,
+          order_id: orderId,
+          source: 'watchtower_invoice_retry',
+        }, {
+          title: '💰 Pagamento pendente',
+          body: 'Você tem um pagamento Bro pendente. Abra o app para confirmar.',
+        });
+        info.attempts += 1;
+        info.lastAttemptAt = now;
+        console.log(`🔁 [Watchtower] Retry invoice push ${info.shortId} attempt=${info.attempts} ok=${ok}`);
+      } catch (err) {
+        console.error(`❌ [Watchtower] Retry invoice push erro ${info.shortId}: ${err.message}`);
+      }
+    }
+    for (const id of toDelete) this._pendingInvoicePayments.delete(id);
   }
 
   _scheduleReconnect(relayUrl) {
@@ -460,6 +521,14 @@ class NostrWatchtowerService {
           if (targetPubkey) {
             await this._sendOrderPush(targetPubkey, senderPubkey, status, orderId, shortId, routing);
           }
+
+          // v584: limpa tracking de invoice pendente quando ordem termina
+          // (de qualquer maneira: pagamento, liquidação, cancel ou disputa).
+          if (status === 'completed' || status === 'liquidated' || status === 'cancelled' || status === 'disputed') {
+            if (this._pendingInvoicePayments.delete(orderId)) {
+              console.log(`✅ [Watchtower] Limpando pending invoice ${shortId} (status=${status})`);
+            }
+          }
           break;
         }
 
@@ -477,6 +546,28 @@ class NostrWatchtowerService {
             await this._sendOrderPush(userPubkeyC, senderPubkey, 'awaiting_confirmation', orderId, shortId);
           } else {
             console.log(`⚠️ [Watchtower] Order ${shortId} completed but no userPubkey found (content: ${content.userPubkey || 'empty'}, recipient: ${content.recipientPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
+          }
+
+          // v584: rastreia ordem pra eventual retry caso cliente nunca confirme.
+          // Só se o provedor incluiu providerInvoice (sem invoice não há nada a pagar).
+          const hasInvoice = typeof content.providerInvoice === 'string' && content.providerInvoice.length > 50;
+          if (hasInvoice && isValidPubkey(userPubkeyC) && userPubkeyC !== senderPubkey && !this._isHistoricalEvent(event)) {
+            if (!this._pendingInvoicePayments.has(orderId)) {
+              this._pendingInvoicePayments.set(orderId, {
+                userPubkey: userPubkeyC,
+                providerId: senderPubkey,
+                completedAt: Date.now(),
+                attempts: 0,
+                lastAttemptAt: 0,
+                shortId,
+              });
+              console.log(`🧾 [Watchtower] Tracking invoice payment pendente: ${shortId} → ${userPubkeyC.substring(0,8)}`);
+              // cap memória — 1000 entradas
+              if (this._pendingInvoicePayments.size > 1000) {
+                const first = this._pendingInvoicePayments.keys().next().value;
+                if (first) this._pendingInvoicePayments.delete(first);
+              }
+            }
           }
           break;
         }
