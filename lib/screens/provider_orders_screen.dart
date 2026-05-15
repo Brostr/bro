@@ -641,16 +641,18 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
   // ── v588: barra de filtro de métodos de pagamento ────────────────────
   Widget _buildMethodFilterBar() {
     final l = AppLocalizations.of(context)!;
-    final total = PaymentMethods.kAll.length;
-    final n = _selectedMethods.length;
+    final groups = PaymentMethods.kGroups;
+    final selectedGroups = groups.where((g) => g.ids.every(_selectedMethods.contains)).toList();
+    final total = groups.length;
+    final n = selectedGroups.length;
     String label;
     if (n == total) {
       label = l.t('prov_ord_filter_all');
-    } else if (n == 0) {
+    } else if (_selectedMethods.isEmpty) {
       label = l.t('prov_ord_filter_none');
     } else if (n == 1) {
-      final m = PaymentMethods.byId(_selectedMethods.first);
-      label = m != null ? '${m.flag} ${m.name}' : '1';
+      final g = selectedGroups.first;
+      label = '${g.flag} ${g.label} · ${g.currency}';
     } else {
       label = l.tp('prov_ord_filter_count', {'n': n.toString(), 'total': total.toString()});
     }
@@ -745,20 +747,20 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
               Flexible(
                 child: ListView(
                   shrinkWrap: true,
-                  children: PaymentMethods.kAll.map((m) {
-                    final on = _selectedMethods.contains(m.id);
+                  children: PaymentMethods.kGroups.map((g) {
+                    final on = g.ids.every(_selectedMethods.contains);
                     return CheckboxListTile(
                       value: on,
                       activeColor: const Color(0xFFFF6B6B),
                       controlAffinity: ListTileControlAffinity.leading,
                       title: Row(children: [
-                        Text(m.flag, style: const TextStyle(fontSize: 22)),
+                        Text(g.flag, style: const TextStyle(fontSize: 22)),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: Text('${m.name}  ·  ${m.currency}',
+                          child: Text('${g.label}  ·  ${g.currency}',
                               style: const TextStyle(color: Colors.white)),
                         ),
-                        if (!m.active)
+                        if (!g.active)
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
@@ -772,9 +774,9 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
                       onChanged: (_) {
                         setState(() {
                           if (on) {
-                            _selectedMethods.remove(m.id);
+                            _selectedMethods.removeAll(g.ids);
                           } else {
-                            _selectedMethods.add(m.id);
+                            _selectedMethods.addAll(g.ids);
                           }
                         });
                         setSheet(() {});

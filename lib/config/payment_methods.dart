@@ -76,4 +76,52 @@ class PaymentMethods {
 
   /// Icon for an id.
   static IconData icon(String id) => byId(id)?.icon ?? Icons.payment;
+
+  /// Groups used by the provider-filter UI. Brazilian bill types are
+  /// merged into a single "Pix ou Boleto" entry so the user doesn't have
+  /// to toggle 5 BR boxes.
+  static const List<PaymentMethodGroup> kGroups = [
+    PaymentMethodGroup(
+      key: 'br',
+      flag: '🇧🇷',
+      label: 'Pix ou Boleto',
+      currency: 'BRL',
+      ids: ['pix', 'boleto', 'electricity', 'water', 'internet'],
+      active: true,
+    ),
+    PaymentMethodGroup(key: 'mx', flag: '🇲🇽', label: 'CoDi/SPEI',  currency: 'MXN', ids: ['mx_codi'],      active: false),
+    PaymentMethodGroup(key: 'ar', flag: '🇦🇷', label: 'Transf 3.0', currency: 'ARS', ids: ['ar_transf3'],   active: false),
+    PaymentMethodGroup(key: 'co', flag: '🇨🇴', label: 'Bre-B',      currency: 'COP', ids: ['co_breb'],      active: false),
+    PaymentMethodGroup(key: 'in', flag: '🇮🇳', label: 'UPI',        currency: 'INR', ids: ['in_upi'],       active: false),
+    PaymentMethodGroup(key: 'th', flag: '🇹🇭', label: 'PromptPay',  currency: 'THB', ids: ['th_promptpay'], active: false),
+  ];
+
+  /// Returns the group that contains [id] (if any).
+  static PaymentMethodGroup? groupForId(String? id) {
+    if (id == null) return null;
+    for (final g in kGroups) {
+      if (g.ids.contains(id)) return g;
+    }
+    return null;
+  }
+}
+
+/// Visual grouping for the provider payment-method filter. A group bundles
+/// one or more `PaymentMethod` ids that the provider toggles together.
+class PaymentMethodGroup {
+  final String key;
+  final String flag;
+  final String label;
+  final String currency;
+  final List<String> ids;
+  final bool active;
+
+  const PaymentMethodGroup({
+    required this.key,
+    required this.flag,
+    required this.label,
+    required this.currency,
+    required this.ids,
+    required this.active,
+  });
 }
