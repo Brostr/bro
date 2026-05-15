@@ -42,6 +42,8 @@ function _loadTokens() {
               lastUpdateNudgeAt: typeof entry.lastUpdateNudgeAt === 'number'
                 ? entry.lastUpdateNudgeAt
                 : 0,
+              // v588: persisted payment-method preferences for push filtering
+              paymentMethods: Array.isArray(entry.paymentMethods) ? entry.paymentMethods : undefined,
             });
           }
         }

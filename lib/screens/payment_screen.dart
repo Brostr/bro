@@ -13,6 +13,8 @@ import '../providers/breez_provider_export.dart';
 import '../providers/lightning_provider.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
+import '../services/emvco_qr_parser.dart';
+import '../config/payment_methods.dart';
 import '../l10n/app_localizations.dart';
 import '../widgets/fee_breakdown_card.dart';
 import '../config.dart';
@@ -78,6 +80,19 @@ class _PaymentScreenState extends State<PaymentScreen> {
             _processBill(code);
           }
         });
+        return;
+      }
+
+      // v588: EMVCo de outros países (MX/TH/AR/CO/IN). Compartilha o layout
+      // do PIX mas com country code (58) diferente. Quando reconhecido,
+      // mostra preview local (criação de ordem em outras moedas ainda
+      // depende de suporte no backend).
+      if (EmvcoQrParser.looksLikeEmvco(code) && !code.startsWith('00020126')) {
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (_codeController.text.trim() == code && !_isProcessing) {
+            _handleEmvcoPreview(code);
+          }
+        });
       }
     }
   }
@@ -86,6 +101,129 @@ class _PaymentScreenState extends State<PaymentScreen> {
     // Linha digitável do boleto tem 47 ou 48 dígitos
     final cleanCode = code.replaceAll(RegExp(r'[^\d]'), '');
     return cleanCode.length == 47 || cleanCode.length == 48;
+  }
+
+  /// v588: preview local para QR EMVCo de outros países (MX/TH/AR/CO).
+  /// Não cria ordem — apenas valida que o app reconheceu o método.
+  /// Criação de ordem nessas moedas exige backend (conversão BTC/moeda).
+  Future<void> _handleEmvcoPreview(String code) async {
+    final result = EmvcoQrParser.parse(code);
+    if (result == null || !mounted) return;
+
+    final pm = PaymentMethods.byId(result.billType);
+    final flag = pm?.flag ?? '🌐';
+    final methodName = pm?.name ?? result.billType.toUpperCase();
+    broLog('🌐 EMVCo detectado: $result');
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Text(flag, style: const TextStyle(fontSize: 32)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        methodName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        '${result.countryCode} · ${result.currencyCode}',
+                        style: const TextStyle(color: Colors.white60, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white54),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+              ]),
+              const SizedBox(height: 16),
+              if (result.amount != null)
+                _kv('Valor', '${result.currencyCode} ${result.amount!.toStringAsFixed(2)}'),
+              if (result.merchantName.isNotEmpty)
+                _kv('Comerciante', result.merchantName),
+              if (result.merchantCity.isNotEmpty)
+                _kv('Cidade', result.merchantCity),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Colors.orange, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Código $methodName reconhecido. Criação de ordens nessa moeda em breve.',
+                        style: const TextStyle(color: Colors.white70, fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFFF6B6B),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Ok'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // Limpa o campo pra evitar re-trigger
+    if (mounted) {
+      _codeController.clear();
+    }
+  }
+
+  Widget _kv(String k, String v) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(k, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+          ),
+          Expanded(
+            child: Text(v, style: const TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override

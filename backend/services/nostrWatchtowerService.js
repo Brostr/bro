@@ -18,6 +18,17 @@
 const WebSocket = require('ws');
 const pushService = require('./pushService');
 const { verifyEvent } = require('nostr-tools/pure');
+const fs = require('fs');
+const path = require('path');
+
+// v588: Persistent dedup file for 'new_order' broadcasts. In-memory
+// `_seenPushes` is wiped on every deploy and CAN republish 'Nova ordem'
+// pushes for orders the previous instance already broadcast. Persisting the
+// orderIds with a 7-day TTL eliminates the deploy-replay phantom-push class.
+const BROADCAST_SEEN_FILE = process.env.NODE_ENV === 'production'
+  ? '/data/watchtower_broadcasts.json'
+  : path.join(__dirname, '..', 'data', 'watchtower_broadcasts.json');
+const BROADCAST_SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const RELAYS = [
   'wss://relay.damus.io',
@@ -98,6 +109,9 @@ class NostrWatchtowerService {
     if (this._running) return;
     this._running = true;
     console.log('🗼 [Watchtower] Starting order event monitor on', RELAYS.length, 'relays');
+
+    // v588: load persistent broadcast dedup
+    this._loadBroadcastSeen();
 
     for (const relay of RELAYS) {
       this._connectToRelay(relay);
@@ -668,10 +682,43 @@ class NostrWatchtowerService {
    * otherwise broadcasts to all registered users (limited by rate limiter).
    */
   async _notifyNewOrder(creatorPubkey, orderId, content, event) {
+    // v588: ANTI-PHANTOM — republished bro_order events must NOT re-broadcast.
+    // The order owner re-publishes the same kind 30078 event (same #d tag) on
+    // every status change: accepted, awaiting_confirmation, completed, etc.
+    // Any of these republishes lands here with type='bro_order' but a NEW
+    // created_at, defeating the eventAge / boot-time checks. Symptoms in the
+    // wild: provider reinstalls app → other providers get push for orders
+    // that were already accepted/completed days ago.
+    //
+    // Detection: a true fresh order has status == 'pending' (or absent) and
+    // NO `updatedAt` field. Any other shape = republish; skip the broadcast.
+    const status = (content && typeof content.status === 'string') ? content.status : 'pending';
+    const hasUpdatedAt = content && typeof content.updatedAt === 'string' && content.updatedAt.length > 0;
+    if (status !== 'pending' || hasUpdatedAt) {
+      console.log(`🛑 [Watchtower] Skipping broadcast for ${orderId.substring(0, 8)} — republish (status=${status}, updatedAt=${hasUpdatedAt})`);
+      return;
+    }
+
+    // v588: Also reject orders whose `createdAt` in content is too old. The
+    // event's `created_at` (Nostr timestamp) is set fresh on every publish,
+    // but the JSON `createdAt` field reflects the actual order birth time.
+    // Real new orders are created seconds ago; > 5 min is always a republish.
+    if (content && typeof content.createdAt === 'string') {
+      const createdAtMs = Date.parse(content.createdAt);
+      if (!Number.isNaN(createdAtMs) && Date.now() - createdAtMs > 5 * 60 * 1000) {
+        console.log(`🛑 [Watchtower] Skipping broadcast for ${orderId.substring(0, 8)} — content.createdAt is ${Math.round((Date.now() - createdAtMs) / 1000)}s old`);
+        return;
+      }
+    }
+
     // Dedup: skip if we already notified about this order
     const pushKey = `${orderId}:new_order:broadcast`;
     if (this._seenPushes.has(pushKey)) return;
     this._seenPushes.add(pushKey);
+
+    // v588: persist broadcast dedup so a backend restart doesn't replay old
+    // 'Nova ordem' pushes (in-memory _seenPushes is wiped on every deploy).
+    try { this._persistBroadcastSeen(orderId); } catch (_) { /* ignore */ }
 
     const amount = content.amount || '?';
     const billType = content.billType || 'conta';
@@ -780,6 +827,57 @@ class NostrWatchtowerService {
       seenEvents: this._seenEvents.size,
       stats: { ...this._stats },
     };
+  }
+
+  // ── v588: persistent dedup for 'new_order' broadcasts ────────────────
+  _loadBroadcastSeen() {
+    try {
+      if (!fs.existsSync(BROADCAST_SEEN_FILE)) return;
+      const raw = fs.readFileSync(BROADCAST_SEEN_FILE, 'utf8');
+      const data = JSON.parse(raw);
+      if (!data || typeof data !== 'object') return;
+      const now = Date.now();
+      let loaded = 0;
+      for (const [orderId, ts] of Object.entries(data)) {
+        if (typeof ts !== 'number') continue;
+        if (now - ts > BROADCAST_SEEN_TTL_MS) continue;
+        this._seenPushes.add(`${orderId}:new_order:broadcast`);
+        loaded++;
+      }
+      if (loaded > 0) console.log(`🗼 [Watchtower] Loaded ${loaded} persisted broadcast dedups`);
+    } catch (e) {
+      console.log(`[Watchtower] Could not load broadcast dedup: ${e.message}`);
+    }
+  }
+
+  _persistBroadcastSeen(orderId) {
+    if (!this._broadcastSeenStore) this._broadcastSeenStore = {};
+    this._broadcastSeenStore[orderId] = Date.now();
+    if (this._broadcastSaveTimer) clearTimeout(this._broadcastSaveTimer);
+    this._broadcastSaveTimer = setTimeout(() => {
+      try {
+        const dir = path.dirname(BROADCAST_SEEN_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        // Read existing, merge, prune expired, cap at 5000 newest.
+        let merged = {};
+        try {
+          if (fs.existsSync(BROADCAST_SEEN_FILE)) {
+            merged = JSON.parse(fs.readFileSync(BROADCAST_SEEN_FILE, 'utf8')) || {};
+          }
+        } catch (_) { /* ignore corrupted file */ }
+        const now = Date.now();
+        for (const [k, v] of Object.entries(this._broadcastSeenStore)) merged[k] = v;
+        const pruned = Object.entries(merged)
+          .filter(([_, ts]) => typeof ts === 'number' && now - ts <= BROADCAST_SEEN_TTL_MS)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5000);
+        const out = Object.fromEntries(pruned);
+        fs.writeFileSync(BROADCAST_SEEN_FILE, JSON.stringify(out), { encoding: 'utf8', mode: 0o600 });
+        this._broadcastSeenStore = {};
+      } catch (e) {
+        console.error(`[Watchtower] Could not persist broadcast dedup: ${e.message}`);
+      }
+    }, 5000);
   }
 }
 
