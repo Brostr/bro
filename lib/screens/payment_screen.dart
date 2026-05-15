@@ -14,6 +14,7 @@ import '../providers/lightning_provider.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
 import '../services/emvco_qr_parser.dart';
+import '../services/bitcoin_price_service.dart';
 import '../config/payment_methods.dart';
 import '../l10n/app_localizations.dart';
 import '../widgets/fee_breakdown_card.dart';
@@ -115,6 +116,19 @@ class _PaymentScreenState extends State<PaymentScreen> {
     final methodName = pm?.name ?? result.billType.toUpperCase();
     broLog('🌐 EMVCo detectado: $result');
 
+    // v592: buscar preço do BTC na moeda local pra mostrar conversão real em
+    // sats no preview. Não falha se a API estiver offline — apenas omite.
+    int? amountSats;
+    double? btcPrice;
+    if (result.amount != null && result.amount! > 0) {
+      btcPrice = await BitcoinPriceService.getBitcoinPriceIn(result.currencyCode);
+      if (btcPrice != null && btcPrice > 0) {
+        final btcAmount = result.amount! / btcPrice;
+        amountSats = (btcAmount * 100000000).round();
+      }
+    }
+    if (!mounted) return;
+
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF1E1E1E),
@@ -159,6 +173,10 @@ class _PaymentScreenState extends State<PaymentScreen> {
               const SizedBox(height: 16),
               if (result.amount != null)
                 _kv('Valor', '${result.currencyCode} ${result.amount!.toStringAsFixed(2)}'),
+              if (amountSats != null)
+                _kv('≈ Sats', '$amountSats sats'),
+              if (btcPrice != null)
+                _kv('Cotação', '1 BTC = ${result.currencyCode} ${btcPrice.toStringAsFixed(2)}'),
               if (result.merchantName.isNotEmpty)
                 _kv('Comerciante', result.merchantName),
               if (result.merchantCity.isNotEmpty)
