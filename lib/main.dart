@@ -125,9 +125,13 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     return;
   }
 
-  if (message.data['type'] != 'brix_invoice_request') return;
+  if (message.data['type'] != 'brix_invoice_request' &&
+      message.data['type'] != 'brix_pending_claim') return;
 
-  final requestId = message.data['request_id'];
+  final isPendingClaim = message.data['type'] == 'brix_pending_claim';
+  final requestId = isPendingClaim
+      ? message.data['payment_id']
+      : message.data['request_id'];
   final amountStr = message.data['amount_sats'];
   if (requestId == null || amountStr == null) return;
 
@@ -172,8 +176,10 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
     final bolt11 = resp.paymentRequest;
     final brixService = BrixService();
-    final ok = await brixService.submitInvoice(requestId, bolt11, pubkey);
-    broLog('[FCM-BG] Invoice ${ok ? "submitted" : "failed"}: $amountSats sats');
+    final ok = isPendingClaim
+        ? await brixService.claimPayment(requestId, bolt11, pubkey)
+        : await brixService.submitInvoice(requestId, bolt11, pubkey);
+    broLog('[FCM-BG] ${isPendingClaim ? "Claim" : "Invoice"} ${ok ? "submitted" : "failed"}: $amountSats sats');
 
     // Show local notification on success so user knows payment is arriving
     if (ok) {
@@ -364,7 +370,8 @@ void main() async {
     // Listen for foreground FCM messages (BRIX wake-up + order updates)
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       broLog('[FCM] Foreground message: ${message.data}');
-      if (message.data['type'] == 'brix_invoice_request') {
+      if (message.data['type'] == 'brix_invoice_request' ||
+          message.data['type'] == 'brix_pending_claim') {
         BrixRelayService().triggerPoll();
       } else if (message.data['type'] == 'order_update') {
         broLog('[FCM] Order update push — triggering sync');
@@ -447,7 +454,8 @@ void main() async {
     // When user taps notification to open app, also trigger poll
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       broLog('[FCM] App opened from notification: ${message.data}');
-      if (message.data['type'] == 'brix_invoice_request') {
+      if (message.data['type'] == 'brix_invoice_request' ||
+          message.data['type'] == 'brix_pending_claim') {
         BrixRelayService().triggerPoll();
       } else if (message.data['type'] == 'order_update') {
         OrderRealtimeService().onOrderEvent?.call();
