@@ -321,13 +321,53 @@ function getAllPubkeys() {
 /**
  * Get pubkeys of users that currently have provider mode ENABLED.
  * v544: Used by watchtower to scope 'new_order' broadcasts to providers only.
+ *
+ * v588: When `billType` is passed, additionally filter by the provider's
+ * declared payment methods. A provider with no `paymentMethods` set (legacy
+ * client) is treated as accepting all methods.
  */
-function getProviderPubkeys() {
+function getProviderPubkeys(billType) {
   const out = [];
   for (const [pubkey, entry] of tokenStore) {
-    if (entry && entry.providerEnabled === true) out.push(pubkey);
+    if (!entry || entry.providerEnabled !== true) continue;
+    if (billType && Array.isArray(entry.paymentMethods) && entry.paymentMethods.length > 0) {
+      if (!entry.paymentMethods.includes(billType)) continue;
+    }
+    out.push(pubkey);
   }
   return out;
+}
+
+/**
+ * v588: Update payment-method preferences for a pubkey. Used by the
+ * watchtower to filter 'new_order' broadcasts. `methods` is an array of
+ * billType ids (e.g. ['pix','boleto','mx_codi']). Empty array = no methods
+ * (provider won't receive any new-order pushes). null/undefined or absent
+ * field = treat as "all methods" (legacy clients).
+ */
+function setProviderPaymentMethods(pubkey, methods) {
+  if (!pubkey) return false;
+  const entry = tokenStore.get(pubkey);
+  if (!entry) return false;
+  if (!Array.isArray(methods)) return false;
+  // Sanitize: keep only short alphanumeric strings, dedup, cap at 50 entries.
+  const clean = [];
+  const seen = new Set();
+  for (const m of methods) {
+    if (typeof m !== 'string') continue;
+    const v = m.trim().toLowerCase();
+    if (!v || v.length > 32) continue;
+    if (!/^[a-z0-9_]+$/.test(v)) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    clean.push(v);
+    if (clean.length >= 50) break;
+  }
+  entry.paymentMethods = clean;
+  entry.updatedAt = Date.now();
+  _saveTokens();
+  console.log(`[PUSH] Payment methods for ${pubkey.substring(0, 16)}... = [${clean.join(',')}]`);
+  return true;
 }
 
 /**
@@ -420,4 +460,4 @@ async function maybeNudgeForUpdate(pubkey, minBuild) {
   return ok;
 }
 
-module.exports = { init, registerToken, setProviderStatus, sendPush, isEnabled, getTokenCount, getAllPubkeys, getProviderPubkeys, hasToken, maybeNudgeForUpdate };
+module.exports = { init, registerToken, setProviderStatus, setProviderPaymentMethods, sendPush, isEnabled, getTokenCount, getAllPubkeys, getProviderPubkeys, hasToken, maybeNudgeForUpdate };

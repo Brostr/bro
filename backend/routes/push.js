@@ -106,6 +106,28 @@ router.post('/provider-status', registerLimiter, (req, res) => {
 });
 
 /**
+ * POST /push/payment-methods
+ * Body: { methods: string[] }
+ * Auth: NIP-98 (req.verifiedPubkey)
+ *
+ * v588: Update the provider's payment-method preferences. The watchtower
+ * uses this list to filter 'Nova ordem' broadcasts so providers only get
+ * pushes for methods/currencies they actually handle.
+ */
+router.post('/payment-methods', registerLimiter, (req, res) => {
+  const pubkey = req.verifiedPubkey;
+  const { methods } = req.body;
+  if (!Array.isArray(methods)) {
+    return res.status(400).json({ error: 'Invalid methods array' });
+  }
+  if (methods.length > 50) {
+    return res.status(400).json({ error: 'Too many methods (max 50)' });
+  }
+  const ok = pushService.setProviderPaymentMethods(pubkey, methods);
+  res.json({ ok });
+});
+
+/**
  * POST /push/notify
  * Body: { target_pubkey: string, type: string, subtype: string, order_id?: string }
  * Auth: NIP-98 (req.verifiedPubkey)

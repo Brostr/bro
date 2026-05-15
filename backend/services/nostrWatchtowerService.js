@@ -696,8 +696,9 @@ class NostrWatchtowerService {
     } else {
       // v544: Broadcast ONLY to users who enabled provider mode.
       // Users who never became providers will not receive 'Nova ordem' pushes.
+      // v588: + filter by provider's declared payment methods (billType).
       const providerPubkeys = pushService.getProviderPubkeys
-        ? pushService.getProviderPubkeys()
+        ? pushService.getProviderPubkeys(billType)
         : [];
       targetPubkeys = providerPubkeys.filter(pk => pk !== creatorPubkey);
     }
