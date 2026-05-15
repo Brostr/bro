@@ -195,7 +195,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Código $methodName reconhecido. Criação de ordens nessa moeda em breve.',
+                        amountSats != null
+                          ? 'Pedido será cotado em ${result.currencyCode}. Provedores que aceitam essa moeda receberão a notificação.'
+                          : 'Código $methodName reconhecido. Cotação indisponível no momento.',
                         style: const TextStyle(color: Colors.white70, fontSize: 13),
                       ),
                     ),
@@ -210,8 +212,20 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     backgroundColor: const Color(0xFFFF6B6B),
                     padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('Ok'),
+                  onPressed: amountSats != null && btcPrice != null && result.amount != null && result.amount! > 0
+                    ? () {
+                        Navigator.pop(ctx);
+                        _createForeignOrder(
+                          billType: result.billType,
+                          billCode: code,
+                          amount: result.amount!,
+                          currency: result.currencyCode,
+                          btcPrice: btcPrice!,
+                          amountSats: amountSats!,
+                        );
+                      }
+                    : () => Navigator.pop(ctx),
+                  child: Text(amountSats != null ? 'Criar pedido' : 'Ok'),
                 ),
               ),
             ],
@@ -242,6 +256,83 @@ class _PaymentScreenState extends State<PaymentScreen> {
         ],
       ),
     );
+  }
+
+  /// v594: criar ordem em moeda estrangeira (MXN/THB/ARS/COP/INR) usando
+  /// saldo da carteira Bro. O consumidor paga em sats; provedores opted-in
+  /// (POST /push/accepted-currencies) recebem a notificação e cumprem o
+  /// pagamento na moeda local. Caso não haja provedor disponível, a ordem
+  /// fica em 'pending' até alguém aceitar (mesmo modelo do PIX).
+  Future<void> _createForeignOrder({
+    required String billType,
+    required String billCode,
+    required double amount,
+    required String currency,
+    required double btcPrice,
+    required int amountSats,
+  }) async {
+    if (!mounted) return;
+    final orderProvider = context.read<OrderProvider>();
+    setState(() => _isProcessing = true);
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(child: CircularProgressIndicator(color: Color(0xFFFF6B6B))),
+    );
+
+    try {
+      final btcAmount = amount / btcPrice;
+      final walletPayId = DateTime.now().millisecondsSinceEpoch.toRadixString(16);
+      final paymentHash = 'wallet_$walletPayId';
+      final invoice = 'wallet_balance_payment_$walletPayId';
+
+      final order = await orderProvider.createOrder(
+        billType: billType,
+        billCode: billCode,
+        amount: amount,
+        btcAmount: btcAmount,
+        btcPrice: btcPrice,
+        currency: currency,
+      );
+
+      if (!mounted) return;
+      Navigator.of(context).pop(); // close loading
+
+      if (order == null) {
+        _showError('Não foi possível criar o pedido. Tente novamente.');
+        return;
+      }
+
+      orderProvider.setOrderPaymentHashAndStatusLocal(
+        orderId: order.id,
+        paymentHash: paymentHash,
+        invoice: invoice,
+        status: 'payment_received',
+      );
+
+      broLog('✅ Ordem $currency criada: ${order.id} ($amountSats sats)');
+      if (mounted) {
+        _codeController.clear();
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          '/order-status',
+          (route) => route.isFirst,
+          arguments: {
+            'orderId': order.id,
+            'amountBrl': amount, // legado — telas antigas ainda esperam essa chave
+            'amountSats': amountSats,
+          },
+        );
+      }
+    } catch (e) {
+      broLog('❌ _createForeignOrder: $e');
+      if (mounted) {
+        Navigator.of(context).pop();
+        _showError('Erro ao criar pedido: $e');
+      }
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
   }
 
   @override

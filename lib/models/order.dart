@@ -4,6 +4,9 @@
   final String? userPubkey; // Pubkey do usuário que criou a ordem
   final String billType;
   final String billCode;
+  /// ISO-4217 da `amount`. Padrão BRL (legado). Em ordens multi-moeda esse
+  /// valor é populado a partir do QR EMVCo (MXN, THB, ARS, COP, INR, ...).
+  final String currency;
   final double amount;
   final double btcAmount;
   final double btcPrice;
@@ -25,6 +28,7 @@
     this.userPubkey,
     required this.billType,
     required this.billCode,
+    this.currency = 'BRL',
     required this.amount,
     required this.btcAmount,
     required this.btcPrice,
@@ -48,6 +52,7 @@
       userPubkey: json['userPubkey'] ?? json['pubkey'],
       billType: json['billType'] ?? 'pix',
       billCode: json['billCode'] ?? '',
+      currency: (json['currency'] as String?)?.toUpperCase() ?? 'BRL',
       amount: (json['amount'] ?? 0).toDouble(),
       btcAmount: (json['btcAmount'] ?? 0).toDouble(),
       btcPrice: (json['btcPrice'] ?? 0).toDouble(),
@@ -78,6 +83,7 @@
       if (userPubkey != null) 'userPubkey': userPubkey,
       'billType': billType,
       'billCode': billCode,
+      'currency': currency,
       'amount': amount,
       'btcAmount': btcAmount,
       'btcPrice': btcPrice,
@@ -101,6 +107,7 @@
     String? userPubkey,
     String? billType,
     String? billCode,
+    String? currency,
     double? amount,
     double? btcAmount,
     double? btcPrice,
@@ -122,6 +129,7 @@
       userPubkey: userPubkey ?? this.userPubkey,
       billType: billType ?? this.billType,
       billCode: billCode ?? this.billCode,
+      currency: currency ?? this.currency,
       amount: amount ?? this.amount,
       btcAmount: btcAmount ?? this.btcAmount,
       btcPrice: btcPrice ?? this.btcPrice,

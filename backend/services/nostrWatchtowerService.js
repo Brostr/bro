@@ -722,9 +722,15 @@ class NostrWatchtowerService {
 
     const amount = content.amount || '?';
     const billType = content.billType || 'conta';
+    const currency = (typeof content.currency === 'string' && content.currency)
+      ? content.currency.toUpperCase()
+      : 'BRL';
+    const moneyLabel = currency === 'BRL'
+      ? `R$ ${amount}`
+      : `${currency} ${amount}`;
     const notif = {
       title: NOTIFICATION_MAP.new_order.title,
-      body: `${billType} de R$ ${amount} disponível`,
+      body: `${billType} de ${moneyLabel} disponível`,
     };
 
     // Get all registered pubkeys from pushService
@@ -744,8 +750,9 @@ class NostrWatchtowerService {
       // v544: Broadcast ONLY to users who enabled provider mode.
       // Users who never became providers will not receive 'Nova ordem' pushes.
       // v588: + filter by provider's declared payment methods (billType).
+      // v594: + filter by provider's accepted currencies for non-BRL orders.
       const providerPubkeys = pushService.getProviderPubkeys
-        ? pushService.getProviderPubkeys(billType)
+        ? pushService.getProviderPubkeys(billType, currency)
         : [];
       targetPubkeys = providerPubkeys.filter(pk => pk !== creatorPubkey);
     }

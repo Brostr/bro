@@ -44,6 +44,9 @@ function _loadTokens() {
                 : 0,
               // v588: persisted payment-method preferences for push filtering
               paymentMethods: Array.isArray(entry.paymentMethods) ? entry.paymentMethods : undefined,
+              // v594: persisted accepted currencies (ISO-4217 codes) for
+              // cross-currency order routing. Empty/undefined = legacy BRL-only.
+              acceptedCurrencies: Array.isArray(entry.acceptedCurrencies) ? entry.acceptedCurrencies : undefined,
             });
           }
         }
@@ -328,12 +331,20 @@ function getAllPubkeys() {
  * declared payment methods. A provider with no `paymentMethods` set (legacy
  * client) is treated as accepting all methods.
  */
-function getProviderPubkeys(billType) {
+function getProviderPubkeys(billType, currency) {
+  const wantCur = typeof currency === 'string' && currency ? currency.toUpperCase() : null;
   const out = [];
   for (const [pubkey, entry] of tokenStore) {
     if (!entry || entry.providerEnabled !== true) continue;
     if (billType && Array.isArray(entry.paymentMethods) && entry.paymentMethods.length > 0) {
       if (!entry.paymentMethods.includes(billType)) continue;
+    }
+    // v594: currency filter. If a non-BRL currency is requested, the provider
+    // MUST have it in `acceptedCurrencies`. BRL is treated as default and
+    // delivered to every provider (back-compat with all legacy clients).
+    if (wantCur && wantCur !== 'BRL') {
+      const list = Array.isArray(entry.acceptedCurrencies) ? entry.acceptedCurrencies : [];
+      if (!list.includes(wantCur)) continue;
     }
     out.push(pubkey);
   }
@@ -369,6 +380,34 @@ function setProviderPaymentMethods(pubkey, methods) {
   entry.updatedAt = Date.now();
   _saveTokens();
   console.log(`[PUSH] Payment methods for ${pubkey.substring(0, 16)}... = [${clean.join(',')}]`);
+  return true;
+}
+
+/**
+ * v594: Update accepted-currencies preferences for a pubkey. `currencies` is
+ * an array of ISO-4217 codes (e.g. ['MXN','THB']). Empty array = provider
+ * only accepts BRL. null/undefined = legacy default (BRL only).
+ */
+function setProviderAcceptedCurrencies(pubkey, currencies) {
+  if (!pubkey) return false;
+  const entry = tokenStore.get(pubkey);
+  if (!entry) return false;
+  if (!Array.isArray(currencies)) return false;
+  const clean = [];
+  const seen = new Set();
+  for (const c of currencies) {
+    if (typeof c !== 'string') continue;
+    const v = c.trim().toUpperCase();
+    if (!/^[A-Z]{3}$/.test(v)) continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    clean.push(v);
+    if (clean.length >= 32) break;
+  }
+  entry.acceptedCurrencies = clean;
+  entry.updatedAt = Date.now();
+  _saveTokens();
+  console.log(`[PUSH] Accepted currencies for ${pubkey.substring(0, 16)}... = [${clean.join(',')}]`);
   return true;
 }
 
@@ -462,4 +501,4 @@ async function maybeNudgeForUpdate(pubkey, minBuild) {
   return ok;
 }
 
-module.exports = { init, registerToken, setProviderStatus, setProviderPaymentMethods, sendPush, isEnabled, getTokenCount, getAllPubkeys, getProviderPubkeys, hasToken, maybeNudgeForUpdate };
+module.exports = { init, registerToken, setProviderStatus, setProviderPaymentMethods, setProviderAcceptedCurrencies, sendPush, isEnabled, getTokenCount, getAllPubkeys, getProviderPubkeys, hasToken, maybeNudgeForUpdate };

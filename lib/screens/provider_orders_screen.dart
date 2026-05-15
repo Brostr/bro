@@ -140,6 +140,19 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
         broLog('[FILTER] backend sync failed: $e');
         return false;
       });
+      // v594: derivar moedas aceitas dos grupos não-BRL totalmente marcados e
+      // sincronizar com o backend para filtrar broadcasts em moeda estrangeira.
+      final acceptedCurrencies = <String>[];
+      for (final g in PaymentMethods.kGroups) {
+        if (g.currency == 'BRL') continue;
+        if (g.ids.every(_selectedMethods.contains)) {
+          acceptedCurrencies.add(g.currency);
+        }
+      }
+      ApiService().setProviderAcceptedCurrencies(acceptedCurrencies).catchError((e) {
+        broLog('[FILTER] currencies sync failed: $e');
+        return false;
+      });
     } catch (e) {
       broLog('[FILTER] save failed: $e');
     }

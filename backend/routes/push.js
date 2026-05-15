@@ -128,6 +128,28 @@ router.post('/payment-methods', registerLimiter, (req, res) => {
 });
 
 /**
+ * POST /push/accepted-currencies
+ * Body: { currencies: string[] }  // ISO-4217 (e.g. ['MXN','THB'])
+ * Auth: NIP-98 (req.verifiedPubkey)
+ *
+ * v594: Update the provider's accepted currencies for cross-currency order
+ * routing. BRL is always accepted (default). The watchtower filters
+ * non-BRL 'Nova ordem' broadcasts so only opted-in providers receive them.
+ */
+router.post('/accepted-currencies', registerLimiter, (req, res) => {
+  const pubkey = req.verifiedPubkey;
+  const { currencies } = req.body;
+  if (!Array.isArray(currencies)) {
+    return res.status(400).json({ error: 'Invalid currencies array' });
+  }
+  if (currencies.length > 32) {
+    return res.status(400).json({ error: 'Too many currencies (max 32)' });
+  }
+  const ok = pushService.setProviderAcceptedCurrencies(pubkey, currencies);
+  res.json({ ok });
+});
+
+/**
  * POST /push/notify
  * Body: { target_pubkey: string, type: string, subtype: string, order_id?: string }
  * Auth: NIP-98 (req.verifiedPubkey)

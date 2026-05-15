@@ -1062,6 +1062,7 @@ class OrderProvider with ChangeNotifier {
     required double amount,
     required double btcAmount,
     required double btcPrice,
+    String currency = 'BRL',
   }) async {
     // VALIDA�?�?��?�?O CR�?TICA: Nunca criar ordem com amount = 0
     if (amount <= 0) {
@@ -1094,6 +1095,7 @@ class OrderProvider with ChangeNotifier {
         userPubkey: _currentUserPubkey,
         billType: billType,
         billCode: billCode,
+        currency: currency.toUpperCase(),
         amount: amount,
         btcAmount: btcAmount,
         btcPrice: btcPrice,

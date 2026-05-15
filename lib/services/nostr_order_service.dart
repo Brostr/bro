@@ -215,6 +215,7 @@ class NostrOrderService {
     required double providerFee,
     required double platformFee,
     required double total,
+    String currency = 'BRL',
   }) async {
     try {
       final keychain = Keychain(privateKey);
@@ -236,6 +237,7 @@ class NostrOrderService {
         'billType': billType,
         'billCode': publishedBillCode,
         'billCodeProtocol': _omitPlaintextBillCode ? _billCodeProtocolNip44 : 'plaintext',
+        'currency': currency,
         'amount': amount,
         'btcAmount': btcAmount,
         'btcPrice': btcPrice,
@@ -1066,6 +1068,7 @@ class NostrOrderService {
         userPubkey: originalUserPubkey,
         billType: content['billType'] ?? 'pix',
         billCode: _getBillCode(content),
+        currency: ((content['currency'] as String?)?.toUpperCase()) ?? 'BRL',
         amount: finalAmount,
         btcAmount: (content['btcAmount'] as num?)?.toDouble() ?? 0,
         btcPrice: (content['btcPrice'] as num?)?.toDouble() ?? 0,
@@ -1413,6 +1416,7 @@ class NostrOrderService {
       orderId: order.id,
       billType: order.billType,
       billCode: order.billCode,
+      currency: order.currency,
       amount: order.amount,
       btcAmount: order.btcAmount,
       btcPrice: order.btcPrice,

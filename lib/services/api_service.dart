@@ -998,6 +998,26 @@ class ApiService {
     }
   }
 
+  /// v594: Tell the backend which non-BRL currencies this provider is willing
+  /// to handle (ISO-4217 codes). BRL is implicit. Watchtower filters non-BRL
+  /// "new order" broadcasts accordingly.
+  Future<bool> setProviderAcceptedCurrencies(List<String> currencies) async {
+    try {
+      final response = await _dio.post('/push/accepted-currencies', data: {
+        'currencies': currencies,
+      });
+      final ok = response.data?['ok'] == true;
+      broLog('[PUSH] Provider currencies (${currencies.length}) ok=$ok');
+      return ok;
+    } on DioException catch (e) {
+      broLog('[PUSH] setProviderAcceptedCurrencies failed: ${e.message}');
+      return false;
+    } catch (e) {
+      broLog('[PUSH] setProviderAcceptedCurrencies failed: $e');
+      return false;
+    }
+  }
+
   /// v524: Ask backend whether our FCM token is registered.
   /// Used to detect silent registration failures on iOS
   /// (where getToken() may return null intermittently).
