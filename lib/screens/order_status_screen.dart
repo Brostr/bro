@@ -53,6 +53,23 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
   final NotificationService _notificationService = NotificationService();
   Timer? _statusCheckTimer;
   Timer? _countdownTimer;
+
+  /// v595: prefixo de moeda da ordem (BRL→R\$, demais→ISO-4217).
+  /// Lê `order.currency` do OrderProvider; cai para 'R\$' se a ordem não
+  /// for encontrada (estados de carregamento muito iniciais).
+  String get _currencySymbol {
+    try {
+      final op = context.read<OrderProvider>();
+      final order = op.orders.firstWhere((o) => o.id == widget.orderId);
+      final cur = order.currency.toUpperCase();
+      return cur == 'BRL' ? r'R$' : cur;
+    } catch (_) {
+      return r'R$';
+    }
+  }
+
+  String get _amountDisplay =>
+      '$_currencySymbol ${widget.amountBrl.toStringAsFixed(2)}';
   
   Map<String, dynamic>? _orderDetails;
   String _currentStatus = 'pending';
@@ -3359,7 +3376,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                'R\$ ${widget.amountBrl.toStringAsFixed(2)} ≈ ${widget.amountSats} sats',
+                '$_amountDisplay ≈ ${widget.amountSats} sats',
                 style: const TextStyle(
                   fontSize: 16,
                   color: Color(0x99FFFFFF),
@@ -3685,7 +3702,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'R\$ ${widget.amountBrl.toStringAsFixed(2)}',
+                    _amountDisplay,
                     style: const TextStyle(
                       fontSize: 22,
                       fontWeight: FontWeight.bold,
@@ -3844,7 +3861,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'R\$ ${widget.amountBrl.toStringAsFixed(2)}',
+              _amountDisplay,
               style: const TextStyle(
                 fontSize: 18,
                 color: Color(0xFFFF6B6B),
@@ -3950,7 +3967,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                     ),
                     const SizedBox(height: 16),
                     Text(
-                      'R\$ ${widget.amountBrl.toStringAsFixed(2)}',
+                      _amountDisplay,
                       style: const TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
@@ -5310,7 +5327,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                   const SizedBox(height: 6),
                   
                   // Valor
-                  _disputeReportRow(l.t('order_dispute_value_label'), 'R\$ ${widget.amountBrl.toStringAsFixed(2)}'),
+                  _disputeReportRow(l.t('order_dispute_value_label'), _amountDisplay),
                   const SizedBox(height: 6),
                   _disputeReportRow(l.t('order_dispute_sats_label'), '${widget.amountSats}'),
                   const SizedBox(height: 6),

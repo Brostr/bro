@@ -123,6 +123,31 @@ class BitcoinPriceService {
   /// Compat: preco com cache em BRL.
   static Future<double?> getBitcoinPriceWithCache() => getBitcoinPriceIn('BRL');
 
+  /// v595: moeda de exibição padrão por idioma.
+  /// - `pt` (português) → BRL
+  /// - `es` (espanhol)  → USD
+  /// - `en` (inglês)    → USD
+  /// - qualquer outro   → USD
+  ///
+  /// Não é uma conversão de PIX para dólar — só define em qual moeda os
+  /// preços do BTC (dashboard, carteira, marketplace) são MOSTRADOS quando
+  /// o usuário troca o idioma do app. As ordens PIX continuam em BRL.
+  static String displayCurrencyForLanguage(String languageCode) {
+    switch (languageCode.toLowerCase()) {
+      case 'pt':
+        return 'BRL';
+      case 'es':
+      case 'en':
+      default:
+        return 'USD';
+    }
+  }
+
+  /// Atalho: cotação BTC na moeda de exibição do idioma atual.
+  static Future<double?> getBitcoinPriceForLanguage(String languageCode) {
+    return getBitcoinPriceIn(displayCurrencyForLanguage(languageCode));
+  }
+
   static void clearCache() {
     _ratesCache = null;
     _ratesFetchedAt = null;

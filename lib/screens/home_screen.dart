@@ -7,7 +7,8 @@ import 'package:intl/intl.dart';
 import '../l10n/app_localizations.dart';
 import '../providers/breez_provider_export.dart';
 import '../providers/order_provider.dart';
-import '../services/api_service.dart';
+import '../services/bitcoin_price_service.dart';
+import '../providers/locale_provider.dart';
 import '../services/storage_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/local_collateral_service.dart';
@@ -35,7 +36,10 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  final _currencyFormat = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
+  // v595: formato/moeda dependem do idioma do app. Recriados em _refreshLocale.
+  NumberFormat _currencyFormat = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
+  String _displayCurrency = 'BRL';
+  String _lastLanguageCode = 'pt';
   double _btcPrice = 0.0;
   Timer? _priceUpdateTimer;
   Timer? _ordersUpdateTimer; // Timer para atualizar ordens automaticamente
@@ -454,7 +458,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _fetchBitcoinPrice() async {
     try {
-      final price = await ApiService().getBitcoinPrice();
+      // v595: cotação na moeda de exibição corrente (pt→BRL, en/es→USD).
+      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
       if (mounted) {
         setState(() {
           _btcPrice = price ?? _btcPrice;
@@ -465,8 +470,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// v595: reage à troca de idioma — atualiza moeda de exibição e formato.
+  void _refreshLocaleIfNeeded(BuildContext context) {
+    final lang = context.read<LocaleProvider>().locale.languageCode;
+    if (lang == _lastLanguageCode) return;
+    final newCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
+    final newFormat = _formatForCurrency(lang, newCurrency);
+    _lastLanguageCode = lang;
+    _displayCurrency = newCurrency;
+    _currencyFormat = newFormat;
+    // Refetch para mostrar valor na nova moeda imediatamente.
+    _fetchBitcoinPrice();
+  }
+
+  NumberFormat _formatForCurrency(String lang, String currency) {
+    switch (currency) {
+      case 'BRL':
+        return NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
+      case 'USD':
+        return NumberFormat.currency(locale: lang == 'es' ? 'es' : 'en_US', symbol: '\$');
+      default:
+        return NumberFormat.currency(locale: lang, symbol: '$currency ');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    _refreshLocaleIfNeeded(context);
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
       appBar: _buildAppBar(),

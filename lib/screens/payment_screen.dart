@@ -69,32 +69,36 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   void _onCodeChanged() {
     if (!_autoDetectionEnabled || _isProcessing) return;
-    
-    final code = _codeController.text.trim();
-    
-    // Detectar PIX (começa com 00020126) ou Boleto (linha digitável de 47 dígitos)
-    if (code.length >= 30) {
-      if (code.startsWith('00020126') || _isValidBoletoCode(code)) {
-        // Aguardar 500ms após última digitação antes de processar
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (_codeController.text.trim() == code && !_isProcessing) {
-            _processBill(code);
-          }
-        });
-        return;
-      }
 
-      // v588: EMVCo de outros países (MX/TH/AR/CO/IN). Compartilha o layout
-      // do PIX mas com country code (58) diferente. Quando reconhecido,
-      // mostra preview local (criação de ordem em outras moedas ainda
-      // depende de suporte no backend).
-      if (EmvcoQrParser.looksLikeEmvco(code) && !code.startsWith('00020126')) {
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (_codeController.text.trim() == code && !_isProcessing) {
-            _handleEmvcoPreview(code);
-          }
-        });
-      }
+    final code = _codeController.text.trim();
+    if (code.length < 30) return;
+
+    // v595: PRIORIDADE EMVCo. Qualquer payload com formato EMVCo (000201…6304XXXX)
+    // é classificado pelos campos 58 (country) e 53 (currency), NÃO pela presença
+    // de substrings como "BR.GOV.BCB.PIX" no template 26. Isso evita classificar
+    // como PIX/BRL um QR colombiano (CO/COP) que reuse o template.
+    final parsed = EmvcoQrParser.parse(code);
+    if (parsed != null) {
+      final isBrazilianPix =
+          parsed.countryCode == 'BR' && parsed.currencyNumeric == '986';
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_codeController.text.trim() != code || _isProcessing) return;
+        if (isBrazilianPix) {
+          _processBill(code);
+        } else {
+          _handleEmvcoPreview(code);
+        }
+      });
+      return;
+    }
+
+    // Sem EMVCo válido: cai para Boleto (linha digitável 47/48 dígitos).
+    if (_isValidBoletoCode(code)) {
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_codeController.text.trim() == code && !_isProcessing) {
+          _processBill(code);
+        }
+      });
     }
   }
 
@@ -346,6 +350,18 @@ class _PaymentScreenState extends State<PaymentScreen> {
   Future<void> _processBill(String code) async {
     broLog('📝 _processBill iniciado - _isProcessing antes: $_isProcessing');
     if (!mounted) return;
+
+    // v595: roteamento EMVCo-first. Se o QR for EMVCo válido e NÃO for BR/BRL,
+    // delega ao preview de moeda estrangeira em vez de tentar decodificar
+    // como PIX/Boleto. Vale para o fluxo do scanner (que chama _processBill
+    // direto sem passar pelo _onCodeChanged).
+    final parsed = EmvcoQrParser.parse(code);
+    if (parsed != null &&
+        !(parsed.countryCode == 'BR' && parsed.currencyNumeric == '986')) {
+      await _handleEmvcoPreview(code);
+      return;
+    }
+
     setState(() {
       _isProcessing = true;
       _billData = null;
@@ -362,7 +378,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
       // Detectar tipo de código
       final cleanCode = code.replaceAll(RegExp(r'[^\d]'), '');
-      final isPix = code.contains('00020126') || code.contains('pix.') || code.contains('br.gov.bcb');
+      // v595: agora que EMVCo foreign já foi tratado acima, qualquer payload
+      // EMVCo restante é PIX brasileiro (BR/986). Também aceita os formatos
+      // antigos sem campo 58/53 explícitos via heurística de substrings.
+      final isPix = (parsed != null) ||
+          code.contains('00020126') ||
+          code.contains('pix.') ||
+          code.toLowerCase().contains('br.gov.bcb');
       
       broLog('🔍 Processando código: ${code.substring(0, min(50, code.length))}');
       broLog('📊 Tipo detectado: ${isPix ? "PIX" : "Boleto"}');
