@@ -15,6 +15,7 @@ import '../services/lnaddress_service.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
 import '../services/bitcoin_price_service.dart';
+import '../providers/locale_provider.dart';
 import '../config.dart';
 import '../l10n/app_localizations.dart';
 import '../services/brix_service.dart';
@@ -38,6 +39,9 @@ class _WalletScreenState extends State<WalletScreen> {
   bool _isLoading = false;
   String? _error;
   double _btcPrice = 0;
+  // v596: moeda de exibição (BRL para pt, USD para en/es).
+  String _displayCurrency = 'BRL';
+  String _lastLanguageCode = 'pt';
   bool _showAllTransactions = false;
   int _sdkPaymentsCount = 0;  // v499: diagnostic
 
@@ -66,6 +70,23 @@ class _WalletScreenState extends State<WalletScreen> {
     };
   }
 
+  /// v596: símbolo de moeda dependendo do idioma.
+  String get _fiatSymbol => _displayCurrency == 'BRL' ? r'R$' : _displayCurrency;
+
+  /// v596: refaz fetch do preço BTC se o idioma mudou.
+  Future<void> _refreshLocaleIfNeeded() async {
+    try {
+      final lang = context.read<LocaleProvider>().locale.languageCode;
+      if (lang == _lastLanguageCode) return;
+      _lastLanguageCode = lang;
+      _displayCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
+      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
+      if (mounted && price != null) {
+        setState(() => _btcPrice = price);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadWalletInfo() async {
     setState(() {
       _isLoading = true;
@@ -90,8 +111,13 @@ class _WalletScreenState extends State<WalletScreen> {
       final balance = await breezProvider.getBalance();
       final payments = await breezProvider.listPayments();
       
-      // Buscar preço BTC para equivalência em BRL
-      final price = await BitcoinPriceService.getBitcoinPriceWithCache();
+      // Buscar preço BTC na moeda de exibição (BRL para pt, USD para en/es).
+      try {
+        final lang = context.read<LocaleProvider>().locale.languageCode;
+        _lastLanguageCode = lang;
+        _displayCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
+      } catch (_) {}
+      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
       if (price != null) _btcPrice = price;
       
       // NOTA: Ganhos como Bro são recebidos via Lightning (invoice pago pelo usuário)
@@ -433,6 +459,8 @@ class _WalletScreenState extends State<WalletScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // v596: react to language changes by re-fetching BTC price in display currency.
+    _refreshLocaleIfNeeded();
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
@@ -592,7 +620,7 @@ class _WalletScreenState extends State<WalletScreen> {
             ),
             if (_btcPrice > 0) ...[              const SizedBox(height: 2),
               Text(
-                '≈ R\$ ${(availableBtc * _btcPrice).toStringAsFixed(2)}',
+                '≈ $_fiatSymbol ${(availableBtc * _btcPrice).toStringAsFixed(2)}',
                 style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 13,
@@ -746,8 +774,8 @@ class _WalletScreenState extends State<WalletScreen> {
     final hasLockedFunds = totalLockedSats > 0;
     final hasTierActive = tierLockedSats > 0;
     
-    // Fetch BTC price for BRL conversion
-    btcPriceBrl = await BitcoinPriceService.getBitcoinPriceWithCache();
+    // Fetch BTC price for fiat conversion (BRL ou USD conforme idioma).
+    btcPriceBrl = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
     
     if (!mounted) return;
     
@@ -3184,10 +3212,7 @@ class _WalletScreenState extends State<WalletScreen> {
                 ),
                 if (_btcPrice > 0)
                   Text(
-                    AppLocalizations.of(context).tp(
-                      'wallet_amount_brl_approx',
-                      {'brl': (displayAmount / 100000000 * _btcPrice).toStringAsFixed(2)},
-                    ),
+                    '≈ $_fiatSymbol ${(displayAmount / 100000000 * _btcPrice).toStringAsFixed(2)}',
                     style: TextStyle(
                       color: Colors.white.withOpacity(0.55),
                       fontSize: 11,
@@ -3411,10 +3436,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           ),
                           if (_btcPrice > 0)
                             Text(
-                              AppLocalizations.of(context).tp(
-                                'wallet_amount_brl_approx',
-                                {'brl': (detailAmount / 100000000 * _btcPrice).toStringAsFixed(2)},
-                              ),
+                              '≈ $_fiatSymbol ${(detailAmount / 100000000 * _btcPrice).toStringAsFixed(2)}',
                               style: TextStyle(
                                 color: Colors.white.withOpacity(0.6),
                                 fontSize: 13,

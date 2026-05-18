@@ -10,6 +10,8 @@ class FeeBreakdownCard extends StatelessWidget {
   final int totalSats;
   final double brlToSatsRate;
   final double? networkFee;
+  // v596: ISO-4217 da moeda. BRL renderiza 'R$', outras o código.
+  final String currency;
 
   const FeeBreakdownCard({
     Key? key,
@@ -22,7 +24,14 @@ class FeeBreakdownCard extends StatelessWidget {
     required this.totalSats,
     required this.brlToSatsRate,
     this.networkFee,
+    this.currency = 'BRL',
   }) : super(key: key);
+
+  String _fmt(double v) {
+    final c = currency.toUpperCase();
+    if (c == 'BRL') return 'R\$ ${v.toStringAsFixed(2)}';
+    return '$c ${v.toStringAsFixed(2)}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -164,7 +173,7 @@ class FeeBreakdownCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Text(
-              'R\$ ${valueBrl.toStringAsFixed(2)}',
+              _fmt(valueBrl),
               style: textStyle,
             ),
             const SizedBox(height: 2),

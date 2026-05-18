@@ -148,6 +148,21 @@ class BitcoinPriceService {
     return getBitcoinPriceIn(displayCurrencyForLanguage(languageCode));
   }
 
+  /// v596: converte um valor em BRL para a moeda de exibição do idioma.
+  /// Para `pt` retorna o valor original (já é BRL). Para en/es busca a
+  /// cotação cacheada BTC→USD e BTC→BRL e calcula `brl * priceUsd / priceBrl`.
+  /// Se as taxas não estão em cache, retorna o valor original (fail-safe).
+  static double convertBrlForLanguage(double brl, String languageCode) {
+    final target = displayCurrencyForLanguage(languageCode);
+    if (target == 'BRL') return brl;
+    final rates = _ratesCache;
+    if (rates == null) return brl;
+    final btcBrl = rates['BRL'];
+    final btcTarget = rates[target];
+    if (btcBrl == null || btcTarget == null || btcBrl <= 0) return brl;
+    return brl * btcTarget / btcBrl;
+  }
+
   static void clearCache() {
     _ratesCache = null;
     _ratesFetchedAt = null;
