@@ -1111,6 +1111,8 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
     
     final statusInfo = _getStatusInfo(status);
     final earning = amount * EscrowService.providerFeePercent / 100;
+    final myCur = (order['currency'] as String?)?.toUpperCase() ?? 'BRL';
+    final myCurPrefix = myCur == 'BRL' ? r'R$' : myCur;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -1137,7 +1139,7 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
                         Icon(_getPaymentIcon(paymentType), color: Colors.orange, size: 20),
                         const SizedBox(width: 8),
                         Text(
-                          'R\$ ${amount.toStringAsFixed(2)}',
+                          '$myCurPrefix ${amount.toStringAsFixed(2)}',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 18,

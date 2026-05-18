@@ -338,6 +338,10 @@ class _ProviderDashboardScreenState extends State<ProviderDashboardScreen> {
     final billType = order['billType'] ?? 'PIX';
     final status = order['status'] ?? 'pending';
     final createdAt = order['createdAt'];
+    final currency = (order['currency'] as String?)?.toUpperCase() ?? 'BRL';
+    final amountLabel = currency == 'BRL'
+        ? 'R\$ ${amount.toStringAsFixed(2)}'
+        : '$currency ${amount.toStringAsFixed(2)}';
     
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -378,7 +382,7 @@ class _ProviderDashboardScreenState extends State<ProviderDashboardScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'R\$ ${amount.toStringAsFixed(2)}',
+                      amountLabel,
                       style: const TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -661,7 +665,11 @@ class _ProviderDashboardScreenState extends State<ProviderDashboardScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildDetailRow(l.t('prov_dash_value_label'), 'R\$ ${(order['amount'] ?? 0).toStringAsFixed(2)}'),
+              _buildDetailRow(l.t('prov_dash_value_label'), () {
+                final c = (order['currency'] as String?)?.toUpperCase() ?? 'BRL';
+                final v = (order['amount'] ?? 0).toDouble();
+                return c == 'BRL' ? 'R\$ ${v.toStringAsFixed(2)}' : '$c ${v.toStringAsFixed(2)}';
+              }()),
               _buildDetailRow(l.t('prov_dash_type_label'), order['billType'] ?? 'N/A'),
               _buildDetailRow(l.t('prov_dash_status_label'), status),
               _buildDetailRow(l.t('prov_dash_btc_label'), '${order['btcAmount'] ?? 0} BTC'),

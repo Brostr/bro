@@ -253,6 +253,8 @@ class _OrderDetailsModalState extends State<OrderDetailsModal> {
     final amount = widget.order['amount'] ?? 0.0;
     final fee = widget.order['fee'] ?? 0.0;
     final total = amount + fee;
+    final modalCur = (widget.order['currency'] as String?)?.toUpperCase() ?? 'BRL';
+    final modalSym = modalCur == 'BRL' ? r'R$' : modalCur;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -285,9 +287,9 @@ class _OrderDetailsModalState extends State<OrderDetailsModal> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              _buildValueItem('Valor', 'R\$ ${amount.toStringAsFixed(2)}'),
-              _buildValueItem('Taxa', 'R\$ ${fee.toStringAsFixed(2)}'),
-              _buildValueItem('Total', 'R\$ ${total.toStringAsFixed(2)}', highlight: true),
+              _buildValueItem('Valor', '$modalSym ${amount.toStringAsFixed(2)}'),
+              _buildValueItem('Taxa', '$modalSym ${fee.toStringAsFixed(2)}'),
+              _buildValueItem('Total', '$modalSym ${total.toStringAsFixed(2)}', highlight: true),
             ],
           ),
         ],

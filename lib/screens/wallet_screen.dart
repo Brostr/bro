@@ -974,7 +974,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           enabled: !isSending,
                           onChanged: (_) => setModalState(() {}),
                           decoration: InputDecoration(
-                            labelText: isReaisMode ? 'Valor em Reais' : AppLocalizations.of(context).t('wallet_amount_label'),
+                            labelText: isReaisMode ? (_displayCurrency == 'BRL' ? 'Valor em Reais' : 'Amount in $_displayCurrency') : AppLocalizations.of(context).t('wallet_amount_label'),
                             labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
                             hintText: isReaisMode ? 'Ex: 10.00' : 'Ex: 1000',
                             hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
@@ -982,7 +982,7 @@ class _WalletScreenState extends State<WalletScreen> {
                               isReaisMode ? Icons.attach_money : Icons.bolt,
                               color: isReaisMode ? Colors.green : Colors.orange,
                             ),
-                            suffixText: isReaisMode ? 'R\$' : 'sats',
+                            suffixText: isReaisMode ? _fiatSymbol : 'sats',
                             suffixStyle: TextStyle(color: isReaisMode ? Colors.green : Colors.orange),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
@@ -1026,7 +1026,7 @@ class _WalletScreenState extends State<WalletScreen> {
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                isReaisMode ? 'R\$' : 'SAT',
+                                isReaisMode ? _fiatSymbol : 'SAT',
                                 style: TextStyle(
                                   color: isReaisMode ? Colors.green : Colors.orange,
                                   fontWeight: FontWeight.bold,
@@ -1048,7 +1048,7 @@ class _WalletScreenState extends State<WalletScreen> {
                         if (brl != null && brl > 0) {
                           final sats = (brl * 100000000 / btcPriceBrl!).round();
                           preview = Text(
-                            '≈ $sats sats  •  1 BTC = R\$ ${btcPriceBrl!.toStringAsFixed(0)}',
+                            '≈ $sats sats  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
                             style: const TextStyle(color: Colors.white54, fontSize: 12),
                           );
                         }
@@ -1057,7 +1057,7 @@ class _WalletScreenState extends State<WalletScreen> {
                         if (sats != null && sats > 0) {
                           final brl = sats * btcPriceBrl! / 100000000;
                           preview = Text(
-                            '≈ R\$ ${brl.toStringAsFixed(2)}  •  1 BTC = R\$ ${btcPriceBrl!.toStringAsFixed(0)}',
+                            '≈ $_fiatSymbol ${brl.toStringAsFixed(2)}  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
                             style: const TextStyle(color: Colors.white54, fontSize: 12),
                           );
                         }
@@ -2429,7 +2429,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: _ReceiveModeChip(
-                          label: 'R\$',
+                          label: _fiatSymbol,
                           selected: inputMode == 'brl',
                           onTap: (isGenerating || btcPrice <= 0) ? null : () {
                             setModalState(() {
@@ -2466,7 +2466,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       onChanged: (_) => setModalState(() {}),
                       decoration: InputDecoration(
                         labelText: inputMode == 'brl'
-                            ? 'Valor em reais'
+                            ? (_displayCurrency == 'BRL' ? 'Valor em reais' : 'Amount in $_displayCurrency')
                             : AppLocalizations.of(context).t('wallet_quantity_sats'),
                         labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
                         border: OutlineInputBorder(
@@ -2481,7 +2481,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           borderRadius: BorderRadius.circular(12),
                           borderSide: const BorderSide(color: Color(0xFF4CAF50)),
                         ),
-                        prefixText: inputMode == 'brl' ? 'R\$ ' : null,
+                        prefixText: inputMode == 'brl' ? '$_fiatSymbol ' : null,
                         prefixStyle: const TextStyle(color: Colors.white54),
                         suffixText: inputMode == 'brl' ? null : 'sats',
                         suffixStyle: const TextStyle(color: Colors.white54),
@@ -2496,7 +2496,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       if (brl == null || brl <= 0) return const SizedBox.shrink();
                       final sats = (brl * 100000000 / btcPrice).round();
                       return Text(
-                        '\u2248 $sats sats  \u2022  1 BTC = R\$ ${btcPrice.toStringAsFixed(0)}',
+                        '\u2248 $sats sats  \u2022  1 BTC = $_fiatSymbol ${btcPrice.toStringAsFixed(0)}',
                         style: const TextStyle(color: Colors.white54, fontSize: 12),
                       );
                     }),
@@ -2507,7 +2507,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       if (sats == null || sats <= 0) return const SizedBox.shrink();
                       final brl = sats * btcPrice / 100000000;
                       return Text(
-                        '\u2248 R\$ ${brl.toStringAsFixed(2)}',
+                        '\u2248 $_fiatSymbol ${brl.toStringAsFixed(2)}',
                         style: const TextStyle(color: Colors.white54, fontSize: 12),
                       );
                     }),
