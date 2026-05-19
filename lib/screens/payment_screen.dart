@@ -277,8 +277,55 @@ class _PaymentScreenState extends State<PaymentScreen> {
   }) async {
     if (!mounted) return;
     final orderProvider = context.read<OrderProvider>();
+    final lightningProvider = context.read<LightningProvider>();
     setState(() => _isProcessing = true);
 
+    // v598: balance + tier check (mirrors _payWithWalletBalance for PIX).
+    // Sem isso, ordens em moeda estrangeira podiam ser criadas sem sats
+    // disponíveis, e o auto-pay no main.dart falhava silenciosamente quando
+    // o provedor enviava o invoice.
+    int walletBalance;
+    try {
+      walletBalance = await lightningProvider.getBalance();
+    } catch (e) {
+      if (mounted) setState(() => _isProcessing = false);
+      _showError(AppLocalizations.of(context).tp('payment_error_check_balance', {'error': e.toString()}));
+      return;
+    }
+    final lockedSats = orderProvider.committedSats;
+    final availableBalance = walletBalance - lockedSats;
+    if (availableBalance < amountSats) {
+      if (mounted) setState(() => _isProcessing = false);
+      final msg = lockedSats > 0
+          ? AppLocalizations.of(context).tp('payment_insufficient_balance_detailed', {'total': walletBalance.toString(), 'locked': lockedSats.toString(), 'available': availableBalance.toString(), 'needed': amountSats.toString()})
+          : AppLocalizations.of(context).tp('payment_insufficient_balance_simple', {'available': walletBalance.toString(), 'needed': amountSats.toString()});
+      _showError(msg);
+      return;
+    }
+
+    // Tier collateral warning (mesmo padrão do PIX).
+    final userPubkey = orderProvider.currentUserPubkey ?? '';
+    if (userPubkey.isNotEmpty) {
+      final collateralService = LocalCollateralService();
+      final collateral = await collateralService.getCollateral(userPubkey: userPubkey);
+      if (collateral != null && collateral.requiredSats > 0) {
+        final remainingAfterPayment = walletBalance - amountSats;
+        if (remainingAfterPayment < collateral.requiredSats) {
+          final confirmed = await _showTierWarningDialog(
+            tierName: collateral.tierName,
+            requiredSats: collateral.requiredSats,
+            currentBalance: walletBalance,
+            afterPayment: remainingAfterPayment,
+          );
+          if (confirmed != true) {
+            if (mounted) setState(() => _isProcessing = false);
+            return;
+          }
+        }
+      }
+    }
+
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
