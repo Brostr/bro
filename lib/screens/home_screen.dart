@@ -43,6 +43,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   double _btcPrice = 0.0;
   Timer? _priceUpdateTimer;
   Timer? _ordersUpdateTimer; // Timer para atualizar ordens automaticamente
+  Timer? _breezRetryTimer; // v599: retry init when SDK stays offline
   String? _currentUserPubkey; // Para filtro extra de segurança
   int _unreadMessages = 0;
   StreamSubscription<int>? _unreadSub;
@@ -59,6 +60,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _fetchBitcoinPrice();
       _startPricePolling();
       _startOrdersPolling(); // Iniciar polling de ordens
+      _startBreezRetry(); // v599: retry Breez init periodically if it fails
       _checkSeedRecoveryStatus();
       _checkAndShowBackupReminder();
       _checkForAppUpdate();
@@ -73,6 +75,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       // Restart relay service when app comes back to foreground
       BrixRelayService().restart(context);
+      // v599: retry Breez SDK init on resume if previous attempt failed.
+      // Previously a one-shot attempt in initState would leave the wallet
+      // permanently disconnected until app restart if it timed out or hit
+      // a transient network failure. Retrying on resume covers the common
+      // "phone slept / lost network" scenarios.
+      final breez = context.read<BreezProvider>();
+      if (!breez.isInitialized && !breez.isInitializing) {
+        broLog('🔁 [HOME] App resumed e Breez SDK não inicializado — retry...');
+        _initializeBreezSdk();
+      }
     }
   }
   
@@ -324,11 +336,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
 
         if (!success && mounted) {
+          // v599: surface the real provider error so users (and diagnostics
+          // buffer) can see WHY the SDK didn't connect, instead of the
+          // generic "did not fully initialize" message.
+          final errDetail = breezProvider.error;
+          final msg = errDetail != null && errDetail.isNotEmpty
+              ? 'Breez SDK: $errDetail'
+              : 'Breez SDK did not fully initialize.';
+          broLog('⚠️ [HOME] Breez init falhou: $msg');
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Breez SDK did not fully initialize.'),
+            SnackBar(
+              content: Text(msg),
               backgroundColor: Colors.orange,
-              duration: Duration(seconds: 5),
+              duration: const Duration(seconds: 6),
+              action: SnackBarAction(
+                label: 'Retry',
+                textColor: Colors.white,
+                onPressed: () => _initializeBreezSdk(),
+              ),
             ),
           );
         }
@@ -351,6 +376,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _priceUpdateTimer?.cancel();
     _ordersUpdateTimer?.cancel();
+    _breezRetryTimer?.cancel();
     _unreadSub?.cancel();
     super.dispose();
   }
@@ -359,6 +385,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _priceUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) {
         _fetchBitcoinPrice();
+      }
+    });
+  }
+
+  /// v599: Periodically retry Breez SDK init while wallet is offline.
+  /// Without this, a single failed init at app startup leaves the wallet
+  /// permanently disconnected (no balance, no invoice generation) until
+  /// the user kills and reopens the app. The retry interval is intentionally
+  /// long (90s) to avoid hammering the Spark network during outages.
+  void _startBreezRetry() {
+    _breezRetryTimer = Timer.periodic(const Duration(seconds: 90), (_) {
+      if (!mounted) return;
+      final breez = context.read<BreezProvider>();
+      if (!breez.isInitialized && !breez.isInitializing) {
+        broLog('🔁 [HOME] Retry periódico: Breez SDK ainda offline, tentando...');
+        _initializeBreezSdk();
       }
     });
   }
