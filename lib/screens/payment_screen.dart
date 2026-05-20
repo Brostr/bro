@@ -467,29 +467,19 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
         final dynamic valueData = result['value'];
         final double amount = (valueData is num) ? valueData.toDouble() : 0.0;
-        
-        // VALIDAÇÃO: Limites de valor para ordens
-        const double minOrderBrl = 0.01;  // Mínimo R$ 0.01 para testes
-        const double maxOrderBrl = 200.0; // TEMPORÁRIO: Máximo R$ 200 para fase de testes externos
-        
-        if (amount < minOrderBrl) {
+
+        // v601: limite artificial de R$200 removido. Tiers do provedor já
+        // controlam o valor máximo de cada ordem (modelo de risco real).
+        // Mantemos apenas check de valor > 0 (zero impede convertPrice).
+        if (amount <= 0) {
           if (!mounted) return;
-          _showError(AppLocalizations.of(context).tp('payment_value_too_low', {'min': minOrderBrl.toStringAsFixed(2)}));
+          _showError(AppLocalizations.of(context).t('payment_invalid_or_unrecognized'));
           setState(() {
             _isProcessing = false;
           });
           return;
         }
-        
-        if (amount > maxOrderBrl) {
-          if (!mounted) return;
-          _showError(AppLocalizations.of(context).tp('payment_value_too_high', {'max': maxOrderBrl.toStringAsFixed(2)}));
-          setState(() {
-            _isProcessing = false;
-          });
-          return;
-        }
-        
+
         broLog('💰 Chamando convertPrice com amount: $amount');
         final conversion = await orderProvider.convertPrice(amount);
         broLog('📊 Resposta do convertPrice: $conversion');
