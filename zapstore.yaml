@@ -1,0 +1,32 @@
+# Zapstore publish config — read by `zsp publish`
+# Docs: https://zapstore.dev/docs/publish
+
+repository: https://github.com/Brostr/bro
+pubkey: npub14dkurlx4vkd5qmf7q5fwqh52lh3mn078wms2jetl2l4wnmcxnghqlud5dt
+
+# Pull metadata (name, description, license, topics) from GitHub repo.
+# Anything you set explicitly below overrides it.
+metadata_sources:
+  - github
+
+# Optional explicit overrides (zsp fills defaults from GitHub when omitted)
+name: Bro
+summary: Pay bills with Bitcoin. No banks. No KYC.
+description: |
+  Bro is an open peer-to-peer protocol that lets anyone pay bills (PIX, Boleto,
+  TED in Brazil; CoDi in Mexico; PromptPay in Thailand; Transferencia 3.0 in
+  Argentina; Bre-B in Colombia) using Bitcoin over the Lightning Network.
+
+  All communication is end-to-end encrypted (NIP-44) and travels through
+  decentralized Nostr relays — no central server, no accounts, no KYC.
+
+  Features:
+  - Self-custodial Lightning wallet (Breez Spark SDK)
+  - Multi-currency P2P marketplace (sats, BRL, USD, EUR, ARS)
+  - BRIX Lightning Address — receive Bitcoin via phone or email
+  - Boleto + EMVCo QR code scanner
+  - Real-time order tracking
+  - Collateral tiers and AI-assisted dispute resolution
+  - Login with Nostr key (nsec) or BIP-39 seed
+license: MIT
+homepage: https://www.brostr.app
