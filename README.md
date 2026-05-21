@@ -57,14 +57,14 @@ All communication is encrypted (NIP-44) and relayed through decentralized Nostr 
 
 ### For Users
 
-- ⚡ Pague contas com Bitcoin em **BR (PIX/Boleto/TED), MX (CoDi), TH (PromptPay), AR (Transf 3.0), CO (Bre-B)**
-- 📸 Scanner de boleto e QR EMVCo
-- 🔐 Carteira Lightning self-custodial (Breez Spark)
-- 🛒 Marketplace P2P multi-moeda (sats, BRL, USD, EUR, ARS)
-- 📊 Tracking de ordens em tempo real
-- 📜 Histórico preserva a moeda original de cada ordem
-- 🔑 Login com chave Nostr (nsec) ou seed BIP-39
-- ⚡ [BRIX](https://www.brostr.app/#brix) — receba Bitcoin via telefone ou email
+- ⚡ Pay bills with Bitcoin in **BR (PIX/Boleto/TED), MX (CoDi), TH (PromptPay), AR (Transf 3.0), CO (Bre-B)**
+- 📸 Boleto + EMVCo QR scanner
+- 🔐 Self-custodial Lightning wallet (Breez Spark)
+- 🛒 Multi-currency P2P marketplace (sats, BRL, USD, EUR, ARS)
+- 📊 Real-time order tracking
+- 📜 Transaction history preserves each order's original currency
+- 🔑 Login with Nostr key (nsec) or BIP-39 seed
+- ⚡ [BRIX](https://www.brostr.app/#brix) — receive Bitcoin via phone or email
 
 </td>
 <td width="50%">
@@ -100,11 +100,11 @@ All communication is encrypted (NIP-44) and relayed through decentralized Nostr 
 
 ## Download
 
-**Versão atual:** v1.0.133 (build 604) — ✅ STABLE
+**Current version:** v1.0.133 (build 604) — ✅ STABLE
 
 | Platform | Link | Status |
 |----------|------|--------|
-| 🤖 Android (Latest) | [📥 Baixar APK](https://github.com/Brostr/bro/releases/latest/download/app-release.apk) | ✅ Available |
+| 🤖 Android (Latest) | [📥 Download APK](https://github.com/Brostr/bro/releases/latest/download/app-release.apk) | ✅ Available |
 | 🍎 iOS Beta | [TestFlight](https://testflight.apple.com/join/rkHbPQ94) | ✅ Available |
 | ⚡ Zapstore | Coming soon | 🔜 |
 | 🤖 Google Play | Coming soon | 🔜 |
@@ -112,34 +112,34 @@ All communication is encrypted (NIP-44) and relayed through decentralized Nostr 
 
 ### Changelog — recent builds
 
-**build 604 — marketplace multi-moeda**
-- 🌍 Ofertas do marketplace podem ser criadas em sats, BRL, USD, EUR ou ARS — conversão sats↔fiat automática no momento da publicação
-- 🔍 Filtro de moeda no marketplace (Todas / sats / BRL / USD / EUR / ARS)
-- 💱 Cada oferta preserva a moeda original no display (fiat em destaque, sats como referência da rede Lightning)
-- 🏷️ Tag Nostr `t cur:xxx` para filtro server-side por moeda
-- ✂️ Removido `relay.primal.net` dos relays do marketplace (estava dropando os kinds 30019/30085)
+**build 604 — multi-currency marketplace**
+- 🌍 Marketplace offers can be priced in sats, BRL, USD, EUR or ARS — automatic sats↔fiat conversion at publish time
+- 🔍 Currency filter on the marketplace (All / sats / BRL / USD / EUR / ARS)
+- 💱 Each offer preserves its original currency for display (fiat highlighted, sats shown as the Lightning network reference)
+- 🏷️ Nostr `t cur:xxx` tag for server-side currency filtering
+- ✂️ Removed `relay.primal.net` from marketplace relays (it was dropping kinds 30019/30085)
 
-**build 603 — dashboard multi-moeda**
-- 🇧🇷🇲🇽🇹🇭🇦🇷🇨🇴 Cada ordem renderiza na moeda original do código (PIX em R$, CoDi em MXN, PromptPay em THB, Transf 3.0 em ARS, Bre-B em COP)
-- 🏷️ `PaymentMethods.displayName` em vez de hardcode "PIX/Boleto"
+**build 603 — multi-currency dashboard**
+- 🇧🇷🇲🇽🇹🇭🇦🇷🇨🇴 Each order renders in the original currency from its payment code (PIX in BRL, CoDi in MXN, PromptPay in THB, Transf 3.0 in ARS, Bre-B in COP)
+- 🏷️ `PaymentMethods.displayName` instead of hardcoded "PIX/Boleto"
 
-**build 602 — pagamentos multi-país end-to-end**
-- 🇦🇷 Transferencia 3.0 (Argentina / ARS) ativado — fluxo completo via Nostr
-- ❌ Removido o limite artificial de R$ 200 (limites de tier já enforçam por ordem)
-- 🧪 Scripts pra gerar QRs EMVCo de teste em BR / MX / TH / AR / CO
+**build 602 — multi-country payments end-to-end**
+- 🇦🇷 Transferencia 3.0 (Argentina / ARS) enabled — full flow via Nostr
+- ❌ Removed the artificial R$ 200 cap (tier limits already enforce per-order amounts)
+- 🧪 Scripts to generate EMVCo test QR codes for BR / MX / TH / AR / CO
 
-**build 597–600 — base multi-país + estabilidade**
-- 🌐 EMVCo-first routing: detecta PIX (BR), CoDi (MX), PromptPay (TH), Transf 3.0 (AR), Bre-B (CO)
-- 🌍 Display locale-aware do preço do BTC + telas de ordem/wallet/edu cientes de moeda
-- 🔄 Auto-retry do Breez SDK no resume + retry periódico de 90s
-- 🟢 Diagnostics removida, logs de release surgem via `print('[bro] ...')`
+**build 597–600 — multi-country base + stability**
+- 🌐 EMVCo-first routing: detects PIX (BR), CoDi (MX), PromptPay (TH), Transf 3.0 (AR), Bre-B (CO)
+- 🌍 Locale-aware BTC price display + currency-aware order/wallet/edu screens
+- 🔄 Breez SDK auto-retry on resume + periodic 90s retry
+- 🟢 Diagnostics removed, release logs surface via `print('[bro] ...')`
 
 **build 587 — BRIX auto-forward**
-- ⚡ BRIX Lightning Address: pagamentos online e offline funcionando
-- 📱 FCM push acorda o app em background pra gerar invoices Spark
-- 🔒 Pagamentos vão direto pro canal Spark (cloud-hosted) — sem intermediários
-- 🛡️ Timeout estendido no servidor para SDK cold-start em background
-- 🔐 Isolamento de storage entre main e background SDK
+- ⚡ BRIX Lightning Address: online and offline payments working
+- 📱 FCM push wakes the app in background to generate Spark invoices
+- 🔒 Payments go straight into the Spark channel (cloud-hosted) — no intermediaries
+- 🛡️ Extended server timeout for SDK cold-start in background
+- 🔐 Storage isolation between main and background SDK
 
 ---
 
@@ -209,9 +209,11 @@ Full protocol specification: [`specs/`](specs/)
 │  ├── Breez SDK Spark   ← Self-custodial Lightning wallet     │
 │  ├── Breez Liquid      ← Liquid sidechain fallback (Boltz)   │
 │  ├── Nostr Relays      ← Decentralized event transport       │
-│  └── Backend API       ← Order matching, escrow, disputes    │
+│  └── Backend API       ← Push notifications + optional helpers │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+> **Note on the backend:** the Bro server is used for push notifications (FCM/APNS wake-ups) and a few convenience endpoints. The app remains fully functional without it — all orders, payments, chat and proofs travel peer-to-peer over Nostr and Lightning. The backend is a UX accelerator, not a point of centralization.
 
 ### Tech Stack
 
