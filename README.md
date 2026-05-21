@@ -57,13 +57,14 @@ All communication is encrypted (NIP-44) and relayed through decentralized Nostr 
 
 ### For Users
 
-- ⚡ Pay PIX, Boleto, and TED bills with Bitcoin
-- 📸 Barcode & QR code scanner
-- 🔐 Self-custodial Lightning wallet (Breez Spark)
-- 📊 Real-time order tracking
-- 📜 Transaction history
-- 🔑 Login with Nostr key (nsec) or BIP-39 seed
-- ⚡ [BRIX](https://www.brostr.app/#brix) — receive Bitcoin via phone or email
+- ⚡ Pague contas com Bitcoin em **BR (PIX/Boleto/TED), MX (CoDi), TH (PromptPay), AR (Transf 3.0), CO (Bre-B)**
+- 📸 Scanner de boleto e QR EMVCo
+- 🔐 Carteira Lightning self-custodial (Breez Spark)
+- 🛒 Marketplace P2P multi-moeda (sats, BRL, USD, EUR, ARS)
+- 📊 Tracking de ordens em tempo real
+- 📜 Histórico preserva a moeda original de cada ordem
+- 🔑 Login com chave Nostr (nsec) ou seed BIP-39
+- ⚡ [BRIX](https://www.brostr.app/#brix) — receba Bitcoin via telefone ou email
 
 </td>
 <td width="50%">
@@ -99,20 +100,44 @@ All communication is encrypted (NIP-44) and relayed through decentralized Nostr 
 
 ## Download
 
-**Versão atual:** v1.0.132 (build 377) — ✅ STABLE
+**Versão atual:** v1.0.133 (build 604) — ✅ STABLE
 
 | Platform | Link | Status |
 |----------|------|--------|
-| 🤖 Android (Latest) | [📥 Baixar APK](https://github.com/Quizzicarol/bro-releases/releases/download/v1.0.132/bro-latest.apk) | ✅ Available |
+| 🤖 Android (Latest) | [📥 Baixar APK](https://github.com/Brostr/bro/releases/latest/download/app-release.apk) | ✅ Available |
 | 🍎 iOS Beta | [TestFlight](https://testflight.apple.com/join/rkHbPQ94) | ✅ Available |
+| ⚡ Zapstore | Coming soon | 🔜 |
 | 🤖 Google Play | Coming soon | 🔜 |
 | 🍎 App Store | Coming soon | 🔜 |
 
-### Changelog (build 377)
+### Changelog — recent builds
+
+**build 604 — marketplace multi-moeda**
+- 🌍 Ofertas do marketplace podem ser criadas em sats, BRL, USD, EUR ou ARS — conversão sats↔fiat automática no momento da publicação
+- 🔍 Filtro de moeda no marketplace (Todas / sats / BRL / USD / EUR / ARS)
+- 💱 Cada oferta preserva a moeda original no display (fiat em destaque, sats como referência da rede Lightning)
+- 🏷️ Tag Nostr `t cur:xxx` para filtro server-side por moeda
+- ✂️ Removido `relay.primal.net` dos relays do marketplace (estava dropando os kinds 30019/30085)
+
+**build 603 — dashboard multi-moeda**
+- 🇧🇷🇲🇽🇹🇭🇦🇷🇨🇴 Cada ordem renderiza na moeda original do código (PIX em R$, CoDi em MXN, PromptPay em THB, Transf 3.0 em ARS, Bre-B em COP)
+- 🏷️ `PaymentMethods.displayName` em vez de hardcode "PIX/Boleto"
+
+**build 602 — pagamentos multi-país end-to-end**
+- 🇦🇷 Transferencia 3.0 (Argentina / ARS) ativado — fluxo completo via Nostr
+- ❌ Removido o limite artificial de R$ 200 (limites de tier já enforçam por ordem)
+- 🧪 Scripts pra gerar QRs EMVCo de teste em BR / MX / TH / AR / CO
+
+**build 597–600 — base multi-país + estabilidade**
+- 🌐 EMVCo-first routing: detecta PIX (BR), CoDi (MX), PromptPay (TH), Transf 3.0 (AR), Bre-B (CO)
+- 🌍 Display locale-aware do preço do BTC + telas de ordem/wallet/edu cientes de moeda
+- 🔄 Auto-retry do Breez SDK no resume + retry periódico de 90s
+- 🟢 Diagnostics removida, logs de release surgem via `print('[bro] ...')`
+
+**build 587 — BRIX auto-forward**
 - ⚡ BRIX Lightning Address: pagamentos online e offline funcionando
-- 📱 FCM push acorda o app em background para gerar invoices Spark
+- 📱 FCM push acorda o app em background pra gerar invoices Spark
 - 🔒 Pagamentos vão direto pro canal Spark (cloud-hosted) — sem intermediários
-- 🔄 Registro FCM corrigido para verificação por email/SMS
 - 🛡️ Timeout estendido no servidor para SDK cold-start em background
 - 🔐 Isolamento de storage entre main e background SDK
 
