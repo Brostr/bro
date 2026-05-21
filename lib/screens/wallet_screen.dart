@@ -15,6 +15,7 @@ import '../services/lnaddress_service.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
 import '../services/bitcoin_price_service.dart';
+import '../providers/locale_provider.dart';
 import '../config.dart';
 import '../l10n/app_localizations.dart';
 import '../services/brix_service.dart';
@@ -38,6 +39,9 @@ class _WalletScreenState extends State<WalletScreen> {
   bool _isLoading = false;
   String? _error;
   double _btcPrice = 0;
+  // v596: moeda de exibição (BRL para pt, USD para en/es).
+  String _displayCurrency = 'BRL';
+  String _lastLanguageCode = 'pt';
   bool _showAllTransactions = false;
   int _sdkPaymentsCount = 0;  // v499: diagnostic
 
@@ -66,6 +70,23 @@ class _WalletScreenState extends State<WalletScreen> {
     };
   }
 
+  /// v596: símbolo de moeda dependendo do idioma.
+  String get _fiatSymbol => _displayCurrency == 'BRL' ? r'R$' : _displayCurrency;
+
+  /// v596: refaz fetch do preço BTC se o idioma mudou.
+  Future<void> _refreshLocaleIfNeeded() async {
+    try {
+      final lang = context.read<LocaleProvider>().locale.languageCode;
+      if (lang == _lastLanguageCode) return;
+      _lastLanguageCode = lang;
+      _displayCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
+      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
+      if (mounted && price != null) {
+        setState(() => _btcPrice = price);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadWalletInfo() async {
     setState(() {
       _isLoading = true;
@@ -90,8 +111,13 @@ class _WalletScreenState extends State<WalletScreen> {
       final balance = await breezProvider.getBalance();
       final payments = await breezProvider.listPayments();
       
-      // Buscar preço BTC para equivalência em BRL
-      final price = await BitcoinPriceService.getBitcoinPriceWithCache();
+      // Buscar preço BTC na moeda de exibição (BRL para pt, USD para en/es).
+      try {
+        final lang = context.read<LocaleProvider>().locale.languageCode;
+        _lastLanguageCode = lang;
+        _displayCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
+      } catch (_) {}
+      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
       if (price != null) _btcPrice = price;
       
       // NOTA: Ganhos como Bro são recebidos via Lightning (invoice pago pelo usuário)
@@ -433,6 +459,8 @@ class _WalletScreenState extends State<WalletScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // v596: react to language changes by re-fetching BTC price in display currency.
+    _refreshLocaleIfNeeded();
     return Scaffold(
       backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
@@ -592,7 +620,7 @@ class _WalletScreenState extends State<WalletScreen> {
             ),
             if (_btcPrice > 0) ...[              const SizedBox(height: 2),
               Text(
-                '≈ R\$ ${(availableBtc * _btcPrice).toStringAsFixed(2)}',
+                '≈ $_fiatSymbol ${(availableBtc * _btcPrice).toStringAsFixed(2)}',
                 style: const TextStyle(
                   color: Colors.white70,
                   fontSize: 13,
@@ -746,8 +774,8 @@ class _WalletScreenState extends State<WalletScreen> {
     final hasLockedFunds = totalLockedSats > 0;
     final hasTierActive = tierLockedSats > 0;
     
-    // Fetch BTC price for BRL conversion
-    btcPriceBrl = await BitcoinPriceService.getBitcoinPriceWithCache();
+    // Fetch BTC price for fiat conversion (BRL ou USD conforme idioma).
+    btcPriceBrl = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
     
     if (!mounted) return;
     
@@ -946,7 +974,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           enabled: !isSending,
                           onChanged: (_) => setModalState(() {}),
                           decoration: InputDecoration(
-                            labelText: isReaisMode ? 'Valor em Reais' : AppLocalizations.of(context).t('wallet_amount_label'),
+                            labelText: isReaisMode ? (_displayCurrency == 'BRL' ? 'Valor em Reais' : 'Amount in $_displayCurrency') : AppLocalizations.of(context).t('wallet_amount_label'),
                             labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
                             hintText: isReaisMode ? 'Ex: 10.00' : 'Ex: 1000',
                             hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
@@ -954,7 +982,7 @@ class _WalletScreenState extends State<WalletScreen> {
                               isReaisMode ? Icons.attach_money : Icons.bolt,
                               color: isReaisMode ? Colors.green : Colors.orange,
                             ),
-                            suffixText: isReaisMode ? 'R\$' : 'sats',
+                            suffixText: isReaisMode ? _fiatSymbol : 'sats',
                             suffixStyle: TextStyle(color: isReaisMode ? Colors.green : Colors.orange),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(12),
@@ -998,7 +1026,7 @@ class _WalletScreenState extends State<WalletScreen> {
                               ),
                               const SizedBox(width: 4),
                               Text(
-                                isReaisMode ? 'R\$' : 'SAT',
+                                isReaisMode ? _fiatSymbol : 'SAT',
                                 style: TextStyle(
                                   color: isReaisMode ? Colors.green : Colors.orange,
                                   fontWeight: FontWeight.bold,
@@ -1020,7 +1048,7 @@ class _WalletScreenState extends State<WalletScreen> {
                         if (brl != null && brl > 0) {
                           final sats = (brl * 100000000 / btcPriceBrl!).round();
                           preview = Text(
-                            '≈ $sats sats  •  1 BTC = R\$ ${btcPriceBrl!.toStringAsFixed(0)}',
+                            '≈ $sats sats  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
                             style: const TextStyle(color: Colors.white54, fontSize: 12),
                           );
                         }
@@ -1029,7 +1057,7 @@ class _WalletScreenState extends State<WalletScreen> {
                         if (sats != null && sats > 0) {
                           final brl = sats * btcPriceBrl! / 100000000;
                           preview = Text(
-                            '≈ R\$ ${brl.toStringAsFixed(2)}  •  1 BTC = R\$ ${btcPriceBrl!.toStringAsFixed(0)}',
+                            '≈ $_fiatSymbol ${brl.toStringAsFixed(2)}  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
                             style: const TextStyle(color: Colors.white54, fontSize: 12),
                           );
                         }
@@ -2401,7 +2429,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: _ReceiveModeChip(
-                          label: 'R\$',
+                          label: _fiatSymbol,
                           selected: inputMode == 'brl',
                           onTap: (isGenerating || btcPrice <= 0) ? null : () {
                             setModalState(() {
@@ -2438,7 +2466,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       onChanged: (_) => setModalState(() {}),
                       decoration: InputDecoration(
                         labelText: inputMode == 'brl'
-                            ? 'Valor em reais'
+                            ? (_displayCurrency == 'BRL' ? 'Valor em reais' : 'Amount in $_displayCurrency')
                             : AppLocalizations.of(context).t('wallet_quantity_sats'),
                         labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
                         border: OutlineInputBorder(
@@ -2453,7 +2481,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           borderRadius: BorderRadius.circular(12),
                           borderSide: const BorderSide(color: Color(0xFF4CAF50)),
                         ),
-                        prefixText: inputMode == 'brl' ? 'R\$ ' : null,
+                        prefixText: inputMode == 'brl' ? '$_fiatSymbol ' : null,
                         prefixStyle: const TextStyle(color: Colors.white54),
                         suffixText: inputMode == 'brl' ? null : 'sats',
                         suffixStyle: const TextStyle(color: Colors.white54),
@@ -2468,7 +2496,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       if (brl == null || brl <= 0) return const SizedBox.shrink();
                       final sats = (brl * 100000000 / btcPrice).round();
                       return Text(
-                        '\u2248 $sats sats  \u2022  1 BTC = R\$ ${btcPrice.toStringAsFixed(0)}',
+                        '\u2248 $sats sats  \u2022  1 BTC = $_fiatSymbol ${btcPrice.toStringAsFixed(0)}',
                         style: const TextStyle(color: Colors.white54, fontSize: 12),
                       );
                     }),
@@ -2479,7 +2507,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       if (sats == null || sats <= 0) return const SizedBox.shrink();
                       final brl = sats * btcPrice / 100000000;
                       return Text(
-                        '\u2248 R\$ ${brl.toStringAsFixed(2)}',
+                        '\u2248 $_fiatSymbol ${brl.toStringAsFixed(2)}',
                         style: const TextStyle(color: Colors.white54, fontSize: 12),
                       );
                     }),
@@ -3184,10 +3212,7 @@ class _WalletScreenState extends State<WalletScreen> {
                 ),
                 if (_btcPrice > 0)
                   Text(
-                    AppLocalizations.of(context).tp(
-                      'wallet_amount_brl_approx',
-                      {'brl': (displayAmount / 100000000 * _btcPrice).toStringAsFixed(2)},
-                    ),
+                    '≈ $_fiatSymbol ${(displayAmount / 100000000 * _btcPrice).toStringAsFixed(2)}',
                     style: TextStyle(
                       color: Colors.white.withOpacity(0.55),
                       fontSize: 11,
@@ -3411,10 +3436,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           ),
                           if (_btcPrice > 0)
                             Text(
-                              AppLocalizations.of(context).tp(
-                                'wallet_amount_brl_approx',
-                                {'brl': (detailAmount / 100000000 * _btcPrice).toStringAsFixed(2)},
-                              ),
+                              '≈ $_fiatSymbol ${(detailAmount / 100000000 * _btcPrice).toStringAsFixed(2)}',
                               style: TextStyle(
                                 color: Colors.white.withOpacity(0.6),
                                 fontSize: 13,

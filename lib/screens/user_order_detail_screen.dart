@@ -233,7 +233,7 @@ class _UserOrderDetailScreenState extends State<UserOrderDetailScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'R\$ ${_order!.amount.toStringAsFixed(2)}',
+            (() { final c = _order!.currency.toUpperCase(); final s = c == 'BRL' ? r'R$' : c; return '$s ${_order!.amount.toStringAsFixed(2)}'; })(),
             style: const TextStyle(
               color: Colors.white,
               fontSize: 36,
@@ -285,7 +285,7 @@ class _UserOrderDetailScreenState extends State<UserOrderDetailScreen> {
         ),
         const SizedBox(height: 4),
         Text(
-          'R\$ ${value.toStringAsFixed(2)}',
+          (() { final c = _order?.currency.toUpperCase() ?? 'BRL'; final s = c == 'BRL' ? r'R$' : c; return '$s ${value.toStringAsFixed(2)}'; })(),
           style: const TextStyle(
             color: Colors.white,
             fontSize: 16,

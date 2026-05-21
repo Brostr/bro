@@ -133,6 +133,7 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
           'id': order.id,
           'status': order.status,
           'amount_brl': order.amount,
+          'currency': order.currency,
           'amount_sats': (order.btcAmount * 100000000).toInt(),
           'created_at': order.createdAt.toIso8601String(),
           'expires_at': order.createdAt.add(const Duration(hours: 24)).toIso8601String(),
@@ -203,6 +204,7 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
             'id': order.id,
             'status': order.status,
             'amount_brl': order.amount,
+            'currency': order.currency,
             'amount_sats': (order.btcAmount * 100000000).toInt(),
             'created_at': order.createdAt.toIso8601String(),
             'expires_at': order.createdAt.add(const Duration(hours: 24)).toIso8601String(),
@@ -1576,6 +1578,8 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
     final expiresAt = DateTime.parse(order['expires_at'] as String);
     final paymentType = order['payment_type'] as String? ?? 'pix';
     final metadata = order['metadata'] as Map<String, dynamic>?;
+    final orderCurrency = (order['currency'] as String?)?.toUpperCase() ?? 'BRL';
+    final orderCurSym = orderCurrency == 'BRL' ? r'R$' : orderCurrency;
 
     final statusInfo = _getStatusInfo(status, metadata: metadata);
     final canCancel = status == 'pending';
@@ -1619,7 +1623,7 @@ class _UserOrdersScreenState extends State<UserOrdersScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          'R\$ ${amount.toStringAsFixed(2)}',
+                          '$orderCurSym ${amount.toStringAsFixed(2)}',
                           style: const TextStyle(
                             fontSize: 24,
                             fontWeight: FontWeight.bold,

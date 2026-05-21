@@ -17,7 +17,9 @@ import '../services/notification_service.dart';
 import '../services/bitcoin_price_service.dart';
 import '../models/collateral_tier.dart';
 import '../config.dart';
+import '../config/payment_methods.dart';
 import '../l10n/app_localizations.dart';
+import '../services/api_service.dart';
 import 'provider_order_detail_screen.dart';
 
 /// Helper para substring seguro - evita RangeError em strings curtas
@@ -52,6 +54,13 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
   List<Map<String, dynamic>> _myOrders = []; // Ordens aceitas por este provedor
   Set<String> _seenOrderIds = {};
   static const String _seenOrderIdsKey = 'bro_provider_seen_order_ids';
+
+  /// v588: Métodos de pagamento que o provedor quer atender.
+  /// Default = todos. Persistido em SharedPreferences e sincronizado com o
+  /// backend para que pushes 'Nova ordem' só cheguem para métodos selecionados.
+  late Set<String> _selectedMethods;
+  static const String _selectedMethodsKey = 'bro_provider_selected_methods';
+
   bool _isLoading = false;
   bool _isSyncingNostr = false;
   bool _hasCollateral = false;
@@ -77,6 +86,10 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
     
     // Load persisted seen order IDs so widget rebuilds don't re-notify
     _loadSeenOrderIds();
+
+    // v588: load persisted payment-method filter (defaults to all)
+    _selectedMethods = PaymentMethods.allIds.toSet();
+    _loadSelectedMethods();
     
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // PERFORMANCE v1.0.219+220: Mostrar ordens aceitas do cache local IMEDIATAMENTE
@@ -100,6 +113,58 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
     final list = _seenOrderIds.toList();
     if (list.length > 500) list.removeRange(0, list.length - 500);
     await prefs.setString(_seenOrderIdsKey, jsonEncode(list));
+  }
+
+  // ── v588: payment-method filter persistence ─────────────────────────
+
+  Future<void> _loadSelectedMethods() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_selectedMethodsKey);
+      if (raw == null || raw.isEmpty) return;
+      final list = (jsonDecode(raw) as List).map((e) => e.toString()).toSet();
+      if (mounted && list.isNotEmpty) {
+        setState(() => _selectedMethods = list);
+      }
+    } catch (e) {
+      broLog('[FILTER] load failed: $e');
+    }
+  }
+
+  Future<void> _saveSelectedMethods() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_selectedMethodsKey, jsonEncode(_selectedMethods.toList()));
+      // Fire-and-forget: backend usa essa lista para filtrar pushes 'Nova ordem'.
+      ApiService().setProviderPaymentMethods(_selectedMethods.toList()).catchError((e) {
+        broLog('[FILTER] backend sync failed: $e');
+        return false;
+      });
+      // v594: derivar moedas aceitas dos grupos não-BRL totalmente marcados e
+      // sincronizar com o backend para filtrar broadcasts em moeda estrangeira.
+      final acceptedCurrencies = <String>[];
+      for (final g in PaymentMethods.kGroups) {
+        if (g.currency == 'BRL') continue;
+        if (g.ids.every(_selectedMethods.contains)) {
+          acceptedCurrencies.add(g.currency);
+        }
+      }
+      ApiService().setProviderAcceptedCurrencies(acceptedCurrencies).catchError((e) {
+        broLog('[FILTER] currencies sync failed: $e');
+        return false;
+      });
+    } catch (e) {
+      broLog('[FILTER] save failed: $e');
+    }
+  }
+
+  /// Retorna true se o método deve aparecer com o filtro atual.
+  /// Tolerante a billTypes legados/desconhecidos: se não está no registry,
+  /// mostramos por segurança (provedor não perde ordens reais).
+  bool _passesMethodFilter(String? billType) {
+    if (billType == null || billType.isEmpty) return true;
+    if (PaymentMethods.byId(billType) == null) return true; // legacy/unknown
+    return _selectedMethods.contains(billType);
   }
 
   void _startOrdersPolling() {
@@ -143,8 +208,10 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
     
     // CORREÇÃO: Aplicar mesmo filtro de status que _loadOrders
     // Só mostrar ordens pending e payment_received (usuário já pagou)
+    // v588: + filtro de método de pagamento escolhido pelo provedor
     final filteredAvailable = allAvailable.where((o) {
-      return o.status == 'pending' || o.status == 'payment_received';
+      if (o.status != 'pending' && o.status != 'payment_received') return false;
+      return _passesMethodFilter(o.billType);
     }).toList();
     
     broLog('📋 _loadOrdersFromProvider: ${allAvailable.length} total, ${filteredAvailable.length} filtradas, ${accepted.length} aceitas');
@@ -307,11 +374,13 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
       
       // Processar ordens disponíveis para aceitar (de outros usuários)
       // FILTRO: Mostrar ordens pending e payment_received (já pagaram via Lightning)
+      // v588: + filtro de método de pagamento escolhido pelo provedor
       for (final order in availableFromProvider) {
         // CORREÇÃO: Incluir payment_received — são ordens onde o usuário já pagou!
         if (order.status != 'pending' && order.status != 'payment_received') {
           continue;
         }
+        if (!_passesMethodFilter(order.billType)) continue;
         
         final orderMap = order.toJson();
         orderMap['amount'] = order.amount;
@@ -552,12 +621,16 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
   }
 
   Widget _buildAvailableOrdersTab(CollateralProvider collateralProvider) {
-    return RefreshIndicator(
-      onRefresh: () => _loadOrders(isRefresh: true),
-      color: const Color(0xFFFF6B6B),
-      displacement: 20, // v252: Trigger mais fácil
-      child: _availableOrders.isEmpty
-        ? ListView(
+    return Column(
+      children: [
+        _buildMethodFilterBar(),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: () => _loadOrders(isRefresh: true),
+            color: const Color(0xFFFF6B6B),
+            displacement: 20, // v252: Trigger mais fácil
+            child: _availableOrders.isEmpty
+              ? ListView(
             physics: const AlwaysScrollableScrollPhysics(),
             children: [_buildEmptyAvailableView()],
           )
@@ -572,6 +645,184 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
               return _buildAvailableOrderCard(_availableOrders[index], collateralProvider);
             },
           ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── v588: barra de filtro de métodos de pagamento ────────────────────
+  Widget _buildMethodFilterBar() {
+    final l = AppLocalizations.of(context)!;
+    final groups = PaymentMethods.kGroups;
+    final selectedGroups = groups.where((g) => g.ids.every(_selectedMethods.contains)).toList();
+    final total = groups.length;
+    final n = selectedGroups.length;
+    String label;
+    if (n == total) {
+      label = l.t('prov_ord_filter_all');
+    } else if (_selectedMethods.isEmpty) {
+      label = l.t('prov_ord_filter_none');
+    } else if (n == 1) {
+      final g = selectedGroups.first;
+      label = '${g.flag} ${g.label} · ${g.currency}';
+    } else {
+      label = l.tp('prov_ord_filter_count', {'n': n.toString(), 'total': total.toString()});
+    }
+
+    return Container(
+      color: const Color(0xFF1A1A1A),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: InkWell(
+        onTap: _openMethodFilterSheet,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: const Color(0xFF2A2A2A),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFFF6B6B).withOpacity(0.3)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.tune, color: Color(0xFFFF6B6B), size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Colors.white54, size: 18),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openMethodFilterSheet() {
+    final l = AppLocalizations.of(context)!;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSheet) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Row(children: [
+                  const Icon(Icons.tune, color: Color(0xFFFF6B6B)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      l.t('prov_ord_filter_title'),
+                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Text(
+                  l.t('prov_ord_filter_help'),
+                  style: const TextStyle(color: Colors.white60, fontSize: 12),
+                ),
+              ),
+              const Divider(color: Colors.white12, height: 24),
+              Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                TextButton.icon(
+                  onPressed: () {
+                    setState(() => _selectedMethods = PaymentMethods.allIds.toSet());
+                    setSheet(() {});
+                  },
+                  icon: const Icon(Icons.select_all, color: Colors.white70),
+                  label: Text(l.t('prov_ord_filter_all_btn'),
+                      style: const TextStyle(color: Colors.white70)),
+                ),
+                TextButton.icon(
+                  onPressed: () {
+                    setState(() => _selectedMethods.clear());
+                    setSheet(() {});
+                  },
+                  icon: const Icon(Icons.clear_all, color: Colors.white70),
+                  label: Text(l.t('prov_ord_filter_none_btn'),
+                      style: const TextStyle(color: Colors.white70)),
+                ),
+              ]),
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: PaymentMethods.kGroups.map((g) {
+                    final on = g.ids.every(_selectedMethods.contains);
+                    return CheckboxListTile(
+                      value: on,
+                      activeColor: const Color(0xFFFF6B6B),
+                      controlAffinity: ListTileControlAffinity.leading,
+                      title: Row(children: [
+                        Text(g.flag, style: const TextStyle(fontSize: 22)),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text('${g.label}  ·  ${g.currency}',
+                              style: const TextStyle(color: Colors.white)),
+                        ),
+                        if (!g.active)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(l.t('prov_ord_filter_soon'),
+                                style: const TextStyle(color: Colors.orange, fontSize: 10)),
+                          ),
+                      ]),
+                      onChanged: (_) {
+                        setState(() {
+                          if (on) {
+                            _selectedMethods.removeAll(g.ids);
+                          } else {
+                            _selectedMethods.addAll(g.ids);
+                          }
+                        });
+                        setSheet(() {});
+                      },
+                    );
+                  }).toList(),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFF6B6B),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    onPressed: () async {
+                      await _saveSelectedMethods();
+                      if (mounted) {
+                        _loadOrdersFromProvider();
+                      }
+                      if (ctx.mounted) Navigator.pop(ctx);
+                    },
+                    child: Text(l.t('prov_ord_filter_apply'),
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+        );
+      }),
     );
   }
 
@@ -622,6 +873,10 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
     
     final amount = (order['amount'] as num?)?.toDouble() ?? 0;
     final paymentType = order['payment_type'] as String? ?? 'pix';
+    final pm = PaymentMethods.byId(paymentType);
+    final currencyCode = pm?.currency ?? 'BRL';
+    final currencyPrefix = currencyCode == 'BRL' ? r'R$ ' : '$currencyCode ';
+    final methodLabel = pm != null ? '${pm.flag} ${pm.name}' : paymentType.toUpperCase();
     final createdAtStr = order['created_at'] as String?;
     final createdAt = createdAtStr != null ? DateTime.tryParse(createdAtStr) ?? DateTime.now() : DateTime.now();
     final timeAgo = _getTimeAgo(createdAt);
@@ -670,7 +925,7 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
                         Icon(_getPaymentIcon(paymentType), color: Colors.orange, size: 24),
                         const SizedBox(width: 8),
                         Text(
-                          paymentType.toUpperCase(),
+                          methodLabel,
                           style: const TextStyle(
                             color: Colors.orange,
                             fontWeight: FontWeight.bold,
@@ -699,7 +954,7 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'R\$ ${amount.toStringAsFixed(2)}',
+                  '$currencyPrefix${amount.toStringAsFixed(2)}',
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 28,
@@ -856,6 +1111,8 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
     
     final statusInfo = _getStatusInfo(status);
     final earning = amount * EscrowService.providerFeePercent / 100;
+    final myCur = (order['currency'] as String?)?.toUpperCase() ?? 'BRL';
+    final myCurPrefix = myCur == 'BRL' ? r'R$' : myCur;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -882,7 +1139,7 @@ class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with Single
                         Icon(_getPaymentIcon(paymentType), color: Colors.orange, size: 20),
                         const SizedBox(width: 8),
                         Text(
-                          'R\$ ${amount.toStringAsFixed(2)}',
+                          '$myCurPrefix ${amount.toStringAsFixed(2)}',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 18,

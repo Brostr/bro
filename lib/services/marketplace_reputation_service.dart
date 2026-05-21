@@ -25,10 +25,11 @@ class MarketplaceReputationService {
   // Cache de médias calculadas
   final Map<String, Map<String, double>> _avgCache = {};
 
+  // v604: relay.primal.net descartado porque na pratica filtra/dropa
+  // os kinds custom 30019/30085 do bro (teste ao vivo retornou 0).
   static const List<String> _relays = [
     'wss://relay.damus.io',
     'wss://nos.lol',
-    'wss://relay.primal.net',
   ];
 
   /// Publica uma avaliação para um vendedor

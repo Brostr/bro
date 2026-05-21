@@ -26,9 +26,15 @@ class OrderCard extends StatefulWidget {
 class _OrderCardState extends State<OrderCard> {
   bool _isExpanded = false;
 
-  String _formatCurrency(double value) {
-    final formatter = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
-    return formatter.format(value);
+  // v596: currency-aware formatter. BRL renders 'R$ 1.234,56' (pt_BR).
+  // Outras moedas renderizam '<ISO> 1,234.56' (en_US locale).
+  String _formatCurrency(double value, [String currency = 'BRL']) {
+    final cur = currency.toUpperCase();
+    if (cur == 'BRL') {
+      return NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$').format(value);
+    }
+    return NumberFormat.currency(locale: 'en_US', symbol: '$cur ', decimalDigits: 2)
+        .format(value);
   }
 
   String _formatDate(String? dateStr) {
@@ -108,6 +114,7 @@ class _OrderCardState extends State<OrderCard> {
   Widget build(BuildContext context) {
     final billType = widget.order['billType'] ?? 'N/A';
     final amount = (widget.order['amount'] ?? 0.0).toDouble();
+    final currency = (widget.order['currency'] as String?)?.toUpperCase() ?? 'BRL';
     final status = widget.order['status'] ?? 'pending';
     final dueDate = widget.order['dueDate'];
     final estimatedEarnings = amount * 0.07; // 7% de ganho
@@ -175,7 +182,7 @@ class _OrderCardState extends State<OrderCard> {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          _formatCurrency(amount),
+                          _formatCurrency(amount, currency),
                           style: const TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.bold,
@@ -229,7 +236,7 @@ class _OrderCardState extends State<OrderCard> {
                   Icon(Icons.account_balance_wallet, size: 16, color: Colors.green[600]),
                   const SizedBox(width: 4),
                   Text(
-                    'Ganho: ${_formatCurrency(estimatedEarnings)}',
+                    'Ganho: ${_formatCurrency(estimatedEarnings, currency)}',
                     style: TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w600,

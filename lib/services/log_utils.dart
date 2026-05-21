@@ -39,6 +39,12 @@ class BroLogBuffer {
 void broLog(String message) {
   if (kDebugMode || kProfileMode) {
     debugPrint(message);
+  } else {
+    // v600: Em release, emitir via print() para aparecer no logcat sob tag
+    // `flutter`. Filtrável com `adb logcat *:S flutter:I | findstr bro`.
+    // Isto substitui a tela in-app de diagnóstico.
+    // ignore: avoid_print
+    print('[bro] $message');
   }
   // Sempre registra no buffer (debug + release) para diagnóstico in-app.
   BroLogBuffer.instance.add(message);

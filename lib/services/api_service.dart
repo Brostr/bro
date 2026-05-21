@@ -977,6 +977,47 @@ class ApiService {
     }
   }
 
+  /// v588: Tell the backend which payment methods this provider is willing to
+  /// handle. The watchtower uses this list to filter "new order available"
+  /// broadcasts so the provider is only notified about orders in those
+  /// currencies/methods. Empty/null on the server is treated as "all".
+  Future<bool> setProviderPaymentMethods(List<String> methods) async {
+    try {
+      final response = await _dio.post('/push/payment-methods', data: {
+        'methods': methods,
+      });
+      final ok = response.data?['ok'] == true;
+      broLog('[PUSH] Provider methods (${methods.length}) ok=$ok');
+      return ok;
+    } on DioException catch (e) {
+      broLog('[PUSH] setProviderPaymentMethods failed: ${e.message}');
+      return false;
+    } catch (e) {
+      broLog('[PUSH] setProviderPaymentMethods failed: $e');
+      return false;
+    }
+  }
+
+  /// v594: Tell the backend which non-BRL currencies this provider is willing
+  /// to handle (ISO-4217 codes). BRL is implicit. Watchtower filters non-BRL
+  /// "new order" broadcasts accordingly.
+  Future<bool> setProviderAcceptedCurrencies(List<String> currencies) async {
+    try {
+      final response = await _dio.post('/push/accepted-currencies', data: {
+        'currencies': currencies,
+      });
+      final ok = response.data?['ok'] == true;
+      broLog('[PUSH] Provider currencies (${currencies.length}) ok=$ok');
+      return ok;
+    } on DioException catch (e) {
+      broLog('[PUSH] setProviderAcceptedCurrencies failed: ${e.message}');
+      return false;
+    } catch (e) {
+      broLog('[PUSH] setProviderAcceptedCurrencies failed: $e');
+      return false;
+    }
+  }
+
   /// v524: Ask backend whether our FCM token is registered.
   /// Used to detect silent registration failures on iOS
   /// (where getToken() may return null intermittently).

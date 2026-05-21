@@ -34,7 +34,6 @@ import 'screens/relay_management_screen.dart';
 import 'screens/nostr_profile_screen.dart';
 import 'screens/nip06_backup_screen.dart';
 import 'screens/privacy_settings_screen.dart';
-import 'screens/diagnostics_screen.dart';
 import 'screens/wallet_screen.dart';
 import 'screens/marketplace_screen.dart';
 import 'screens/brix_screen.dart';
@@ -894,7 +893,6 @@ class BroApp extends StatelessWidget {
               '/nostr-profile': (context) => const NostrProfileScreen(),
               '/nip06-backup': (context) => const Nip06BackupScreen(),
               '/privacy-settings': (context) => const PrivacySettingsScreen(),
-              '/diagnostics': (context) => const DiagnosticsScreen(),
               '/wallet': (context) => const WalletScreen(),
               '/marketplace': (context) => const MarketplaceScreen(),
               '/brix': (context) => const BrixScreen(),

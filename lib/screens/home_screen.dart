@@ -7,7 +7,8 @@ import 'package:intl/intl.dart';
 import '../l10n/app_localizations.dart';
 import '../providers/breez_provider_export.dart';
 import '../providers/order_provider.dart';
-import '../services/api_service.dart';
+import '../services/bitcoin_price_service.dart';
+import '../providers/locale_provider.dart';
 import '../services/storage_service.dart';
 import '../services/secure_storage_service.dart';
 import '../services/local_collateral_service.dart';
@@ -26,6 +27,7 @@ import 'notifications_inbox_screen.dart';
 import '../models/order.dart';
 import '../models/notification_item.dart';
 import '../services/chat_service.dart';
+import '../config/payment_methods.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -35,10 +37,14 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
-  final _currencyFormat = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
+  // v595: formato/moeda dependem do idioma do app. Recriados em _refreshLocale.
+  NumberFormat _currencyFormat = NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
+  String _displayCurrency = 'BRL';
+  String _lastLanguageCode = 'pt';
   double _btcPrice = 0.0;
   Timer? _priceUpdateTimer;
   Timer? _ordersUpdateTimer; // Timer para atualizar ordens automaticamente
+  Timer? _breezRetryTimer; // v599: retry init when SDK stays offline
   String? _currentUserPubkey; // Para filtro extra de segurança
   int _unreadMessages = 0;
   StreamSubscription<int>? _unreadSub;
@@ -55,6 +61,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _fetchBitcoinPrice();
       _startPricePolling();
       _startOrdersPolling(); // Iniciar polling de ordens
+      _startBreezRetry(); // v599: retry Breez init periodically if it fails
       _checkSeedRecoveryStatus();
       _checkAndShowBackupReminder();
       _checkForAppUpdate();
@@ -69,6 +76,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       // Restart relay service when app comes back to foreground
       BrixRelayService().restart(context);
+      // v599: retry Breez SDK init on resume if previous attempt failed.
+      // Previously a one-shot attempt in initState would leave the wallet
+      // permanently disconnected until app restart if it timed out or hit
+      // a transient network failure. Retrying on resume covers the common
+      // "phone slept / lost network" scenarios.
+      final breez = context.read<BreezProvider>();
+      if (!breez.isInitialized && !breez.isInitializing) {
+        broLog('🔁 [HOME] App resumed e Breez SDK não inicializado — retry...');
+        _initializeBreezSdk();
+      }
     }
   }
   
@@ -320,11 +337,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
 
         if (!success && mounted) {
+          // v599: surface the real provider error so users (and diagnostics
+          // buffer) can see WHY the SDK didn't connect, instead of the
+          // generic "did not fully initialize" message.
+          final errDetail = breezProvider.error;
+          final msg = errDetail != null && errDetail.isNotEmpty
+              ? 'Breez SDK: $errDetail'
+              : 'Breez SDK did not fully initialize.';
+          broLog('⚠️ [HOME] Breez init falhou: $msg');
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Breez SDK did not fully initialize.'),
+            SnackBar(
+              content: Text(msg),
               backgroundColor: Colors.orange,
-              duration: Duration(seconds: 5),
+              duration: const Duration(seconds: 6),
+              action: SnackBarAction(
+                label: 'Retry',
+                textColor: Colors.white,
+                onPressed: () => _initializeBreezSdk(),
+              ),
             ),
           );
         }
@@ -347,6 +377,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _priceUpdateTimer?.cancel();
     _ordersUpdateTimer?.cancel();
+    _breezRetryTimer?.cancel();
     _unreadSub?.cancel();
     super.dispose();
   }
@@ -355,6 +386,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _priceUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) {
         _fetchBitcoinPrice();
+      }
+    });
+  }
+
+  /// v599: Periodically retry Breez SDK init while wallet is offline.
+  /// Without this, a single failed init at app startup leaves the wallet
+  /// permanently disconnected (no balance, no invoice generation) until
+  /// the user kills and reopens the app. The retry interval is intentionally
+  /// long (90s) to avoid hammering the Spark network during outages.
+  void _startBreezRetry() {
+    _breezRetryTimer = Timer.periodic(const Duration(seconds: 90), (_) {
+      if (!mounted) return;
+      final breez = context.read<BreezProvider>();
+      if (!breez.isInitialized && !breez.isInitializing) {
+        broLog('🔁 [HOME] Retry periódico: Breez SDK ainda offline, tentando...');
+        _initializeBreezSdk();
       }
     });
   }
@@ -454,7 +501,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _fetchBitcoinPrice() async {
     try {
-      final price = await ApiService().getBitcoinPrice();
+      // v595: cotação na moeda de exibição corrente (pt→BRL, en/es→USD).
+      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
       if (mounted) {
         setState(() {
           _btcPrice = price ?? _btcPrice;
@@ -465,8 +513,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// v595: reage à troca de idioma — atualiza moeda de exibição e formato.
+  void _refreshLocaleIfNeeded(BuildContext context) {
+    final lang = context.read<LocaleProvider>().locale.languageCode;
+    if (lang == _lastLanguageCode) return;
+    final newCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
+    final newFormat = _formatForCurrency(lang, newCurrency);
+    _lastLanguageCode = lang;
+    _displayCurrency = newCurrency;
+    _currencyFormat = newFormat;
+    // Refetch para mostrar valor na nova moeda imediatamente.
+    _fetchBitcoinPrice();
+  }
+
+  NumberFormat _formatForCurrency(String lang, String currency) {
+    switch (currency) {
+      case 'BRL':
+        return NumberFormat.currency(locale: 'pt_BR', symbol: 'R\$');
+      case 'USD':
+        return NumberFormat.currency(locale: lang == 'es' ? 'es' : 'en_US', symbol: '\$');
+      default:
+        return NumberFormat.currency(locale: lang, symbol: '$currency ');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    _refreshLocaleIfNeeded(context);
     return Scaffold(
       backgroundColor: const Color(0xFF0A0A0A),
       appBar: _buildAppBar(),
@@ -1132,9 +1205,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 itemCount: myOrders.length,
                 itemBuilder: (context, index) {
                   final order = myOrders[index];
+                  // v603: preserve a moeda ORIGINAL da ordem (R$ pra PIX,
+                  // ARS pra Transf 3.0, USD pra dolar, etc) — antes mostrava
+                  // sempre no _currencyFormat do display do usuario, o que
+                  // misturava as moedas no historico.
                   return TransactionCard(
-                    title: order.billType == 'pix' ? 'PIX' : 'Boleto',
-                    amount: _currencyFormat.format(order.amount),
+                    title: PaymentMethods.displayName(order.billType),
+                    amount: PaymentMethods.formatAmount(order.amount, order.currency),
                     status: order.status,
                     statusLabel: _getStatusLabel(order.status, metadata: order.metadata),
                     orderId: order.id,

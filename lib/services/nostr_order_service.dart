@@ -215,6 +215,7 @@ class NostrOrderService {
     required double providerFee,
     required double platformFee,
     required double total,
+    String currency = 'BRL',
   }) async {
     try {
       final keychain = Keychain(privateKey);
@@ -236,6 +237,7 @@ class NostrOrderService {
         'billType': billType,
         'billCode': publishedBillCode,
         'billCodeProtocol': _omitPlaintextBillCode ? _billCodeProtocolNip44 : 'plaintext',
+        'currency': currency,
         'amount': amount,
         'btcAmount': btcAmount,
         'btcPrice': btcPrice,
@@ -1066,6 +1068,7 @@ class NostrOrderService {
         userPubkey: originalUserPubkey,
         billType: content['billType'] ?? 'pix',
         billCode: _getBillCode(content),
+        currency: ((content['currency'] as String?)?.toUpperCase()) ?? 'BRL',
         amount: finalAmount,
         btcAmount: (content['btcAmount'] as num?)?.toDouble() ?? 0,
         btcPrice: (content['btcPrice'] as num?)?.toDouble() ?? 0,
@@ -1413,6 +1416,7 @@ class NostrOrderService {
       orderId: order.id,
       billType: order.billType,
       billCode: order.billCode,
+      currency: order.currency,
       amount: order.amount,
       btcAmount: order.btcAmount,
       btcPrice: order.btcPrice,
@@ -3268,6 +3272,13 @@ class NostrOrderService {
   static const int kindMarketplaceOffer = 30019; // NIP-15 Classifieds
   static const String marketplaceTag = 'bro-marketplace';
 
+  /// v604: relays usados pelo marketplace. Exclui relay.primal.net
+  /// porque na pratica ele filtra/dropa kind 30019 com a tag bro-marketplace
+  /// (teste ao vivo confirmou 0 eventos retornados enquanto damus/nos.lol
+  /// retornavam 45+). Mantemos os 3 principais que respondem.
+  List<String> get _marketplaceRelays =>
+      _relays.where((r) => !r.contains('primal.net')).toList();
+
   /// Publica uma oferta no marketplace
   Future<String?> publishMarketplaceOffer({
     required String privateKey,
@@ -3279,6 +3290,8 @@ class NostrOrderService {
     String? city,
     List<String>? photos, // Lista de fotos em base64
     int quantity = 0, // Quantidade disponível (0 = ilimitado)
+    String priceCurrency = 'sats', // v604: moeda escolhida
+    double? priceFiat, // v604: valor original na moeda (se != sats)
   }) async {
     try {
       final keychain = Keychain(privateKey);
@@ -3291,6 +3304,8 @@ class NostrOrderService {
         'title': title,
         'description': description,
         'priceSats': priceSats,
+        'priceCurrency': priceCurrency,
+        'priceFiat': priceFiat,
         'category': category,
         'siteUrl': siteUrl,
         'city': city,
@@ -3307,6 +3322,7 @@ class NostrOrderService {
         ['t', marketplaceTag],
         ['t', 'bro-app'],
         ['t', category],
+        ['t', 'cur:${priceCurrency.toLowerCase()}'], // v604: filtragem por moeda via relay
         ['title', title],
         ['price', priceSats.toString(), 'sats'],
       ];
@@ -3329,9 +3345,9 @@ class NostrOrderService {
       );
 
       
-      // PERFORMANCE: Publicar em todos os relays EM PARALELO
+      // v604: publicar apenas nos relays que respondem ao marketplace
       final publishResults = await Future.wait(
-        _relays.take(5).map((relay) => _publishToRelay(relay, event).catchError((_) => false)),
+        _marketplaceRelays.map((relay) => _publishToRelay(relay, event).catchError((_) => false)),
       );
       final successCount = publishResults.where((s) => s).length;
 
@@ -3355,6 +3371,8 @@ class NostrOrderService {
     List<String>? photos,
     required int quantity,
     required int newSold,
+    String priceCurrency = 'sats', // v604
+    double? priceFiat, // v604
   }) async {
     try {
       final keychain = Keychain(privateKey);
@@ -3366,6 +3384,8 @@ class NostrOrderService {
         'title': title,
         'description': description,
         'priceSats': priceSats,
+        'priceCurrency': priceCurrency,
+        'priceFiat': priceFiat,
         'category': category,
         'siteUrl': siteUrl,
         'city': city,
@@ -3382,6 +3402,7 @@ class NostrOrderService {
         ['t', marketplaceTag],
         ['t', 'bro-app'],
         ['t', category],
+        ['t', 'cur:${priceCurrency.toLowerCase()}'], // v604
         ['title', title],
         ['price', priceSats.toString(), 'sats'],
       ];
@@ -3401,7 +3422,7 @@ class NostrOrderService {
       );
 
       final publishResults = await Future.wait(
-        _relays.take(5).map((relay) => _publishToRelay(relay, event).catchError((_) => false)),
+        _marketplaceRelays.map((relay) => _publishToRelay(relay, event).catchError((_) => false)),
       );
       final successCount = publishResults.where((s) => s).length;
       
@@ -3454,16 +3475,16 @@ class NostrOrderService {
         privkey: keychain.private,
       );
       
-      // Publicar ambos em paralelo em todos os relays
+      // v604: publicar ambos em paralelo apenas nos relays que respondem ao marketplace
       final results = await Future.wait(
-        _relays.take(5).expand((relay) => [
+        _marketplaceRelays.expand((relay) => [
           _publishToRelay(relay, replacementEvent).catchError((_) => false),
           _publishToRelay(relay, deletionEvent).catchError((_) => false),
         ]).toList(),
       );
       
       final successCount = results.where((s) => s).length;
-      broLog('🗑️ deleteMarketplaceOffer: offerId=${offerId.substring(0, 8)}, publicado em ${successCount ~/ 2}/${_relays.take(5).length} relays');
+      broLog('🗑️ deleteMarketplaceOffer: offerId=${offerId.substring(0, 8)}, publicado em ${successCount ~/ 2}/${_marketplaceRelays.length} relays');
       return successCount > 0;
     } catch (e) {
       broLog('❌ deleteMarketplaceOffer EXCEPTION: $e');
@@ -3477,9 +3498,9 @@ class NostrOrderService {
     final seenIds = <String>{};
 
 
-    // PERFORMANCE: Buscar de todos os relays EM PARALELO
+    // v604: buscar apenas nos relays que respondem ao marketplace
     final relayResults = await Future.wait(
-      _relays.take(5).map((relay) =>
+      _marketplaceRelays.map((relay) =>
         _fetchFromRelay(relay, kinds: [kindMarketplaceOffer], tags: {'#t': [marketplaceTag]}, limit: 50)
           .catchError((_) => <Map<String, dynamic>>[])
       ),
@@ -3511,6 +3532,8 @@ class NostrOrderService {
               'title': content['title'] ?? '',
               'description': content['description'] ?? '',
               'priceSats': content['priceSats'] ?? 0,
+              'priceCurrency': (content['priceCurrency'] as String?) ?? 'sats', // v604
+              'priceFiat': (content['priceFiat'] is num) ? (content['priceFiat'] as num).toDouble() : null, // v604
               'category': content['category'] ?? 'outros',
               'sellerPubkey': event['pubkey'],
               'siteUrl': siteUrl,
@@ -3536,9 +3559,9 @@ class NostrOrderService {
     final seenIds = <String>{};
 
 
-    // PERFORMANCE: Buscar de todos os relays EM PARALELO
+    // v604: buscar apenas nos relays que respondem ao marketplace
     final relayResults = await Future.wait(
-      _relays.take(3).map((relay) =>
+      _marketplaceRelays.map((relay) =>
         _fetchFromRelay(relay, kinds: [kindMarketplaceOffer], authors: [pubkey], tags: {'#t': [marketplaceTag]}, limit: 50)
           .catchError((_) => <Map<String, dynamic>>[])
       ),
@@ -3570,6 +3593,8 @@ class NostrOrderService {
               'title': content['title'] ?? '',
               'description': content['description'] ?? '',
               'priceSats': content['priceSats'] ?? 0,
+              'priceCurrency': (content['priceCurrency'] as String?) ?? 'sats', // v604
+              'priceFiat': (content['priceFiat'] is num) ? (content['priceFiat'] as num).toDouble() : null, // v604
               'category': content['category'] ?? 'outros',
               'sellerPubkey': event['pubkey'],
               'siteUrl': siteUrl,

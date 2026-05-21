@@ -11,6 +11,8 @@ class BitcoinPaymentModal extends StatelessWidget {
   final double providerFee;
   final double platformFee;
   final double btcTotal;
+  // v596: moeda da conta. Pra BRL renderiza 'R$', pras demais usa o código ISO.
+  final String currency;
 
   const BitcoinPaymentModal({
     Key? key,
@@ -20,7 +22,14 @@ class BitcoinPaymentModal extends StatelessWidget {
     required this.providerFee,
     required this.platformFee,
     required this.btcTotal,
+    this.currency = 'BRL',
   }) : super(key: key);
+
+  String _fmt(double v) {
+    final c = currency.toUpperCase();
+    if (c == 'BRL') return 'R\$ ${v.toStringAsFixed(2)}';
+    return '$c ${v.toStringAsFixed(2)}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -430,19 +439,19 @@ class BitcoinPaymentModal extends StatelessWidget {
               Expanded(
                 child: _buildSummaryItem(
                   'Valor da Conta:',
-                  'R\$ ${billAmount.toStringAsFixed(2)}',
+                  _fmt(billAmount),
                 ),
               ),
               Expanded(
                 child: _buildSummaryItem(
                   'Taxa Provedor (5%):',
-                  'R\$ ${providerFee.toStringAsFixed(2)}',
+                  _fmt(providerFee),
                 ),
               ),
               Expanded(
                 child: _buildSummaryItem(
                   'Taxa Plataforma (2%):',
-                  'R\$ ${platformFee.toStringAsFixed(2)}',
+                  _fmt(platformFee),
                 ),
               ),
             ],

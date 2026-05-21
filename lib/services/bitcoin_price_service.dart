@@ -1,130 +1,173 @@
-﻿import 'package:flutter/foundation.dart';
-import 'package:bro_app/services/log_utils.dart';
+﻿import 'package:bro_app/services/log_utils.dart';
 import 'package:dio/dio.dart';
 
-/// ServiÃ§o para buscar preÃ§o real do Bitcoin de APIs pÃºblicas
+/// Servico para buscar preco real do Bitcoin de APIs publicas.
+///
+/// v592: multi-moeda. Coinbase /exchange-rates retorna todas as fiat em
+/// uma chamada so, entao cacheamos o objeto inteiro e fazemos lookup
+/// local por ISO-4217 (BRL, ARS, MXN, COP, INR, THB...).
 class BitcoinPriceService {
   static final Dio _dio = Dio(BaseOptions(
     connectTimeout: const Duration(seconds: 10),
     receiveTimeout: const Duration(seconds: 10),
   ));
 
-  /// Busca preÃ§o do Bitcoin em BRL de mÃºltiplas fontes
-  static Future<double?> getBitcoinPriceInBRL() async {
-    // Tentar Coinbase primeiro
-    final coinbasePrice = await _getCoinbasePrice();
-    if (coinbasePrice != null) return coinbasePrice;
+  /// Moedas que o app conhece (apenas para query no CoinGecko).
+  static const Set<String> kSupportedFiats = {
+    'BRL', 'USD', 'EUR', 'ARS', 'MXN', 'COP', 'INR', 'THB',
+  };
 
-    // Fallback: Binance
-    final binancePrice = await _getBinancePrice();
-    if (binancePrice != null) return binancePrice;
+  /// Cache de todas as taxas BTC->fiat (chave ISO-4217 uppercase).
+  static Map<String, double>? _ratesCache;
+  static DateTime? _ratesFetchedAt;
+  static const _cacheDuration = Duration(minutes: 2);
 
-    // Fallback: CoinGecko
-    final coingeckoPrice = await _getCoingeckoPrice();
-    if (coingeckoPrice != null) return coingeckoPrice;
-
-    broLog('âŒ NÃ£o foi possÃ­vel buscar preÃ§o do Bitcoin de nenhuma fonte');
-    return null;
-  }
-
-  /// Coinbase API (mais confiÃ¡vel)
-  static Future<double?> _getCoinbasePrice() async {
-    try {
-      broLog('ðŸ“¡ Buscando preÃ§o Bitcoin na Coinbase...');
-      final response = await _dio.get('https://api.coinbase.com/v2/exchange-rates?currency=BTC');
-      
-      final rates = response.data['data']['rates'];
-      final brlRate = rates['BRL'];
-      
-      if (brlRate != null) {
-        final price = double.parse(brlRate.toString());
-        broLog('âœ… Coinbase: R\$ ${price.toStringAsFixed(2)}');
-        return price;
-      }
-    } catch (e) {
-      broLog('âš ï¸ Erro ao buscar preÃ§o na Coinbase: $e');
+  /// Preco do BTC numa moeda especifica (ISO-4217). null se indisponivel.
+  static Future<double?> getBitcoinPriceIn(String currency) async {
+    final cur = currency.toUpperCase();
+    final rates = await _getAllRatesWithCache();
+    if (rates == null) return null;
+    final v = rates[cur];
+    if (v == null) {
+      broLog('⚠️ Sem cotação para $cur');
+      return null;
     }
-    return null;
+    return v;
   }
 
-  /// Binance API
-  static Future<double?> _getBinancePrice() async {
-    try {
-      broLog('ðŸ“¡ Buscando preÃ§o Bitcoin na Binance...');
-      
-      // Buscar BTC/USDT
-      final btcUsdtResponse = await _dio.get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');
-      final btcUsdt = double.parse(btcUsdtResponse.data['price']);
-      
-      // Buscar USDT/BRL
-      final usdtBrlResponse = await _dio.get('https://api.binance.com/api/v3/ticker/price?symbol=USDTBRL');
-      final usdtBrl = double.parse(usdtBrlResponse.data['price']);
-      
-      final btcBrl = btcUsdt * usdtBrl;
-      broLog('âœ… Binance: R\$ ${btcBrl.toStringAsFixed(2)}');
-      return btcBrl;
-    } catch (e) {
-      broLog('âš ï¸ Erro ao buscar preÃ§o na Binance: $e');
+  /// Compat: BTC -> BRL.
+  static Future<double?> getBitcoinPriceInBRL() => getBitcoinPriceIn('BRL');
+
+  static Future<Map<String, double>?> _getAllRatesWithCache() async {
+    if (_ratesCache != null && _ratesFetchedAt != null) {
+      final age = DateTime.now().difference(_ratesFetchedAt!);
+      if (age < _cacheDuration) return _ratesCache;
     }
-    return null;
+    Map<String, double>? rates = await _getCoinbaseRates();
+    rates ??= await _getCoingeckoRates();
+    rates ??= await _getBinanceFallbackBrlOnly();
+    if (rates != null) {
+      _ratesCache = rates;
+      _ratesFetchedAt = DateTime.now();
+    }
+    return rates;
   }
 
-  /// CoinGecko API (free, sem autenticaÃ§Ã£o)
-  static Future<double?> _getCoingeckoPrice() async {
+  static Future<Map<String, double>?> _getCoinbaseRates() async {
     try {
-      broLog('ðŸ“¡ Buscando preÃ§o Bitcoin no CoinGecko...');
+      broLog('📡 Buscando taxas BTC na Coinbase...');
+      final response = await _dio.get(
+        'https://api.coinbase.com/v2/exchange-rates?currency=BTC',
+      );
+      final rawRates = response.data['data']?['rates'];
+      if (rawRates is! Map) return null;
+      final out = <String, double>{};
+      rawRates.forEach((k, v) {
+        if (v == null) return;
+        final d = double.tryParse(v.toString());
+        if (d != null) out[k.toString().toUpperCase()] = d;
+      });
+      if (out.isEmpty) return null;
+      broLog('✅ Coinbase: ${out.length} moedas (BRL=${out['BRL']?.toStringAsFixed(2)})');
+      return out;
+    } catch (e) {
+      broLog('⚠️ Coinbase falhou: $e');
+      return null;
+    }
+  }
+
+  static Future<Map<String, double>?> _getCoingeckoRates() async {
+    try {
+      broLog('📡 Buscando taxas BTC no CoinGecko...');
       final response = await _dio.get(
         'https://api.coingecko.com/api/v3/simple/price',
         queryParameters: {
           'ids': 'bitcoin',
-          'vs_currencies': 'brl',
+          'vs_currencies':
+              kSupportedFiats.map((c) => c.toLowerCase()).join(','),
         },
       );
-      
-      final price = response.data['bitcoin']['brl'];
-      if (price != null) {
-        final priceDouble = double.parse(price.toString());
-        broLog('âœ… CoinGecko: R\$ ${priceDouble.toStringAsFixed(2)}');
-        return priceDouble;
-      }
+      final btc = response.data['bitcoin'];
+      if (btc is! Map) return null;
+      final out = <String, double>{};
+      btc.forEach((k, v) {
+        if (v == null) return;
+        final d = double.tryParse(v.toString());
+        if (d != null) out[k.toString().toUpperCase()] = d;
+      });
+      if (out.isEmpty) return null;
+      broLog('✅ CoinGecko: ${out.length} moedas');
+      return out;
     } catch (e) {
-      broLog('âš ï¸ Erro ao buscar preÃ§o no CoinGecko: $e');
+      broLog('⚠️ CoinGecko falhou: $e');
+      return null;
     }
-    return null;
   }
 
-  /// Busca preÃ§o com cache (evita mÃºltiplas chamadas em curto perÃ­odo)
-  static DateTime? _lastFetch;
-  static double? _cachedPrice;
-  static const _cacheDuration = Duration(minutes: 2);
-
-  static Future<double?> getBitcoinPriceWithCache() async {
-    // Se tem cache vÃ¡lido, retorna
-    if (_cachedPrice != null && _lastFetch != null) {
-      final age = DateTime.now().difference(_lastFetch!);
-      if (age < _cacheDuration) {
-        broLog('ðŸ’¾ Usando preÃ§o em cache: R\$ ${_cachedPrice!.toStringAsFixed(2)}');
-        return _cachedPrice;
-      }
+  static Future<Map<String, double>?> _getBinanceFallbackBrlOnly() async {
+    try {
+      broLog('📡 Fallback Binance (só BRL/USD)...');
+      final btcUsdt = double.parse((await _dio.get(
+        'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT',
+      )).data['price'].toString());
+      final usdtBrl = double.parse((await _dio.get(
+        'https://api.binance.com/api/v3/ticker/price?symbol=USDTBRL',
+      )).data['price'].toString());
+      return {'BRL': btcUsdt * usdtBrl, 'USD': btcUsdt};
+    } catch (e) {
+      broLog('⚠️ Binance fallback falhou: $e');
+      return null;
     }
-
-    // Busca novo preÃ§o
-    final price = await getBitcoinPriceInBRL();
-    if (price != null) {
-      _cachedPrice = price;
-      _lastFetch = DateTime.now();
-    }
-    return price;
   }
 
-  /// Limpa o cache
+  /// Compat: preco com cache em BRL.
+  static Future<double?> getBitcoinPriceWithCache() => getBitcoinPriceIn('BRL');
+
+  /// v595: moeda de exibição padrão por idioma.
+  /// - `pt` (português) → BRL
+  /// - `es` (espanhol)  → USD
+  /// - `en` (inglês)    → USD
+  /// - qualquer outro   → USD
+  ///
+  /// Não é uma conversão de PIX para dólar — só define em qual moeda os
+  /// preços do BTC (dashboard, carteira, marketplace) são MOSTRADOS quando
+  /// o usuário troca o idioma do app. As ordens PIX continuam em BRL.
+  static String displayCurrencyForLanguage(String languageCode) {
+    switch (languageCode.toLowerCase()) {
+      case 'pt':
+        return 'BRL';
+      case 'es':
+      case 'en':
+      default:
+        return 'USD';
+    }
+  }
+
+  /// Atalho: cotação BTC na moeda de exibição do idioma atual.
+  static Future<double?> getBitcoinPriceForLanguage(String languageCode) {
+    return getBitcoinPriceIn(displayCurrencyForLanguage(languageCode));
+  }
+
+  /// v596: converte um valor em BRL para a moeda de exibição do idioma.
+  /// Para `pt` retorna o valor original (já é BRL). Para en/es busca a
+  /// cotação cacheada BTC→USD e BTC→BRL e calcula `brl * priceUsd / priceBrl`.
+  /// Se as taxas não estão em cache, retorna o valor original (fail-safe).
+  static double convertBrlForLanguage(double brl, String languageCode) {
+    final target = displayCurrencyForLanguage(languageCode);
+    if (target == 'BRL') return brl;
+    final rates = _ratesCache;
+    if (rates == null) return brl;
+    final btcBrl = rates['BRL'];
+    final btcTarget = rates[target];
+    if (btcBrl == null || btcTarget == null || btcBrl <= 0) return brl;
+    return brl * btcTarget / btcBrl;
+  }
+
   static void clearCache() {
-    _cachedPrice = null;
-    _lastFetch = null;
+    _ratesCache = null;
+    _ratesFetchedAt = null;
   }
 
-  /// Alias para getBitcoinPriceWithCache (para compatibilidade)
-  Future<double?> getBitcoinPrice() async {
-    return await getBitcoinPriceWithCache();
-  }
+  /// Instance alias (compat).
+  Future<double?> getBitcoinPrice() => getBitcoinPriceWithCache();
 }

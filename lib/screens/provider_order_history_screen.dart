@@ -316,7 +316,7 @@ class _ProviderOrderHistoryScreenState extends State<ProviderOrderHistoryScreen>
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'R\$ ${order.amount.toStringAsFixed(2)}',
+                      (() { final c = order.currency.toUpperCase(); final s = c == 'BRL' ? r'R$' : c; return '$s ${order.amount.toStringAsFixed(2)}'; })(),
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 18,
@@ -340,7 +340,7 @@ class _ProviderOrderHistoryScreenState extends State<ProviderOrderHistoryScreen>
                         style: TextStyle(color: statusColor, fontSize: 10),
                       ),
                       Text(
-                        'R\$ ${earnedAmount.toStringAsFixed(2)}',
+                        (() { final c = order.currency.toUpperCase(); final s = c == 'BRL' ? r'R$' : c; return '$s ${earnedAmount.toStringAsFixed(2)}'; })(),
                         style: TextStyle(
                           color: statusColor,
                           fontSize: 16,

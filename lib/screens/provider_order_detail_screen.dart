@@ -57,6 +57,13 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
   // v237: Mensagens do mediador para o provedor
   List<Map<String, dynamic>> _providerMediatorMessages = [];
   bool _loadingProviderMediatorMessages = false;
+
+  // v597: prefixo de moeda (BRL→R\$, demais→ISO-4217)
+  String get _curSym {
+    final c = (_orderDetails?['currency'] as String?)?.toUpperCase() ?? 'BRL';
+    return c == 'BRL' ? r'R$' : c;
+  }
+  String _fmtCur(double v) => '$_curSym ${v.toStringAsFixed(2)}';
   
   // Timer de 36h para auto-liquidação
   Duration? _timeRemaining;
@@ -1168,7 +1175,7 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              _buildFinancialRow(AppLocalizations.of(context)!.t('prov_det_bill_value'), 'R\$ ${amount.toStringAsFixed(2)}', Colors.white70),
+              _buildFinancialRow(AppLocalizations.of(context)!.t('prov_det_bill_value'), _fmtCur(amount), Colors.white70),
               const SizedBox(height: 8),
               _buildFinancialRow(AppLocalizations.of(context)!.t('prov_det_type'), billType.toUpperCase(), Colors.orange),
               const SizedBox(height: 8),
@@ -1176,7 +1183,7 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
               const SizedBox(height: 8),
               _buildFinancialRow(
                 AppLocalizations.of(context)!.tp('prov_det_your_earning', {'percent': EscrowService.providerFeePercent.toString()}), 
-                '+ R\$ ${totalGanho.toStringAsFixed(2)}', 
+                '+ ${_fmtCur(totalGanho)}', 
                 Colors.green,
                 bold: true,
               ),
@@ -1397,7 +1404,7 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'R\$ ${amount.toStringAsFixed(2)}',
+            _fmtCur(amount),
             style: const TextStyle(
               color: Colors.white,
               fontSize: 36,
@@ -1431,7 +1438,7 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'R\$ ${fee.toStringAsFixed(2)}',
+                    _fmtCur(fee),
                     style: const TextStyle(
                       color: Colors.green,
                       fontSize: 18,
@@ -1459,7 +1466,7 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                     )
                   else
                     Text(
-                      'R\$ ${(amount + fee).toStringAsFixed(2)}',
+                      _fmtCur(amount + fee),
                       style: const TextStyle(
                         color: Colors.white,
                         fontSize: 18,
@@ -2092,7 +2099,7 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(AppLocalizations.of(context)!.t('prov_det_bill_value'), style: const TextStyle(color: Colors.white60, fontSize: 14)),
-                  Text('R\$ ${amount.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white70, fontSize: 14)),
+                  Text(_fmtCur(amount), style: const TextStyle(color: Colors.white70, fontSize: 14)),
                 ],
               ),
               const SizedBox(height: 4),
@@ -2101,7 +2108,7 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                 children: [
                   Text(AppLocalizations.of(context)!.tp('prov_det_your_earning2', {'percent': EscrowService.providerFeePercent.toString()}), style: const TextStyle(color: Colors.white60, fontSize: 14)),
                   Text(
-                    '+ R\$ ${providerFee.toStringAsFixed(2)}',
+                    '+ ${_fmtCur(providerFee)}',
                     style: const TextStyle(color: Colors.green, fontSize: 16, fontWeight: FontWeight.bold),
                   ),
                 ],

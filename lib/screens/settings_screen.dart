@@ -976,26 +976,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                           onTap: () => Navigator.pushNamed(context, '/nip06-backup'),
                         ),
-                        Divider(height: 1, color: Colors.white12),
-                        // v582: Diagnóstico — buffer de logs em RAM
-                        ListTile(
-                          leading: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
-                              color: Colors.cyan.withOpacity(0.1),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Icon(Icons.bug_report, color: Colors.cyan),
-                          ),
-                          title: Text(AppLocalizations.of(context).t('settings_diagnostics'), style: const TextStyle(color: Colors.white)),
-                          subtitle: Text(AppLocalizations.of(context).t('settings_diagnostics_subtitle'), style: const TextStyle(color: Colors.white54)),
-                          trailing: const Icon(Icons.chevron_right, color: Colors.white38),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20,
-                            vertical: 10,
-                          ),
-                          onTap: () => Navigator.pushNamed(context, '/diagnostics'),
-                        ),
                       ],
                     ),
                   ),

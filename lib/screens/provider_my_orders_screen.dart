@@ -252,7 +252,7 @@ class _ProviderMyOrdersScreenState extends State<ProviderMyOrdersScreen> {
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'R\$ ${order.amount.toStringAsFixed(2)}',
+                  (() { final c = order.currency.toUpperCase(); final s = c == 'BRL' ? r'R$' : c; return '$s ${order.amount.toStringAsFixed(2)}'; })(),
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 28,

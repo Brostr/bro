@@ -13,6 +13,9 @@ import '../providers/breez_provider_export.dart';
 import '../providers/lightning_provider.dart';
 import '../services/local_collateral_service.dart';
 import '../services/platform_fee_service.dart';
+import '../services/emvco_qr_parser.dart';
+import '../services/bitcoin_price_service.dart';
+import '../config/payment_methods.dart';
 import '../l10n/app_localizations.dart';
 import '../widgets/fee_breakdown_card.dart';
 import '../config.dart';
@@ -66,19 +69,36 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
   void _onCodeChanged() {
     if (!_autoDetectionEnabled || _isProcessing) return;
-    
+
     final code = _codeController.text.trim();
-    
-    // Detectar PIX (começa com 00020126) ou Boleto (linha digitável de 47 dígitos)
-    if (code.length >= 30) {
-      if (code.startsWith('00020126') || _isValidBoletoCode(code)) {
-        // Aguardar 500ms após última digitação antes de processar
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (_codeController.text.trim() == code && !_isProcessing) {
-            _processBill(code);
-          }
-        });
-      }
+    if (code.length < 30) return;
+
+    // v595: PRIORIDADE EMVCo. Qualquer payload com formato EMVCo (000201…6304XXXX)
+    // é classificado pelos campos 58 (country) e 53 (currency), NÃO pela presença
+    // de substrings como "BR.GOV.BCB.PIX" no template 26. Isso evita classificar
+    // como PIX/BRL um QR colombiano (CO/COP) que reuse o template.
+    final parsed = EmvcoQrParser.parse(code);
+    if (parsed != null) {
+      final isBrazilianPix =
+          parsed.countryCode == 'BR' && parsed.currencyNumeric == '986';
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_codeController.text.trim() != code || _isProcessing) return;
+        if (isBrazilianPix) {
+          _processBill(code);
+        } else {
+          _handleEmvcoPreview(code);
+        }
+      });
+      return;
+    }
+
+    // Sem EMVCo válido: cai para Boleto (linha digitável 47/48 dígitos).
+    if (_isValidBoletoCode(code)) {
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_codeController.text.trim() == code && !_isProcessing) {
+          _processBill(code);
+        }
+      });
     }
   }
 
@@ -86,6 +106,284 @@ class _PaymentScreenState extends State<PaymentScreen> {
     // Linha digitável do boleto tem 47 ou 48 dígitos
     final cleanCode = code.replaceAll(RegExp(r'[^\d]'), '');
     return cleanCode.length == 47 || cleanCode.length == 48;
+  }
+
+  /// v588: preview local para QR EMVCo de outros países (MX/TH/AR/CO).
+  /// Não cria ordem — apenas valida que o app reconheceu o método.
+  /// Criação de ordem nessas moedas exige backend (conversão BTC/moeda).
+  Future<void> _handleEmvcoPreview(String code) async {
+    final result = EmvcoQrParser.parse(code);
+    if (result == null || !mounted) return;
+
+    final pm = PaymentMethods.byId(result.billType);
+    final flag = pm?.flag ?? '🌐';
+    final methodName = pm?.name ?? result.billType.toUpperCase();
+    broLog('🌐 EMVCo detectado: $result');
+
+    // v592: buscar preço do BTC na moeda local pra mostrar conversão real em
+    // sats no preview. Não falha se a API estiver offline — apenas omite.
+    int? amountSats;
+    double? btcPrice;
+    if (result.amount != null && result.amount! > 0) {
+      btcPrice = await BitcoinPriceService.getBitcoinPriceIn(result.currencyCode);
+      if (btcPrice != null && btcPrice > 0) {
+        final btcAmount = result.amount! / btcPrice;
+        amountSats = (btcAmount * 100000000).round();
+      }
+    }
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Text(flag, style: const TextStyle(fontSize: 32)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        methodName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        '${result.countryCode} · ${result.currencyCode}',
+                        style: const TextStyle(color: Colors.white60, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white54),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+              ]),
+              const SizedBox(height: 16),
+              if (result.amount != null)
+                _kv('Valor', '${result.currencyCode} ${result.amount!.toStringAsFixed(2)}'),
+              if (amountSats != null)
+                _kv('≈ Sats', '$amountSats sats'),
+              if (btcPrice != null)
+                _kv('Cotação', '1 BTC = ${result.currencyCode} ${btcPrice.toStringAsFixed(2)}'),
+              if (result.merchantName.isNotEmpty)
+                _kv('Comerciante', result.merchantName),
+              if (result.merchantCity.isNotEmpty)
+                _kv('Cidade', result.merchantCity),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: Colors.orange, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        amountSats != null
+                          ? 'Pedido será cotado em ${result.currencyCode}. Provedores que aceitam essa moeda receberão a notificação.'
+                          : 'Código $methodName reconhecido. Cotação indisponível no momento.',
+                        style: const TextStyle(color: Colors.white70, fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFFF6B6B),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  onPressed: amountSats != null && btcPrice != null && result.amount != null && result.amount! > 0
+                    ? () {
+                        Navigator.pop(ctx);
+                        _createForeignOrder(
+                          billType: result.billType,
+                          billCode: code,
+                          amount: result.amount!,
+                          currency: result.currencyCode,
+                          btcPrice: btcPrice!,
+                          amountSats: amountSats!,
+                        );
+                      }
+                    : () => Navigator.pop(ctx),
+                  child: Text(amountSats != null ? 'Criar pedido' : 'Ok'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    // Limpa o campo pra evitar re-trigger
+    if (mounted) {
+      _codeController.clear();
+    }
+  }
+
+  Widget _kv(String k, String v) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(k, style: const TextStyle(color: Colors.white54, fontSize: 13)),
+          ),
+          Expanded(
+            child: Text(v, style: const TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// v594: criar ordem em moeda estrangeira (MXN/THB/ARS/COP/INR) usando
+  /// saldo da carteira Bro. O consumidor paga em sats; provedores opted-in
+  /// (POST /push/accepted-currencies) recebem a notificação e cumprem o
+  /// pagamento na moeda local. Caso não haja provedor disponível, a ordem
+  /// fica em 'pending' até alguém aceitar (mesmo modelo do PIX).
+  Future<void> _createForeignOrder({
+    required String billType,
+    required String billCode,
+    required double amount,
+    required String currency,
+    required double btcPrice,
+    required int amountSats,
+  }) async {
+    if (!mounted) return;
+    final orderProvider = context.read<OrderProvider>();
+    final lightningProvider = context.read<LightningProvider>();
+    setState(() => _isProcessing = true);
+
+    // v598: balance + tier check (mirrors _payWithWalletBalance for PIX).
+    // Sem isso, ordens em moeda estrangeira podiam ser criadas sem sats
+    // disponíveis, e o auto-pay no main.dart falhava silenciosamente quando
+    // o provedor enviava o invoice.
+    int walletBalance;
+    try {
+      walletBalance = await lightningProvider.getBalance();
+    } catch (e) {
+      if (mounted) setState(() => _isProcessing = false);
+      _showError(AppLocalizations.of(context).tp('payment_error_check_balance', {'error': e.toString()}));
+      return;
+    }
+    final lockedSats = orderProvider.committedSats;
+    final availableBalance = walletBalance - lockedSats;
+    if (availableBalance < amountSats) {
+      if (mounted) setState(() => _isProcessing = false);
+      final msg = lockedSats > 0
+          ? AppLocalizations.of(context).tp('payment_insufficient_balance_detailed', {'total': walletBalance.toString(), 'locked': lockedSats.toString(), 'available': availableBalance.toString(), 'needed': amountSats.toString()})
+          : AppLocalizations.of(context).tp('payment_insufficient_balance_simple', {'available': walletBalance.toString(), 'needed': amountSats.toString()});
+      _showError(msg);
+      return;
+    }
+
+    // Tier collateral warning (mesmo padrão do PIX).
+    final userPubkey = orderProvider.currentUserPubkey ?? '';
+    if (userPubkey.isNotEmpty) {
+      final collateralService = LocalCollateralService();
+      final collateral = await collateralService.getCollateral(userPubkey: userPubkey);
+      if (collateral != null && collateral.requiredSats > 0) {
+        final remainingAfterPayment = walletBalance - amountSats;
+        if (remainingAfterPayment < collateral.requiredSats) {
+          final confirmed = await _showTierWarningDialog(
+            tierName: collateral.tierName,
+            requiredSats: collateral.requiredSats,
+            currentBalance: walletBalance,
+            afterPayment: remainingAfterPayment,
+          );
+          if (confirmed != true) {
+            if (mounted) setState(() => _isProcessing = false);
+            return;
+          }
+        }
+      }
+    }
+
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const Center(child: CircularProgressIndicator(color: Color(0xFFFF6B6B))),
+    );
+
+    try {
+      final btcAmount = amount / btcPrice;
+      final walletPayId = DateTime.now().millisecondsSinceEpoch.toRadixString(16);
+      final paymentHash = 'wallet_$walletPayId';
+      final invoice = 'wallet_balance_payment_$walletPayId';
+
+      final order = await orderProvider.createOrder(
+        billType: billType,
+        billCode: billCode,
+        amount: amount,
+        btcAmount: btcAmount,
+        btcPrice: btcPrice,
+        currency: currency,
+      );
+
+      if (!mounted) return;
+      Navigator.of(context).pop(); // close loading
+
+      if (order == null) {
+        _showError('Não foi possível criar o pedido. Tente novamente.');
+        return;
+      }
+
+      orderProvider.setOrderPaymentHashAndStatusLocal(
+        orderId: order.id,
+        paymentHash: paymentHash,
+        invoice: invoice,
+        status: 'payment_received',
+      );
+
+      broLog('✅ Ordem $currency criada: ${order.id} ($amountSats sats)');
+      if (mounted) {
+        _codeController.clear();
+        Navigator.of(context).pushNamedAndRemoveUntil(
+          '/order-status',
+          (route) => route.isFirst,
+          arguments: {
+            'orderId': order.id,
+            'amountBrl': amount, // legado — telas antigas ainda esperam essa chave
+            'amountSats': amountSats,
+          },
+        );
+      }
+    } catch (e) {
+      broLog('❌ _createForeignOrder: $e');
+      if (mounted) {
+        Navigator.of(context).pop();
+        _showError('Erro ao criar pedido: $e');
+      }
+    } finally {
+      if (mounted) setState(() => _isProcessing = false);
+    }
   }
 
   @override
@@ -99,6 +397,18 @@ class _PaymentScreenState extends State<PaymentScreen> {
   Future<void> _processBill(String code) async {
     broLog('📝 _processBill iniciado - _isProcessing antes: $_isProcessing');
     if (!mounted) return;
+
+    // v595: roteamento EMVCo-first. Se o QR for EMVCo válido e NÃO for BR/BRL,
+    // delega ao preview de moeda estrangeira em vez de tentar decodificar
+    // como PIX/Boleto. Vale para o fluxo do scanner (que chama _processBill
+    // direto sem passar pelo _onCodeChanged).
+    final parsed = EmvcoQrParser.parse(code);
+    if (parsed != null &&
+        !(parsed.countryCode == 'BR' && parsed.currencyNumeric == '986')) {
+      await _handleEmvcoPreview(code);
+      return;
+    }
+
     setState(() {
       _isProcessing = true;
       _billData = null;
@@ -115,7 +425,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
       // Detectar tipo de código
       final cleanCode = code.replaceAll(RegExp(r'[^\d]'), '');
-      final isPix = code.contains('00020126') || code.contains('pix.') || code.contains('br.gov.bcb');
+      // v595: agora que EMVCo foreign já foi tratado acima, qualquer payload
+      // EMVCo restante é PIX brasileiro (BR/986). Também aceita os formatos
+      // antigos sem campo 58/53 explícitos via heurística de substrings.
+      final isPix = (parsed != null) ||
+          code.contains('00020126') ||
+          code.contains('pix.') ||
+          code.toLowerCase().contains('br.gov.bcb');
       
       broLog('🔍 Processando código: ${code.substring(0, min(50, code.length))}');
       broLog('📊 Tipo detectado: ${isPix ? "PIX" : "Boleto"}');
@@ -151,29 +467,19 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
         final dynamic valueData = result['value'];
         final double amount = (valueData is num) ? valueData.toDouble() : 0.0;
-        
-        // VALIDAÇÃO: Limites de valor para ordens
-        const double minOrderBrl = 0.01;  // Mínimo R$ 0.01 para testes
-        const double maxOrderBrl = 200.0; // TEMPORÁRIO: Máximo R$ 200 para fase de testes externos
-        
-        if (amount < minOrderBrl) {
+
+        // v601: limite artificial de R$200 removido. Tiers do provedor já
+        // controlam o valor máximo de cada ordem (modelo de risco real).
+        // Mantemos apenas check de valor > 0 (zero impede convertPrice).
+        if (amount <= 0) {
           if (!mounted) return;
-          _showError(AppLocalizations.of(context).tp('payment_value_too_low', {'min': minOrderBrl.toStringAsFixed(2)}));
+          _showError(AppLocalizations.of(context).t('payment_invalid_or_unrecognized'));
           setState(() {
             _isProcessing = false;
           });
           return;
         }
-        
-        if (amount > maxOrderBrl) {
-          if (!mounted) return;
-          _showError(AppLocalizations.of(context).tp('payment_value_too_high', {'max': maxOrderBrl.toStringAsFixed(2)}));
-          setState(() {
-            _isProcessing = false;
-          });
-          return;
-        }
-        
+
         broLog('💰 Chamando convertPrice com amount: $amount');
         final conversion = await orderProvider.convertPrice(amount);
         broLog('📊 Resposta do convertPrice: $conversion');

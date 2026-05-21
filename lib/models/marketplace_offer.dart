@@ -7,6 +7,13 @@ class MarketplaceOffer {
   final String description;
   final int priceSats;
   final int priceDiscount;
+  /// v604: moeda escolhida pelo vendedor (sats|BRL|USD|EUR|ARS|...).
+  /// 'sats' = preco nativo em satoshis (legado).
+  /// Qualquer outra: priceFiat tem o valor original na moeda; priceSats
+  /// e o equivalente em sats calculado no momento da publicacao.
+  final String priceCurrency;
+  /// v604: valor original na moeda escolhida (null quando currency=='sats').
+  final double? priceFiat;
   final String category;
   final String sellerPubkey;
   final String sellerName;
@@ -27,6 +34,8 @@ class MarketplaceOffer {
     required this.description,
     required this.priceSats,
     required this.priceDiscount,
+    this.priceCurrency = 'sats',
+    this.priceFiat,
     required this.category,
     required this.sellerPubkey,
     required this.sellerName,
@@ -62,6 +71,8 @@ class MarketplaceOffer {
       description: description,
       priceSats: priceSats,
       priceDiscount: priceDiscount,
+      priceCurrency: priceCurrency,
+      priceFiat: priceFiat,
       category: category,
       sellerPubkey: sellerPubkey,
       sellerName: sellerName,
@@ -141,6 +152,8 @@ class MarketplaceOffer {
       description: description,
       priceSats: priceSats,
       priceDiscount: 0,
+      priceCurrency: (contentMap['priceCurrency'] as String?) ?? 'sats',
+      priceFiat: (contentMap['priceFiat'] is num) ? (contentMap['priceFiat'] as num).toDouble() : null,
       category: category,
       sellerPubkey: event['pubkey'] ?? '',
       sellerName: 'Usuário ${(event['pubkey'] ?? '??????').toString().substring(0, 6)}',
@@ -161,6 +174,8 @@ class MarketplaceOffer {
         'description': description,
         'priceSats': priceSats,
         'priceDiscount': priceDiscount,
+        'priceCurrency': priceCurrency,
+        'priceFiat': priceFiat,
         'category': category,
         'sellerPubkey': sellerPubkey,
         'sellerName': sellerName,
