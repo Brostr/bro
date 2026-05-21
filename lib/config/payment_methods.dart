@@ -77,6 +77,63 @@ class PaymentMethods {
   /// Icon for an id.
   static IconData icon(String id) => byId(id)?.icon ?? Icons.payment;
 
+  /// v603: Formats an amount in the order's ORIGINAL currency, so dashboard
+  /// rows preserve the moeda the user actually paid in (R$ 12,50 for PIX,
+  /// ARS 1.500,00 for Transf3, etc) instead of being converted to whatever
+  /// the locale prefers.
+  ///
+  /// Symbols:
+  ///   BRL -> "R$ 12,50"   (pt-BR style: comma decimal, dot thousands)
+  ///   USD -> "$ 12.50"
+  ///   EUR -> "€ 12.50"
+  ///   ARS -> "ARS 1.500,00"
+  ///   MXN -> "MXN 250.00"
+  ///   COP -> "COP 25.000"
+  ///   INR -> "INR 1,000.00"
+  ///   THB -> "THB 100.00"
+  ///   other -> "<CODE> 12.34"
+  static String formatAmount(double amount, String currency) {
+    final cur = currency.toUpperCase();
+    String fmt(double v, {bool ptBr = false, int decimals = 2}) {
+      final fixed = v.toStringAsFixed(decimals);
+      final parts = fixed.split('.');
+      final intPart = parts[0];
+      final decPart = parts.length > 1 ? parts[1] : '';
+      // thousands separator
+      final buf = StringBuffer();
+      for (var i = 0; i < intPart.length; i++) {
+        if (i > 0 && (intPart.length - i) % 3 == 0) {
+          buf.write(ptBr ? '.' : ',');
+        }
+        buf.write(intPart[i]);
+      }
+      if (decimals == 0) return buf.toString();
+      return '${buf.toString()}${ptBr ? ',' : '.'}$decPart';
+    }
+
+    switch (cur) {
+      case 'BRL':
+        return 'R\$ ${fmt(amount, ptBr: true)}';
+      case 'USD':
+        return '\$ ${fmt(amount)}';
+      case 'EUR':
+        return '€ ${fmt(amount)}';
+      case 'ARS':
+        return 'ARS ${fmt(amount, ptBr: true)}';
+      case 'MXN':
+        return 'MXN ${fmt(amount)}';
+      case 'COP':
+        // COP usualmente sem decimais
+        return 'COP ${fmt(amount, ptBr: true, decimals: 0)}';
+      case 'INR':
+        return 'INR ${fmt(amount)}';
+      case 'THB':
+        return 'THB ${fmt(amount)}';
+      default:
+        return '$cur ${fmt(amount)}';
+    }
+  }
+
   /// Groups used by the provider-filter UI. Brazilian bill types are
   /// merged into a single "Pix ou Boleto" entry so the user doesn't have
   /// to toggle 5 BR boxes.

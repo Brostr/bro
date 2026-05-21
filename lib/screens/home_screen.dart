@@ -27,6 +27,7 @@ import 'notifications_inbox_screen.dart';
 import '../models/order.dart';
 import '../models/notification_item.dart';
 import '../services/chat_service.dart';
+import '../config/payment_methods.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -1204,9 +1205,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 itemCount: myOrders.length,
                 itemBuilder: (context, index) {
                   final order = myOrders[index];
+                  // v603: preserve a moeda ORIGINAL da ordem (R$ pra PIX,
+                  // ARS pra Transf 3.0, USD pra dolar, etc) — antes mostrava
+                  // sempre no _currencyFormat do display do usuario, o que
+                  // misturava as moedas no historico.
                   return TransactionCard(
-                    title: order.billType == 'pix' ? 'PIX' : 'Boleto',
-                    amount: _currencyFormat.format(order.amount),
+                    title: PaymentMethods.displayName(order.billType),
+                    amount: PaymentMethods.formatAmount(order.amount, order.currency),
                     status: order.status,
                     statusLabel: _getStatusLabel(order.status, metadata: order.metadata),
                     orderId: order.id,
