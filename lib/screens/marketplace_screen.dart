@@ -11,6 +11,7 @@ import '../services/bitcoin_price_service.dart';
 import '../services/content_moderation_service.dart';
 import '../services/marketplace_reputation_service.dart';
 import '../config.dart';
+import '../config/payment_methods.dart';
 import '../services/chat_service.dart';
 import 'marketplace_chat_screen.dart';
 import 'nostr_conversations_screen.dart';
@@ -40,6 +41,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> with SingleTicker
   String? _error;
   double _btcPrice = 0;
   bool _disclaimerDismissed = false;
+  /// v604: filtro de moeda. 'all' = todas. Outros: 'sats', 'BRL', 'USD'...
+  String _currencyFilter = 'all';
 
   @override
   void initState() {
@@ -97,6 +100,8 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> with SingleTicker
           description: data['description'] ?? '',
           priceSats: data['priceSats'] ?? 0,
           priceDiscount: 0,
+          priceCurrency: (data['priceCurrency'] as String?) ?? 'sats', // v604
+          priceFiat: (data['priceFiat'] is num) ? (data['priceFiat'] as num).toDouble() : null, // v604
           category: data['category'] ?? 'outros',
           sellerPubkey: data['sellerPubkey'] ?? '',
           sellerName: 'Usuário ${(data['sellerPubkey'] ?? '??????').toString().substring(0, 6)}',
@@ -303,19 +308,88 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> with SingleTicker
       );
     }
 
+    // v604: filtro de moeda. 'all' = todas. Outros: 'sats', 'BRL', 'USD'...
+    // Coletamos as moedas que efetivamente aparecem nas ofertas pra montar
+    // a lista de opcoes dinamicamente (evita mostrar moeda sem oferta).
+    final available = <String>{
+      for (final o in _offers) o.priceCurrency,
+    }.toList()..sort();
+    final visible = _currencyFilter == 'all'
+        ? _offers
+        : _offers.where((o) => o.priceCurrency.toLowerCase() == _currencyFilter.toLowerCase()).toList();
+
     return RefreshIndicator(
       onRefresh: _loadData,
       color: Colors.orange,
-      child: GridView.builder(
-        padding: const EdgeInsets.all(8),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3,
-          crossAxisSpacing: 6,
-          mainAxisSpacing: 6,
-          childAspectRatio: 0.55, // Retangular vertical
-        ),
-        itemCount: _offers.length,
-        itemBuilder: (context, index) => _buildOfferCardGrid(_offers[index]),
+      child: Column(
+        children: [
+          // Filtro de moeda
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              children: [
+                const Icon(Icons.filter_alt, color: Colors.orange, size: 18),
+                const SizedBox(width: 8),
+                const Text(
+                  'Moeda:',
+                  style: TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0x0DFFFFFF),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0x1AFFFFFF)),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _currencyFilter,
+                      dropdownColor: const Color(0xFF1A1A1A),
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                      items: [
+                        const DropdownMenuItem(value: 'all', child: Text('Todas')),
+                        ...available.map((c) => DropdownMenuItem(
+                              value: c,
+                              child: Text(c == 'sats' ? '\u26a1 sats' : c.toUpperCase()),
+                            )),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        setState(() => _currencyFilter = v);
+                      },
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '${visible.length}/${_offers.length}',
+                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: visible.isEmpty
+                ? Center(
+                    child: Text(
+                      'Nenhuma oferta em $_currencyFilter',
+                      style: const TextStyle(color: Colors.white54),
+                    ),
+                  )
+                : GridView.builder(
+                    padding: const EdgeInsets.all(8),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 6,
+                      mainAxisSpacing: 6,
+                      childAspectRatio: 0.55,
+                    ),
+                    itemCount: visible.length,
+                    itemBuilder: (context, index) => _buildOfferCardGrid(visible[index]),
+                  ),
+          ),
+        ],
       ),
     );
   }
@@ -444,31 +518,63 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> with SingleTicker
                         overflow: TextOverflow.ellipsis,
                       ),
                       const Spacer(),
-                      // Preço em sats
+                      // Preco em sats (ou na moeda original)
+                      // v604: se priceCurrency != sats, mostramos o valor
+                      // na moeda escolhida pelo vendedor como destaque e
+                      // os sats embaixo como referencia da rede Lightning.
                       if (offer.priceSats > 0) ...[
-                        Row(
-                          children: [
-                            const Icon(Icons.bolt, color: Colors.amber, size: 12),
-                            Expanded(
-                              child: Text(
-                                '${_formatSats(offer.priceSats)}',
-                                style: const TextStyle(
-                                  color: Colors.amber,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold,
+                        if (offer.priceCurrency == 'sats') ...[
+                          Row(
+                            children: [
+                              const Icon(Icons.bolt, color: Colors.amber, size: 12),
+                              Expanded(
+                                child: Text(
+                                  '${_formatSats(offer.priceSats)}',
+                                  style: const TextStyle(
+                                    color: Colors.amber,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
                               ),
-                            ),
-                          ],
-                        ),
-                        if (priceInBrl > 0)
-                          Text(
-                            'R\$ ${priceInBrl.toStringAsFixed(2)}',
-                            style: const TextStyle(color: Colors.white38, fontSize: 8),
-                            maxLines: 1,
+                            ],
                           ),
+                          if (priceInBrl > 0)
+                            Text(
+                              'R\$ ${priceInBrl.toStringAsFixed(2)}',
+                              style: const TextStyle(color: Colors.white38, fontSize: 8),
+                              maxLines: 1,
+                            ),
+                        ] else ...[
+                          Text(
+                            PaymentMethods.formatAmount(
+                              offer.priceFiat ?? 0,
+                              offer.priceCurrency,
+                            ),
+                            style: const TextStyle(
+                              color: Colors.greenAccent,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          Row(
+                            children: [
+                              const Icon(Icons.bolt, color: Colors.amber, size: 9),
+                              Expanded(
+                                child: Text(
+                                  '${_formatSats(offer.priceSats)} sats',
+                                  style: const TextStyle(color: Colors.white54, fontSize: 8),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ] else
                         Text(
                           AppLocalizations.of(context).t('market_price_on_request'),
@@ -691,7 +797,10 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> with SingleTicker
             ),
             const SizedBox(height: 20),
             
-            // Preço
+            // Preco
+            // v604: se a oferta tem moeda fiat, mostramos o valor fiat
+            // em destaque e os sats como referencia (a transacao acontece
+            // sempre em sats no fim das contas).
             if (offer.priceSats > 0) ...[
               Container(
                 padding: const EdgeInsets.all(16),
@@ -702,24 +811,46 @@ class _MarketplaceScreenState extends State<MarketplaceScreen> with SingleTicker
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.bolt, color: Colors.amber, size: 32),
+                    Icon(
+                      offer.priceCurrency == 'sats' ? Icons.bolt : Icons.attach_money,
+                      color: Colors.amber,
+                      size: 32,
+                    ),
                     const SizedBox(width: 12),
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          '${_formatSats(offer.priceSats)} sats',
-                          style: const TextStyle(
-                            color: Colors.amber,
-                            fontSize: 24,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        if (priceInBrl > 0)
+                        if (offer.priceCurrency == 'sats') ...[
                           Text(
-                            '≈ R\$ ${priceInBrl.toStringAsFixed(2)}',
+                            '${_formatSats(offer.priceSats)} sats',
+                            style: const TextStyle(
+                              color: Colors.amber,
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          if (priceInBrl > 0)
+                            Text(
+                              '≈ R\$ ${priceInBrl.toStringAsFixed(2)}',
+                              style: const TextStyle(color: Colors.white54, fontSize: 14),
+                            ),
+                        ] else ...[
+                          Text(
+                            PaymentMethods.formatAmount(
+                              offer.priceFiat ?? 0,
+                              offer.priceCurrency,
+                            ),
+                            style: const TextStyle(
+                              color: Colors.greenAccent,
+                              fontSize: 24,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            '≈ ${_formatSats(offer.priceSats)} sats',
                             style: const TextStyle(color: Colors.white54, fontSize: 14),
                           ),
+                        ],
                       ],
                     ),
                   ],

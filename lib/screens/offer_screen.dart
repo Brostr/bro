@@ -27,6 +27,18 @@ class _OfferScreenState extends State<OfferScreen> {
   final _quantityController = TextEditingController();
   
   String _selectedCategory = 'produto';
+  /// v604: moeda escolhida pelo vendedor. 'sats' = preco nativo (legado).
+  /// Outras = preco em fiat, convertido pra sats no momento da publicacao.
+  String _selectedCurrency = 'sats';
+  static const List<Map<String, String>> _kCurrencies = [
+    {'code': 'sats', 'label': 'sats',  'symbol': 'sats'},
+    {'code': 'BRL',  'label': 'BRL', 'symbol': 'R\$'},
+    {'code': 'USD',  'label': 'USD', 'symbol': '\$'},
+    {'code': 'EUR',  'label': 'EUR', 'symbol': '€'},
+    {'code': 'ARS',  'label': 'ARS', 'symbol': 'ARS'},
+  ];
+  /// Cotacao do BTC na moeda escolhida (precisa pra converter pra sats).
+  double? _btcPriceInSelectedCurrency;
   bool _isPublishing = false;
   double? _btcPriceBrl;
   
@@ -48,6 +60,21 @@ class _OfferScreenState extends State<OfferScreen> {
       setState(() {
         _btcPriceBrl = price ?? 480558.0; // Fallback
       });
+    }
+    // v604: tambem carrega cotacao na moeda atual (se != sats)
+    await _loadBtcPriceForCurrency();
+  }
+
+  /// v604: cota o BTC na moeda escolhida pra calcular sats no momento
+  /// da publicacao. Para 'sats' nao faz nada.
+  Future<void> _loadBtcPriceForCurrency() async {
+    if (_selectedCurrency == 'sats') {
+      if (mounted) setState(() => _btcPriceInSelectedCurrency = null);
+      return;
+    }
+    final price = await BitcoinPriceService.getBitcoinPriceIn(_selectedCurrency);
+    if (mounted) {
+      setState(() => _btcPriceInSelectedCurrency = price);
     }
   }
 
@@ -181,24 +208,58 @@ class _OfferScreenState extends State<OfferScreen> {
                 ),
               ),
               const SizedBox(height: 8),
-              TextFormField(
-                controller: _priceController,
-                style: const TextStyle(color: Colors.white),
-                keyboardType: TextInputType.number,
-                decoration: _buildInputDecoration(
-                  hint: 'Ex: 100000',
-                  icon: Icons.bolt,
-                  suffix: 'sats',
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return AppLocalizations.of(context).t('offer_price_validator');
-                  }
-                  if (int.tryParse(value) == null) {
-                    return AppLocalizations.of(context).t('offer_price_numbers_only');
-                  }
-                  return null;
-                },
+              // v604: linha com dropdown de moeda + campo de valor
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0x0DFFFFFF),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0x1AFFFFFF)),
+                    ),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _selectedCurrency,
+                        dropdownColor: const Color(0xFF1A1A1A),
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                        items: _kCurrencies.map((c) => DropdownMenuItem(
+                          value: c['code'],
+                          child: Text(c['label']!),
+                        )).toList(),
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setState(() => _selectedCurrency = v);
+                          _loadBtcPriceForCurrency();
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _priceController,
+                      style: const TextStyle(color: Colors.white),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      decoration: _buildInputDecoration(
+                        hint: _selectedCurrency == 'sats' ? 'Ex: 100000' : 'Ex: 50.00',
+                        icon: _selectedCurrency == 'sats' ? Icons.bolt : Icons.attach_money,
+                        suffix: _kCurrencies.firstWhere((c) => c['code'] == _selectedCurrency)['symbol'],
+                      ),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return AppLocalizations.of(context).t('offer_price_validator');
+                        }
+                        final parsed = double.tryParse(value.replaceAll(',', '.'));
+                        if (parsed == null || parsed <= 0) {
+                          return AppLocalizations.of(context).t('offer_price_numbers_only');
+                        }
+                        return null;
+                      },
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 8),
               _buildPriceHint(),
@@ -462,15 +523,35 @@ class _OfferScreenState extends State<OfferScreen> {
   }
 
   Widget _buildPriceHint() {
-    final priceText = _priceController.text;
-    final sats = int.tryParse(priceText) ?? 0;
-    final btc = sats / 100000000;
-    
-    // Calcular valor em reais se tiver preço do BTC
-    String priceInBrl = '';
-    if (_btcPriceBrl != null && sats > 0) {
-      final brlValue = btc * _btcPriceBrl!;
-      priceInBrl = ' \u2248 R\$ ${brlValue.toStringAsFixed(2)}';
+    final priceText = _priceController.text.replaceAll(',', '.');
+    final parsed = double.tryParse(priceText) ?? 0;
+
+    // v604: dois caminhos. Em 'sats' mantemos o hint legado.
+    // Em fiat, calculamos os sats correspondentes pra mostrar pro vendedor
+    // exatamente quanto o comprador vai pagar em rede Lightning.
+    int sats;
+    String secondaryLine;
+    if (_selectedCurrency == 'sats') {
+      sats = parsed.toInt();
+      final btc = sats / 100000000;
+      if (_btcPriceBrl != null && sats > 0) {
+        final brl = btc * _btcPriceBrl!;
+        secondaryLine = '≈ R\$ ${brl.toStringAsFixed(2)}';
+      } else {
+        secondaryLine = '';
+      }
+    } else {
+      final btcPrice = _btcPriceInSelectedCurrency;
+      if (btcPrice != null && btcPrice > 0 && parsed > 0) {
+        final btc = parsed / btcPrice;
+        sats = (btc * 100000000).round();
+        secondaryLine = '≈ $sats sats';
+      } else {
+        sats = 0;
+        secondaryLine = btcPrice == null && parsed > 0
+            ? 'Buscando cotacao do BTC em $_selectedCurrency...'
+            : '';
+      }
     }
     
     return Container(
@@ -489,7 +570,7 @@ class _OfferScreenState extends State<OfferScreen> {
               Expanded(
                 child: Text(
                   sats > 0
-                      ? '${sats.toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (m) => '${m[1]}.')} sats = ${btc.toStringAsFixed(8)} BTC'
+                      ? '${sats.toString().replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (m) => '${m[1]}.')} sats = ${(sats / 100000000).toStringAsFixed(8)} BTC'
                       : 'Digite o valor para ver a convers\u00e3o',
                   style: const TextStyle(
                     fontSize: 12,
@@ -499,14 +580,14 @@ class _OfferScreenState extends State<OfferScreen> {
               ),
             ],
           ),
-          if (priceInBrl.isNotEmpty) ...[
+          if (secondaryLine.isNotEmpty) ...[
             const SizedBox(height: 8),
             Row(
               children: [
                 const Icon(Icons.attach_money, color: Colors.green, size: 18),
                 const SizedBox(width: 8),
                 Text(
-                  priceInBrl,
+                  secondaryLine,
                   style: const TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.bold,
@@ -810,11 +891,41 @@ class _OfferScreenState extends State<OfferScreen> {
       }
 
       broLog('🚀 Publicando oferta no Nostr...');
+      // v604: converte fiat -> sats se necessario. Para 'sats' usa o valor
+      // direto. priceFiat e priceCurrency carregam a moeda escolhida pelo
+      // vendedor pra display futuro.
+      final priceRaw = _priceController.text.replaceAll(',', '.');
+      final parsedAmount = double.tryParse(priceRaw) ?? 0;
+      int priceSatsToPublish;
+      double? priceFiatToPublish;
+      if (_selectedCurrency == 'sats') {
+        priceSatsToPublish = parsedAmount.toInt();
+        priceFiatToPublish = null;
+      } else {
+        final btcPx = _btcPriceInSelectedCurrency;
+        if (btcPx == null || btcPx <= 0) {
+          setState(() => _isPublishing = false);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('❌ Cotacao do BTC em $_selectedCurrency indisponivel. Tente novamente.'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+          return;
+        }
+        priceSatsToPublish = ((parsedAmount / btcPx) * 100000000).round();
+        priceFiatToPublish = parsedAmount;
+      }
+
       final offerId = await nostrOrderService.publishMarketplaceOffer(
         privateKey: privateKey,
         title: _titleController.text,
         description: fullDescription,
-        priceSats: int.tryParse(_priceController.text) ?? 0,
+        priceSats: priceSatsToPublish,
+        priceCurrency: _selectedCurrency,
+        priceFiat: priceFiatToPublish,
         category: _selectedCategory,
         siteUrl: _siteController.text.trim().isEmpty ? null : _siteController.text.trim(),
         city: _cityController.text.trim().isEmpty ? null : _cityController.text.trim(),
