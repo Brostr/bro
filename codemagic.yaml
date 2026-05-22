@@ -19,7 +19,7 @@ workflows:
       groups:
         - bro_secrets
       android_signing:
-        - bro_keystore
+        - bro_keystore_v2
       ios_signing:
         distribution_type: app_store
         bundle_identifier: app.brostr
@@ -100,7 +100,7 @@ workflows:
       groups:
         - bro_secrets
       android_signing:
-        - bro_keystore
+        - bro_keystore_v2
       flutter: stable
       java: 17
       
@@ -140,22 +140,13 @@ workflows:
     environment:
       groups:
         - google_play_credentials
-        - keystore_credentials
         - bro_secrets
+      android_signing:
+        - bro_keystore_v2
       flutter: stable
       java: 17
       
     scripts:
-      - name: Set up keystore
-        script: |
-          echo $CM_KEYSTORE | base64 --decode > $CM_BUILD_DIR/android/app/bro-release.jks
-          cat > "$CM_BUILD_DIR/android/key.properties" <<EOF
-          storePassword=$CM_KEYSTORE_PASSWORD
-          keyPassword=$CM_KEY_PASSWORD
-          keyAlias=$CM_KEY_ALIAS
-          storeFile=bro-release.jks
-          EOF
-          
       - name: Decode google-services.json
         script: echo "$GOOGLE_SERVICES_JSON" | base64 --decode > "$CM_BUILD_DIR/android/app/google-services.json"
 
