@@ -97,33 +97,53 @@ class _BrixScreenState extends State<BrixScreen> {
 
   Future<void> _checkExisting() async {
     try {
+      // Always read the current Nostr pubkey first — if the user restored a
+      // different seed, the cached BRIX entry belongs to the previous identity
+      // and must be invalidated (otherwise stale username/address is shown
+      // forever and the server lookup hits 404 on the old pubkey).
+      final currentPubkey = await _storage.getNostrPublicKey();
+
       // First check local cache
       final cached = await _loadBrixLocal();
       if (cached != null) {
-        // Fix: if cached pubkey is null (bug from verify path), read from storage
         String? cachedPubkey = cached['pubkey'];
         if (cachedPubkey == null || cachedPubkey.isEmpty) {
-          cachedPubkey = await _storage.getNostrPublicKey();
+          cachedPubkey = currentPubkey;
         }
-        setState(() {
-          _brixAddress = cached['address'];
-          _username = cached['username'];
-          _registeredPhone = cached['phone'];
-          _registeredEmail = cached['email'];
-          _pubkey = cachedPubkey;
-          _step = BrixStep.active;
-        });
-        // Update cache if we fixed the pubkey
-        if (cached['pubkey'] == null && cachedPubkey != null) {
-          _saveBrixLocal();
+
+        // Cache belongs to a different Nostr identity → drop it and re-lookup
+        // by the current pubkey so the correct BRIX (or empty state) appears.
+        if (currentPubkey != null &&
+            currentPubkey.isNotEmpty &&
+            cachedPubkey != null &&
+            cachedPubkey.isNotEmpty &&
+            cachedPubkey != currentPubkey) {
+          broLog('[BRIX] Cached pubkey ($cachedPubkey) != current ($currentPubkey) — invalidating cache');
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.remove('brix_cached');
+          } catch (_) {}
+        } else {
+          setState(() {
+            _brixAddress = cached['address'];
+            _username = cached['username'];
+            _registeredPhone = cached['phone'];
+            _registeredEmail = cached['email'];
+            _pubkey = cachedPubkey;
+            _step = BrixStep.active;
+          });
+          // Update cache if we fixed the pubkey
+          if (cached['pubkey'] == null && cachedPubkey != null) {
+            _saveBrixLocal();
+          }
+          // Refresh from server in background
+          _refreshFromServer(_pubkey);
+          _registerFcmToken();
+          return;
         }
-        // Refresh from server in background
-        _refreshFromServer(_pubkey);
-        _registerFcmToken();
-        return;
       }
 
-      final pubkey = await _storage.getNostrPublicKey();
+      final pubkey = currentPubkey;
       if (pubkey != null && pubkey.isNotEmpty) {
         _pubkey = pubkey;
         // Try lookup by nostr pubkey first

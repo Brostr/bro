@@ -1037,6 +1037,51 @@ class _WalletScreenState extends State<WalletScreen> {
                           ),
                         ),
                       ),
+                      const SizedBox(width: 8),
+                      // MAX: preenche o valor maximo enviavel descontando taxa
+                      // estimada (fee 0 para BRIX, ~1% para LN externo).
+                      GestureDetector(
+                        onTap: (isSending || availableSats <= 0) ? null : () {
+                          final dest = invoiceController.text.trim().toLowerCase();
+                          final isBrixDest = dest.contains('@') &&
+                              (dest.endsWith('@brix.app') ||
+                                  dest.endsWith('@brostr.app') ||
+                                  dest.endsWith('@brix.brostr.app'));
+                          int maxSats;
+                          if (isBrixDest) {
+                            maxSats = (availableSats - 1).clamp(0, availableSats);
+                          } else {
+                            final feeBuffer = (availableSats * 0.01).ceil();
+                            maxSats = (availableSats - feeBuffer - 1).clamp(0, availableSats);
+                          }
+                          setModalState(() {
+                            if (isReaisMode && btcPriceBrl != null && btcPriceBrl! > 0) {
+                              final brl = maxSats * btcPriceBrl! / 100000000;
+                              amountController.text = brl.toStringAsFixed(2);
+                            } else {
+                              amountController.text = maxSats.toString();
+                            }
+                          });
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+                          decoration: BoxDecoration(
+                            color: Colors.deepPurple.withOpacity(0.15),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: Colors.deepPurple.withOpacity(0.5),
+                            ),
+                          ),
+                          child: const Text(
+                            'MAX',
+                            style: TextStyle(
+                              color: Colors.deepPurple,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                   // Conversion preview

@@ -256,6 +256,7 @@ class NostrOrderService {
           ['t', broTag],
           ['t', broAppTag],
           ['t', billType],
+          ['t', 'cur:${currency.toLowerCase()}'], // v606: filtragem por moeda no relay (mesma convenção das ofertas de marketplace)
           ['amount', amount.toStringAsFixed(2)],
           ['status', 'pending'],
           _expirationTag(7), // v580: NIP-40 — kind 30078 expires in 7d
