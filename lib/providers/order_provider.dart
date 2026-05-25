@@ -1808,16 +1808,27 @@ class OrderProvider with ChangeNotifier {
     final privateKey = _nostrService.privateKey;
     if (privateKey == null || privateKey.isEmpty) return;
 
-    // Only process orders where I'm the buyer, order is accepted+, has billCode, has providerId
-    final candidates = _orders.where((o) =>
-      o.userPubkey == _currentUserPubkey &&
-      o.billCode.isNotEmpty &&
-      o.providerId != null &&
-      o.providerId!.isNotEmpty &&
-      o.providerId != _currentUserPubkey && // not self-orders
-      (o.metadata?['billCode_nip44_sent'] != true) &&
-      const ['accepted', 'payment_received', 'processing', 'awaiting_confirmation', 'completed'].contains(o.status)
-    ).toList();
+    // v607: Re-publish periodicamente (a cada ~6h) mesmo se ja marcado como
+    // 'sent', porque o evento NIP-44 pode nao ter chegado ao relay que o
+    // provedor consulta. Sem retry, ordens antigas ficam com billCode='[encrypted]'
+    // (placeholder legado pre-v388) no app do provedor para sempre.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    const resendIntervalMs = 6 * 60 * 60 * 1000; // 6h
+    final candidates = _orders.where((o) {
+      if (o.userPubkey != _currentUserPubkey) return false;
+      if (o.billCode.isEmpty || o.billCode == '[encrypted]') return false;
+      if (o.providerId == null || o.providerId!.isEmpty) return false;
+      if (o.providerId == _currentUserPubkey) return false; // not self-orders
+      const statusList = ['accepted', 'payment_received', 'processing', 'awaiting_confirmation', 'completed'];
+      if (!statusList.contains(o.status)) return false;
+      final sent = o.metadata?['billCode_nip44_sent'] == true;
+      if (!sent) return true;
+      // v607: ja marcado como sent — re-publica se passou 6h desde ultimo envio
+      // (apenas para status nao-final accepted/payment_received/processing)
+      if (o.status == 'completed' || o.status == 'awaiting_confirmation') return false;
+      final lastTs = (o.metadata?['billCode_nip44_sent_at'] as num?)?.toInt() ?? 0;
+      return (nowMs - lastTs) > resendIntervalMs;
+    }).toList();
 
     if (candidates.isEmpty) return;
     broLog('🔐 v438: ${candidates.length} order(s) need encrypted billCode delivery');
@@ -1858,11 +1869,12 @@ class OrderProvider with ChangeNotifier {
           orderUserPubkey: _currentUserPubkey!,
         );
         if (ok) {
-          // Mark as sent so we don't re-send
+          // Mark as sent + timestamp (v607: timestamp permite retry a cada 6h)
           final idx = _orders.indexWhere((o) => o.id == order.id);
           if (idx != -1) {
             final meta = Map<String, dynamic>.from(_orders[idx].metadata ?? {});
             meta['billCode_nip44_sent'] = true;
+            meta['billCode_nip44_sent_at'] = DateTime.now().millisecondsSinceEpoch;
             _orders[idx] = _orders[idx].copyWith(metadata: meta);
           }
           broLog('🔐 v438: billCode NIP-44 sent for ${order.id.substring(0, 8)}');

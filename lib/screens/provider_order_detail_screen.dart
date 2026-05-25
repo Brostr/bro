@@ -805,11 +805,14 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
     final billType = _orderDetails!['billType'] as String? ?? 
                      _orderDetails!['bill_type'] as String? ?? 
                      _orderDetails!['payment_type'] as String? ?? 'pix';
-    final billCode = _orderDetails!['billCode'] as String? ?? 
+    final billCodeRaw = _orderDetails!['billCode'] as String? ?? 
                      _orderDetails!['bill_code'] as String? ?? '';
+    // v607: '[encrypted]' e placeholder legado (pre-v388) que ficou salvo localmente.
+    // Tratamos como vazio para acionar o fluxo de "aguardando codigo do comprador".
+    final billCode = (billCodeRaw == '[encrypted]') ? '' : billCodeRaw;
     
     // DEBUG: Log para verificar se billCode está presente
-    broLog('🔍 _buildContent: billType=$billType, status=$status, billCode=${billCode.isNotEmpty ? "${billCode.substring(0, billCode.length > 20 ? 20 : billCode.length)}..." : "EMPTY"}');
+    broLog('🔍 _buildContent: billType=$billType, status=$status, billCode=${billCode.isNotEmpty ? "${billCode.substring(0, billCode.length > 20 ? 20 : billCode.length)}..." : "EMPTY"}${billCodeRaw == '[encrypted]' ? " (era placeholder legado)" : ""}');
     
     // SEMPRE construir payment_data a partir do billCode se existir
     Map<String, dynamic>? paymentData;
@@ -916,6 +919,20 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                       style: const TextStyle(
                         color: Colors.white54,
                         fontSize: 12,
+                      ),
+                    ),
+                    // v607: botao manual de refresh para o caso de o evento NIP-44
+                    // nao ter chegado ao relay que este provedor consulta.
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: () => _loadOrderDetails(forceSync: true),
+                      icon: const Icon(Icons.refresh, size: 18, color: Colors.orange),
+                      label: Text(
+                        AppLocalizations.of(context)!.t('prov_det_try_again'),
+                        style: const TextStyle(color: Colors.orange),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: Colors.orange.withOpacity(0.5)),
                       ),
                     ),
                   ],
