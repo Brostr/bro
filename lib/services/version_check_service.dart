@@ -281,8 +281,16 @@ class VersionCheckService {
       }
       
       final uri = Uri.parse(url);
-      if (await canLaunchUrl(uri)) {
+      broLog('🔗 Tentando abrir URL: $url');
+      // Tentar abrir direto. canLaunchUrl pode dar falso-negativo em Android 11+
+      // se o manifesto não declarar <queries> — então não confiamos nele e
+      // chamamos launchUrl diretamente. Se falhar, capturamos a exceção.
+      try {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
+        broLog('✅ launchUrl chamado com sucesso');
+      } catch (e) {
+        broLog('⚠️ launchUrl falhou ($e), tentando inAppBrowserView...');
+        await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
       }
     } catch (e) {
       broLog('❌ Erro ao abrir URL de download: $e');
