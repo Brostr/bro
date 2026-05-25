@@ -921,20 +921,6 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                         fontSize: 12,
                       ),
                     ),
-                    // v607: botao manual de refresh para o caso de o evento NIP-44
-                    // nao ter chegado ao relay que este provedor consulta.
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      onPressed: () => _loadOrderDetails(forceSync: true),
-                      icon: const Icon(Icons.refresh, size: 18, color: Colors.orange),
-                      label: Text(
-                        AppLocalizations.of(context)!.t('prov_det_try_again'),
-                        style: const TextStyle(color: Colors.orange),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: Colors.orange.withOpacity(0.5)),
-                      ),
-                    ),
                   ],
                 ),
               ),
