@@ -1116,9 +1116,18 @@ class BreezProvider with ChangeNotifier {
       }
 
       // Step 1: Prepare payment
+      // Para BOLT11 sem valor embutido (open-amount), passar o amountSats que o usuário digitou.
+      // Para BOLT11 com valor embutido, deixar null (SDK deduz do invoice).
+      final bool invoiceHasAmount = invoiceAmount != null && invoiceAmount > 0;
+      final BigInt? prepareAmount = (!invoiceHasAmount && amountSats != null && amountSats > 0)
+          ? BigInt.from(amountSats)
+          : null;
+      if (prepareAmount != null) {
+        broLog('📋 Invoice open-amount → enviando amount=$prepareAmount sats ao SDK');
+      }
       final prepareReq = spark.PrepareSendPaymentRequest(
         paymentRequest: bolt11,
-        amount: null, // SDK deduz do invoice BOLT11
+        amount: prepareAmount,
         tokenIdentifier: null,
       );
 

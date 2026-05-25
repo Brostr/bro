@@ -1901,7 +1901,7 @@ class _WalletScreenState extends State<WalletScreen> {
     final lowerInvoice = invoice.toLowerCase();
     final isLnAddress = invoice.contains('@') && invoice.contains('.');
     final isLnurl = lowerInvoice.startsWith('lnurl');
-    final needsAmountInput = isLnAddress || isLnurl;
+    final isBolt11 = lowerInvoice.startsWith('lnbc') || lowerInvoice.startsWith('lntb');
     // Detect BRIX addresses for queue-on-offline handling
     final isBrixAddress = isLnAddress && (lowerInvoice.endsWith('@brix.app') || lowerInvoice.endsWith('@brostr.app') || lowerInvoice.endsWith('@brix.brostr.app'));
     
@@ -1909,7 +1909,7 @@ class _WalletScreenState extends State<WalletScreen> {
     final amountController = TextEditingController();
     bool isSending = false;
     String? errorMessage;
-    int? invoiceAmountSats; // Valor da invoice (se BOLT11)
+    int? invoiceAmountSats; // Valor da invoice (se BOLT11 com valor embutido)
     
     // Get current balance and available balance
     final balanceSats = int.tryParse(_balance?['balance']?.toString() ?? '0') ?? 0;
@@ -1919,15 +1919,17 @@ class _WalletScreenState extends State<WalletScreen> {
     final hasLockedFunds = committedSats > 0;
     
     // Tentar decodificar o valor da invoice BOLT11
-    if (lowerInvoice.startsWith('lnbc') || lowerInvoice.startsWith('lntb')) {
-      // É uma invoice BOLT11 - tentar extrair o valor
-      // Formato: lnbc<amount><unit>... onde unit pode ser m (milli), u (micro), n (nano), p (pico)
+    if (isBolt11) {
+      // Formato BOLT11: lnbc<amount><multiplier>1<bech32_data>
+      // multiplier é OBRIGATÓRIO quando há valor embutido (m/u/n/p).
+      // Se não houver multiplier, o "1" que parece amount é na verdade o separador
+      // bech32 → invoice sem valor embutido (open-amount).
       try {
-        final regex = RegExp(r'^ln[bt]c(\d+)([munp]?)');
+        final regex = RegExp(r'^ln[bt]c(\d+)([munp])');
         final match = regex.firstMatch(lowerInvoice);
         if (match != null) {
           final amountStr = match.group(1)!;
-          final unit = match.group(2) ?? '';
+          final unit = match.group(2)!;
           var amount = int.parse(amountStr);
           
           // Converter para sats baseado na unidade
@@ -1944,15 +1946,18 @@ class _WalletScreenState extends State<WalletScreen> {
             case 'p': // pico-bitcoin (0.000000000001 BTC)
               invoiceAmountSats = (amount / 10000).round();
               break;
-            default: // sem unidade = BTC
-              invoiceAmountSats = amount * 100000000;
           }
           broLog('💰 Valor da invoice decodificado: $invoiceAmountSats sats');
+        } else {
+          broLog('💰 Invoice sem valor embutido (open-amount)');
         }
       } catch (e) {
         broLog('⚠️ Não foi possível decodificar valor da invoice: $e');
       }
     }
+    
+    // Precisa pedir valor ao usuário se for LN Address/LNURL OU BOLT11 sem valor embutido
+    final needsAmountInput = isLnAddress || isLnurl || (isBolt11 && invoiceAmountSats == null);
     
     showModalBottomSheet(
       context: context,
@@ -2266,8 +2271,15 @@ class _WalletScreenState extends State<WalletScreen> {
                           broLog('✅ Resolvido para invoice BOLT11: ${finalInvoice.substring(0, 50)}...');
                         }
                         
+                        // Para BOLT11 sem valor embutido, passar o valor digitado pelo usuário
+                        int? manualAmountSats;
+                        if (isBolt11 && invoiceAmountSats == null) {
+                          manualAmountSats = int.tryParse(amountController.text.trim());
+                          broLog('💰 BOLT11 open-amount: enviando $manualAmountSats sats');
+                        }
+                        
                         // Agora pagar a invoice BOLT11
-                        final result = await breezProvider.payInvoice(finalInvoice);
+                        final result = await breezProvider.payInvoice(finalInvoice, amountSats: manualAmountSats);
                         
                         broLog('📨 Resultado do pagamento: $result');
                         
