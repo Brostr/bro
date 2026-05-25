@@ -63,7 +63,7 @@ workflows:
           if ! command -v gh >/dev/null 2>&1; then
             brew install gh
           fi
-          REPO="Quizzicarol/Bro"
+          REPO="Quizzicarol/bro-app"
           VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}')
           TAG="v${VERSION}"
           APK_SRC="build/app/outputs/flutter-apk/app-release.apk"
