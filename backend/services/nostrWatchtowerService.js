@@ -103,6 +103,27 @@ class NostrWatchtowerService {
     this._INVOICE_RETRY_FIRST_DELAY_MS = 6 * 60 * 60 * 1000;  // primeira tentativa só após 6h
     this._INVOICE_RETRY_MAX_ATTEMPTS = 24;              // ~24h de retries
     this._INVOICE_RETRY_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // desiste após 7d
+
+    // v611: Retry agressivo do silent push `accept_relay`.
+    //
+    // Quando o provedor aceita uma ordem, o servidor manda um silent push pro
+    // criador da ordem pra acordar o background isolate e publicar o billCode
+    // criptografado (NIP-44, kind 30080 com t='bro-billcode'). Esse push
+    // chegava só UMA vez — se o iOS dropasse (Doze, low-power), FCM expirasse
+    // o silent, ou o BG isolate falhasse, o provedor ficava preso no spinner
+    // "Obtendo dados de pagamento..." indefinidamente.
+    //
+    // Agora agendamos 3 retries silenciosos (+45s, +3min, +10min) e, se ainda
+    // não vimos o `bro_billcode_encrypted` chegando, um push VISÍVEL aos
+    // +15min com texto urgente pedindo pro usuário abrir o app.
+    //
+    // Cancelamos os timers ao observar:
+    //   - kind 30080 com `content.type == 'bro_billcode_encrypted'` (sucesso)
+    //   - bro_order_update com status terminal (payment_submitted, completed,
+    //     liquidated, cancelled, disputed) — ordem progrediu de outra forma.
+    this._pendingBillcodeRelays = new Map(); // `${orderId}:${accepterPubkey}` → { timers: Timeout[], targetPubkey, accepterPubkey, orderId, shortId, attempt }
+    this._BILLCODE_RETRY_SCHEDULE_MS = [45_000, 180_000, 600_000]; // T+45s, T+3min, T+10min (silent)
+    this._BILLCODE_WAKEUP_DELAY_MS = 900_000; // T+15min (visible fallback)
   }
 
   start() {
@@ -134,6 +155,11 @@ class NostrWatchtowerService {
       clearInterval(this._invoiceRetryTimer);
       this._invoiceRetryTimer = null;
     }
+    // v611: cancela todos os retries de billCode relay pendentes
+    for (const [, entry] of this._pendingBillcodeRelays) {
+      for (const t of entry.timers) { try { clearTimeout(t); } catch (_) { /* ignore */ } }
+    }
+    this._pendingBillcodeRelays.clear();
     for (const [, ws] of this._connections) {
       try { ws.close(); } catch (_) { /* ignore */ }
     }
@@ -460,6 +486,10 @@ class NostrWatchtowerService {
             // remains the source of truth for the provider, so the order
             // never blocks. NIP-44 path is privacy-extra, not load-bearing.
             await this._sendBillcodeRelayPush(userPubkeyA, senderPubkey, orderId, shortId);
+            // v611: agenda retries (+45s, +3min, +10min silent, +15min visible)
+            // caso o silent inicial não tenha acordado o background isolate.
+            // Cancela automaticamente se observarmos o bro_billcode_encrypted.
+            this._scheduleBillcodeRelayRetries(userPubkeyA, senderPubkey, orderId, shortId);
           } else {
             console.log(`⚠️ [Watchtower] Order ${shortId} accepted but no userPubkey found (content: ${content.userPubkey || 'empty'}, cache: ${this._orderUsers.has(orderId) ? 'hit' : 'miss'})`);
           }
@@ -543,6 +573,14 @@ class NostrWatchtowerService {
               console.log(`✅ [Watchtower] Limpando pending invoice ${shortId} (status=${status})`);
             }
           }
+
+          // v611: ordem progrediu além de "accepted" → não faz mais sentido
+          // tentar acordar o criador pro billCode. Cancela retries.
+          if (status === 'payment_submitted' || status === 'awaiting_confirmation' ||
+              status === 'completed' || status === 'liquidated' ||
+              status === 'cancelled' || status === 'disputed') {
+            this._cancelBillcodeRelayRetries(orderId, `status=${status}`);
+          }
           break;
         }
 
@@ -583,6 +621,16 @@ class NostrWatchtowerService {
               }
             }
           }
+          break;
+        }
+
+        case 'bro_billcode_encrypted': {
+          // v611: o criador da ordem publicou o billCode criptografado para o
+          // provedor (NIP-44 via kind 30080 com t='bro-billcode'). Isso
+          // significa que o silent push acept_relay funcionou (ou o auto-nudge
+          // do provedor destravou o app). Cancelamos quaisquer retries
+          // pendentes para evitar push visível desnecessário.
+          this._cancelBillcodeRelayRetries(orderId, 'observed bro_billcode_encrypted');
           break;
         }
 
@@ -673,6 +721,128 @@ class NostrWatchtowerService {
       accepter_pubkey: accepterPubkey,
       source: 'watchtower',
     }, null);  // null = silent / data-only / wakes background isolate
+  }
+
+  /**
+   * v611: Agenda retries do silent push `accept_relay` para destravar ordens
+   * onde o background isolate do criador não publicou o billCode criptografado
+   * na primeira tentativa.
+   *
+   * Cronograma:
+   *   T+45s   silent retry
+   *   T+3min  silent retry
+   *   T+10min silent retry
+   *   T+15min push VISÍVEL de fallback ("Sua ordem está esperando — toque para abrir")
+   *
+   * Cancelado quando observamos:
+   *   - kind 30080 com type=bro_billcode_encrypted (sucesso — handler dedicado)
+   *   - bro_order_update com status terminal (payment_submitted, completed, etc)
+   *
+   * Idempotente: se chamado duas vezes para o mesmo (orderId,accepter),
+   * cancela os timers antigos antes de reagendar.
+   */
+  _scheduleBillcodeRelayRetries(targetPubkey, accepterPubkey, orderId, shortId) {
+    if (!this._running) return;
+    if (targetPubkey === accepterPubkey) return;
+
+    const key = `${orderId}:${accepterPubkey}`;
+    // Se já existem retries pendentes para esta combo, cancela e reagenda
+    const existing = this._pendingBillcodeRelays.get(key);
+    if (existing) {
+      for (const t of existing.timers) { try { clearTimeout(t); } catch (_) { /* ignore */ } }
+    }
+
+    const entry = {
+      targetPubkey,
+      accepterPubkey,
+      orderId,
+      shortId,
+      timers: [],
+      attempt: 0,
+      cancelled: false,
+    };
+
+    // Retries silenciosos
+    for (let i = 0; i < this._BILLCODE_RETRY_SCHEDULE_MS.length; i++) {
+      const delay = this._BILLCODE_RETRY_SCHEDULE_MS[i];
+      const attemptNum = i + 1;
+      const t = setTimeout(async () => {
+        if (entry.cancelled) return;
+        entry.attempt = attemptNum;
+        console.log(`🔁 [Watchtower] billCode relay retry ${attemptNum}/${this._BILLCODE_RETRY_SCHEDULE_MS.length} para ${shortId} → ${targetPubkey.substring(0, 8)} (+${Math.round(delay/1000)}s)`);
+        try {
+          await this._sendPush(targetPubkey, {
+            type: 'order_update',
+            sender_pubkey: accepterPubkey,
+            subtype: 'accept_relay',
+            order_id: orderId,
+            accepter_pubkey: accepterPubkey,
+            retry_attempt: String(attemptNum),
+            source: 'watchtower_retry',
+          }, null, { bypassDedup: true });
+        } catch (e) {
+          console.error(`❌ [Watchtower] billCode retry ${attemptNum} falhou para ${shortId}: ${e.message}`);
+        }
+      }, delay);
+      entry.timers.push(t);
+    }
+
+    // Fallback visível
+    const wakeupTimer = setTimeout(async () => {
+      if (entry.cancelled) return;
+      console.log(`🔔 [Watchtower] billCode wakeup VISÍVEL para ${shortId} → ${targetPubkey.substring(0, 8)} (+${Math.round(this._BILLCODE_WAKEUP_DELAY_MS/1000)}s)`);
+      try {
+        await this._sendPush(targetPubkey, {
+          type: 'order_update',
+          sender_pubkey: accepterPubkey,
+          subtype: 'accepted',
+          order_id: orderId,
+          source: 'watchtower_wakeup',
+        }, {
+          title: '⏰ Sua ordem está esperando!',
+          body: 'Toque para abrir o Bro e enviar o código de pagamento.',
+        }, { bypassDedup: true });
+      } catch (e) {
+        console.error(`❌ [Watchtower] billCode wakeup falhou para ${shortId}: ${e.message}`);
+      } finally {
+        // Após o wakeup visível, removemos o entry. Se mesmo assim o usuário
+        // não abrir o app, o auto-nudge do provedor (Nostr) continua tentando,
+        // e em deploys futuros podemos adicionar pings de 24/36h.
+        this._pendingBillcodeRelays.delete(key);
+      }
+    }, this._BILLCODE_WAKEUP_DELAY_MS);
+    entry.timers.push(wakeupTimer);
+
+    this._pendingBillcodeRelays.set(key, entry);
+    // Cap de memória: 2K combinações pendentes
+    if (this._pendingBillcodeRelays.size > 2000) {
+      const firstKey = this._pendingBillcodeRelays.keys().next().value;
+      const firstEntry = this._pendingBillcodeRelays.get(firstKey);
+      if (firstEntry) {
+        firstEntry.cancelled = true;
+        for (const t of firstEntry.timers) { try { clearTimeout(t); } catch (_) { /* ignore */ } }
+      }
+      this._pendingBillcodeRelays.delete(firstKey);
+    }
+    console.log(`⏳ [Watchtower] billCode relay retries agendados para ${shortId} → ${targetPubkey.substring(0, 8)} (3 silent + 1 visível)`);
+  }
+
+  /**
+   * v611: Cancela TODOS os retries pendentes para um orderId (qualquer accepter).
+   * Chamado quando observamos sucesso (bro_billcode_encrypted) ou status terminal.
+   */
+  _cancelBillcodeRelayRetries(orderId, reason) {
+    let cancelled = 0;
+    for (const [key, entry] of Array.from(this._pendingBillcodeRelays.entries())) {
+      if (entry.orderId !== orderId) continue;
+      entry.cancelled = true;
+      for (const t of entry.timers) { try { clearTimeout(t); } catch (_) { /* ignore */ } }
+      this._pendingBillcodeRelays.delete(key);
+      cancelled++;
+    }
+    if (cancelled > 0) {
+      console.log(`✅ [Watchtower] Cancelados ${cancelled} retry(s) de billCode para ${orderId.substring(0, 8)} (${reason})`);
+    }
   }
 
   /**
@@ -775,16 +945,24 @@ class NostrWatchtowerService {
 
   /**
    * Wrapper around pushService.sendPush with stats tracking and rate limiting
+   *
+   * v611: aceita `options.bypassDedup` para o retry de `accept_relay`. O
+   * dedup persistente de 24h serve para proteger contra flood de eventos
+   * Nostr repetidos, mas retries intencionais do mesmo silent push precisam
+   * passar (o objetivo É reentregar). Rate limit por pubkey continua valendo.
    */
-  async _sendPush(targetPubkey, data, notification) {
-    // v540: Dedup persistente 24h por pubkey+orderId+subtype.
-    // Protege contra flood quando backend reinicia ou Nostr republica eventos.
+  async _sendPush(targetPubkey, data, notification, options = {}) {
+    const { bypassDedup = false } = options;
     const now = Date.now();
     const dedupKey = `${targetPubkey}:${data.order_id || 'no-order'}:${data.subtype || data.type}`;
-    const lastSent = this._deliveredPushes.get(dedupKey);
-    if (lastSent && (now - lastSent) < this._DELIVERED_TTL) {
-      // Ja enviado nas ultimas 24h — skip
-      return false;
+    if (!bypassDedup) {
+      // v540: Dedup persistente 24h por pubkey+orderId+subtype.
+      // Protege contra flood quando backend reinicia ou Nostr republica eventos.
+      const lastSent = this._deliveredPushes.get(dedupKey);
+      if (lastSent && (now - lastSent) < this._DELIVERED_TTL) {
+        // Ja enviado nas ultimas 24h — skip
+        return false;
+      }
     }
 
     // SECURITY: Per-pubkey rate limiting to prevent push notification spam
@@ -814,7 +992,10 @@ class NostrWatchtowerService {
       const ok = await pushService.sendPush(targetPubkey, data, notification);
       if (ok) {
         this._stats.pushesSent++;
-        this._deliveredPushes.set(dedupKey, now);
+        // v611: não marcar como entregue quando bypassDedup (retries devem poder repetir)
+        if (!bypassDedup) {
+          this._deliveredPushes.set(dedupKey, now);
+        }
       } else {
         this._stats.pushesFailed++;
       }
