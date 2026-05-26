@@ -77,9 +77,9 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
   // Timer para polling automático de updates de status
   Timer? _statusPollingTimer;
 
-  // v613: stuck-payment report (provider couldn't get billcode after 20min)
-  bool _isReportingStuck = false;
-  bool _stuckReported = false;
+  // v614: "abrir disputa por código de pagamento não recebido" — só aparece
+  // depois de 20min com ordem aceita e ainda sem billcode (paymentData vazio).
+  bool _openingStuckDispute = false;
   static const Duration _stuckReportThreshold = Duration(minutes: 20);
 
   @override
@@ -87,7 +87,6 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
     super.initState();
     // Aguardar o frame completo antes de acessar o Provider
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await _loadStuckReportedFlag();
       await _loadOrderDetails(forceSync: true);
       _startStatusPolling();
       _fetchResolutionIfNeeded();
@@ -183,65 +182,52 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
     }
   }
   
-  /// v613: load persisted "stuck report sent" flag so the button stays disabled across restarts.
-  Future<void> _loadStuckReportedFlag() async {
+  /// v614: abre uma disputa quando o provedor aceitou a ordem mas não recebeu
+  /// o billcode mesmo após 20min. Reutiliza o fluxo de disputa existente
+  /// (`_submitProviderDispute`) — o admin recebe na tela de disputa, decide
+  /// cancelar e os colaterais são devolvidos pelo mesmo caminho do escrow.
+  Future<void> _openStuckDispute() async {
+    if (_openingStuckDispute) return;
+    final loc = AppLocalizations.of(context)!;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: Text(
+          loc.t('prov_det_stuck_dispute_confirm_title'),
+          style: const TextStyle(color: Colors.white),
+        ),
+        content: Text(
+          loc.t('prov_det_stuck_dispute_confirm_body'),
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(loc.t('cancel'), style: const TextStyle(color: Colors.white70)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(loc.t('prov_det_open_dispute'), style: const TextStyle(color: Colors.redAccent)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => _openingStuckDispute = true);
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final flag = prefs.getBool('stuck_report:${widget.orderId}') ?? false;
-      if (flag && mounted) setState(() => _stuckReported = true);
-    } catch (_) {}
-  }
-
-  /// v613: report stuck order to admin (no billcode after >20min).
-  Future<void> _reportStuckOrder() async {
-    if (_isReportingStuck || _stuckReported) return;
-    setState(() => _isReportingStuck = true);
-    try {
-      final res = await ApiService().post(
-        '/orders/${widget.orderId}/report-stuck',
-        {'reason': 'billcode_not_received'},
+      // Reusa o caminho de disputa existente (Nostr + escrow + push).
+      await _submitProviderDispute(
+        'billcode_not_received',
+        loc.t('prov_det_stuck_dispute_description'),
       );
-      final ok = res != null && (res['ok'] == true);
-      if (ok) {
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setBool('stuck_report:${widget.orderId}', true);
-        } catch (_) {}
-        if (mounted) {
-          setState(() => _stuckReported = true);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(AppLocalizations.of(context)!.t('prov_det_stuck_report_sent')),
-              backgroundColor: Colors.green,
-              duration: const Duration(seconds: 5),
-            ),
-          );
-        }
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(AppLocalizations.of(context)!.t('prov_det_stuck_report_failed')),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
-    } catch (e) {
-      broLog('⚠️ report-stuck error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(AppLocalizations.of(context)!.t('prov_det_stuck_report_failed')),
-            backgroundColor: Colors.red,
-          ),
-        );
-      }
     } finally {
-      if (mounted) setState(() => _isReportingStuck = false);
+      if (mounted) setState(() => _openingStuckDispute = false);
     }
   }
 
-  /// v613: returns true when the order has been accepted >20min ago and we
-  /// still don't have a billcode. Used to reveal the "comunicar erro" button.
+  /// v614: true quando a ordem foi aceita há >20min e ainda não temos billcode.
+  /// Usado para revelar o botão "abrir disputa por código não recebido".
   bool _shouldShowStuckReport() {
     if (_orderDetails == null) return false;
     final acceptedStr = _orderDetails!['acceptedAt'] as String?;
@@ -253,43 +239,19 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
 
   Widget _buildStuckReportButton() {
     final loc = AppLocalizations.of(context)!;
-    if (_stuckReported) {
-      return Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-        decoration: BoxDecoration(
-          color: Colors.grey.withOpacity(0.15),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.grey.withOpacity(0.3)),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Icon(Icons.check_circle, color: Colors.greenAccent, size: 18),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                loc.t('prov_det_stuck_report_already'),
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
-              ),
-            ),
-          ],
-        ),
-      );
-    }
     return SizedBox(
       width: double.infinity,
       child: OutlinedButton.icon(
-        onPressed: _isReportingStuck ? null : _reportStuckOrder,
-        icon: _isReportingStuck
+        onPressed: _openingStuckDispute ? null : _openStuckDispute,
+        icon: _openingStuckDispute
             ? const SizedBox(
                 width: 16,
                 height: 16,
                 child: CircularProgressIndicator(strokeWidth: 2, color: Colors.redAccent),
               )
-            : const Icon(Icons.report_problem_outlined, color: Colors.redAccent, size: 18),
+            : const Icon(Icons.gavel_outlined, color: Colors.redAccent, size: 18),
         label: Text(
-          loc.t('prov_det_stuck_report_button'),
+          loc.t('prov_det_stuck_dispute_button'),
           style: const TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.w600),
         ),
         style: OutlinedButton.styleFrom(
@@ -1047,7 +1009,8 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                         fontSize: 12,
                       ),
                     ),
-                    // v613: após 20 min sem billcode, oferecer comunicar erro ao admin
+                    // v614: após 20 min sem billcode, oferecer abrir disputa
+                    // (caminho que devolve colaterais e notifica o comprador).
                     if (_shouldShowStuckReport()) ...[
                       const SizedBox(height: 16),
                       _buildStuckReportButton(),
