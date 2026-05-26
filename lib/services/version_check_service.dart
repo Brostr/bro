@@ -81,7 +81,9 @@ class VersionCheckService {
         return false;
       }
       
-      // v438: Encontrar a release com o maior build number
+      // v438: Encontrar a release com o maior build number QUE TENHA APK anexado.
+      // v613: Releases sem APK (build ainda rodando no Codemagic) NÃO contam
+      //       — evita "Nova versão disponível" antes do APK estar baixável.
       // Formato de tags: v1.0.133+436, v1.0.133+434, etc.
       int highestBuild = 0;
       String highestTag = '';
@@ -93,23 +95,29 @@ class VersionCheckService {
         if (isDraft) continue;
         // Aceitar formatos: v1.0.133+436, v1.0.132-b238, v1.0.132-393-stable
         final buildMatch = RegExp(r'[+\-b](\d+)').firstMatch(tagName);
-        if (buildMatch != null) {
-          final build = int.tryParse(buildMatch.group(1)!) ?? 0;
-          if (build > highestBuild) {
-            highestBuild = build;
-            highestTag = tagName;
-            bestReleaseNotes = release['body'] as String?;
-            // Find APK asset (prefer bro-latest.apk)
-            final assets = release['assets'] as List<dynamic>? ?? [];
-            for (final asset in assets) {
-              final name = asset['name'] as String? ?? '';
-              if (name.endsWith('.apk')) {
-                bestApkUrl = asset['browser_download_url'] as String?;
-                if (name == 'bro-latest.apk') break; // prefer this name
-              }
-            }
+        if (buildMatch == null) continue;
+        final build = int.tryParse(buildMatch.group(1)!) ?? 0;
+        if (build <= highestBuild) continue;
+
+        // v613: require an APK asset before treating this release as available.
+        final assets = release['assets'] as List<dynamic>? ?? [];
+        String? thisApkUrl;
+        for (final asset in assets) {
+          final name = asset['name'] as String? ?? '';
+          if (name.endsWith('.apk')) {
+            thisApkUrl = asset['browser_download_url'] as String?;
+            if (name == 'bro-latest.apk') break; // prefer this name
           }
         }
+        if (thisApkUrl == null) {
+          broLog('⏳ Release $tagName ainda sem APK — ignorando (build em andamento?)');
+          continue;
+        }
+
+        highestBuild = build;
+        highestTag = tagName;
+        bestApkUrl = thisApkUrl;
+        bestReleaseNotes = release['body'] as String?;
       }
       
       // Extrair versão do tag mais recente
@@ -221,21 +229,10 @@ class VersionCheckService {
                   color: _isCritical ? Colors.white54 : Colors.grey[600],
                 ),
               ),
-              if (_releaseNotes != null && _releaseNotes!.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Container(
-                  constraints: const BoxConstraints(maxHeight: 150),
-                  child: SingleChildScrollView(
-                    child: Text(
-                      _releaseNotes!,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: _isCritical ? Colors.white60 : Colors.grey[600],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              // v613: release notes do GitHub eram verbosos demais ("build
+              // automático via codemagic / keystores v2 / ..."). O usuário só
+              // precisa saber que há uma nova versão — detalhes técnicos
+              // ficam no GitHub.
             ],
           ),
           actions: [

@@ -11,6 +11,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const pushService = require('../services/pushService');
+const watchtower = require('../services/nostrWatchtowerService');
 
 // Rate limiting: 10 notifications per minute per IP
 const notifyLimiter = rateLimit({
@@ -344,6 +345,76 @@ router.post('/broadcast', broadcastLimiter, async (req, res) => {
   }
 
   console.log(`[PUSH] Broadcast complete: ${sent} sent, ${failed} failed, ${allPubkeys.length} total`);
+});
+
+/**
+ * POST /push/admin-wake-order
+ * Body: { order_id: string }   // full orderId or unique short prefix (>=6 chars)
+ * Auth: NIP-98 + ADMIN_PUBKEY required
+ *
+ * v612: Targeted "wake-up" push for a stuck order. Looks up the order's
+ * creator pubkey in the watchtower's _orderUsers cache and sends BOTH a
+ * silent accept_relay (to re-trigger NIP-44 billCode publish via the
+ * background isolate) AND a visible nudge for the user to open the app.
+ * Useful when leo77-style "Obtendo dados de pagamento" gets stuck because
+ * the original silent push never reached the buyer (offline / killed iOS).
+ */
+router.post('/admin-wake-order', async (req, res) => {
+  if (!ADMIN_PUBKEY || !/^[0-9a-f]{64}$/.test(ADMIN_PUBKEY)) {
+    return res.status(503).json({ error: 'ADMIN_PUBKEY not configured' });
+  }
+  if (req.verifiedPubkey !== ADMIN_PUBKEY) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  const { order_id } = req.body;
+  if (!order_id || typeof order_id !== 'string' || order_id.length < 6 || order_id.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(order_id)) {
+    return res.status(400).json({ error: 'Invalid order_id (6-64 alphanumeric chars)' });
+  }
+
+  let match = watchtower.findOrderCreatorByPrefix(order_id);
+  if (!match) {
+    console.log(`[PUSH] /admin-wake-order cache miss for ${order_id}, querying relays...`);
+    match = await watchtower.queryOrderCreatorByPrefix(order_id);
+  }
+  if (!match) {
+    return res.status(404).json({ error: 'Order not found in cache OR relays (ambiguous prefix? try a longer one)' });
+  }
+
+  const { orderId, creatorPubkey } = match;
+  const shortId = orderId.substring(0, 8);
+  console.log(`[PUSH] /admin-wake-order order=${shortId} target=${creatorPubkey.substring(0, 16)}...`);
+
+  // 1) Silent accept_relay → wakes background isolate to republish billCode (NIP-44)
+  const silentData = {
+    type: 'order_update',
+    sender_pubkey: ADMIN_PUBKEY,
+    subtype: 'accept_relay',
+    order_id: orderId,
+  };
+  const silentOk = await pushService.sendPush(creatorPubkey, silentData, null);
+
+  // 2) Visible nudge so the user opens the app even if isolate is dead
+  const visibleData = {
+    type: 'order_update',
+    sender_pubkey: ADMIN_PUBKEY,
+    subtype: 'accepted',
+    order_id: orderId,
+  };
+  const visibleNotif = {
+    title: '⏰ Sua ordem está esperando!',
+    body: 'Abra o Bro para enviar o código PIX criptografado.',
+  };
+  const visibleOk = await pushService.sendPush(creatorPubkey, visibleData, visibleNotif);
+
+  console.log(`[PUSH] /admin-wake-order ${shortId}: silent=${silentOk} visible=${visibleOk}`);
+  res.json({
+    ok: silentOk || visibleOk,
+    order_id: orderId,
+    target_short: creatorPubkey.substring(0, 8),
+    silent_sent: silentOk,
+    visible_sent: visibleOk,
+  });
 });
 
 module.exports = router;

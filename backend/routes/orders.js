@@ -1,8 +1,40 @@
 const express = require('express');
 const router = express.Router();
+const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { orders } = require('../models/database');
 const { refundOrder } = require('../services/bitcoinService');
+
+// v613: persisted stuck-payment reports (provider couldn't get billcode after 20min).
+// File lives on /data so it survives restarts. Admin reads it to manually cancel
+// the order and return collateral to both parties.
+const STUCK_REPORTS_FILE = process.env.NODE_ENV === 'production'
+  ? '/data/stuck_reports.json'
+  : path.join(__dirname, '..', 'data', 'stuck_reports.json');
+
+function _loadStuckReports() {
+  try {
+    if (fs.existsSync(STUCK_REPORTS_FILE)) {
+      const raw = fs.readFileSync(STUCK_REPORTS_FILE, 'utf8');
+      const data = JSON.parse(raw);
+      if (Array.isArray(data)) return data;
+    }
+  } catch (e) {
+    console.warn('[STUCK_REPORT] load failed:', e.message);
+  }
+  return [];
+}
+
+function _saveStuckReports(list) {
+  try {
+    const dir = path.dirname(STUCK_REPORTS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(STUCK_REPORTS_FILE, JSON.stringify(list, null, 2));
+  } catch (e) {
+    console.error('[STUCK_REPORT] save failed:', e.message);
+  }
+}
 
 /**
  * Parse numérico estrito — rejeita notação científica, hex, strings vazias.
@@ -443,6 +475,65 @@ router.post('/:orderId/validate', async (req, res) => {
     console.error('Erro ao validar pagamento:', error);
     res.status(500).json({ error: 'Erro ao validar pagamento' });
   }
+});
+
+// v613: Provider reports that the buyer's billcode never arrived even after
+// re-publish retries (~20 min stuck on "Obtendo dados de pagamento").
+// We persist the report and log loudly so admin can manually cancel the
+// order and return collateral to both parties. We do NOT auto-cancel here
+// because the in-memory `orders` Map is empty after restarts (orders live
+// on Nostr relays). Admin uses existing dispute/cancel tooling.
+router.post('/:orderId/report-stuck', (req, res) => {
+  try {
+    const { orderId } = req.params;
+    if (!orderId || orderId.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(orderId)) {
+      return res.status(400).json({ error: 'orderId inválido' });
+    }
+    const reporterPubkey = req.verifiedPubkey;
+    const reason = typeof req.body?.reason === 'string'
+      ? req.body.reason.slice(0, 500)
+      : 'billcode_not_received';
+
+    const reports = _loadStuckReports();
+    // Dedup: if same reporter already filed for this orderId in the last 24h, ignore.
+    const now = Date.now();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const existing = reports.find(r =>
+      r.orderId === orderId &&
+      r.reporterPubkey === reporterPubkey &&
+      (now - new Date(r.reportedAt).getTime()) < DAY_MS
+    );
+    if (existing) {
+      console.log(`[STUCK_REPORT] duplicate (24h) order=${orderId} reporter=${reporterPubkey.substring(0,8)}`);
+      return res.json({ ok: true, duplicate: true, reportedAt: existing.reportedAt });
+    }
+
+    const entry = {
+      orderId,
+      reporterPubkey,
+      reason,
+      reportedAt: new Date().toISOString(),
+    };
+    reports.push(entry);
+    // Cap list to avoid unbounded growth
+    if (reports.length > 1000) reports.splice(0, reports.length - 1000);
+    _saveStuckReports(reports);
+
+    console.log(`🚨 [STUCK_REPORT] order=${orderId} reporter=${reporterPubkey.substring(0,8)} reason=${reason}`);
+    res.json({ ok: true, reportedAt: entry.reportedAt });
+  } catch (error) {
+    console.error('[STUCK_REPORT] error:', error);
+    res.status(500).json({ error: 'Falha ao registrar relato' });
+  }
+});
+
+// v613: Admin reads pending stuck-payment reports. Restricted via ADMIN_PUBKEY.
+router.get('/admin/stuck-reports', (req, res) => {
+  const adminPubkey = (process.env.ADMIN_PUBKEY || '').toLowerCase();
+  if (!adminPubkey || req.verifiedPubkey !== adminPubkey) {
+    return res.status(403).json({ error: 'admin only' });
+  }
+  res.json({ reports: _loadStuckReports() });
 });
 
 module.exports = router;

@@ -846,6 +846,103 @@ class NostrWatchtowerService {
   }
 
   /**
+   * v612: Lookup an order's creator pubkey by full orderId or short prefix.
+   * Used by the admin /push/admin-wake-order endpoint to wake a stuck user
+   * without requiring the operator to know the full pubkey.
+   * Returns { orderId, creatorPubkey } on match, null otherwise.
+   */
+  findOrderCreatorByPrefix(prefix) {
+    if (!prefix || typeof prefix !== 'string') return null;
+    const p = prefix.toLowerCase();
+    // Exact match first
+    if (this._orderUsers.has(p)) {
+      return { orderId: p, creatorPubkey: this._orderUsers.get(p) };
+    }
+    // Prefix scan (require min 6 chars to avoid accidental collisions)
+    if (p.length < 6) return null;
+    let match = null;
+    for (const [oid, pub] of this._orderUsers.entries()) {
+      if (oid.startsWith(p)) {
+        if (match) return null; // ambiguous — refuse
+        match = { orderId: oid, creatorPubkey: pub };
+      }
+    }
+    return match;
+  }
+
+  /**
+   * v612: Fallback when _orderUsers cache is cold (post-restart).
+   * Queries the open relay sockets with a transient REQ for kind 30078
+   * events; collects until EOSE on all relays or timeout, then matches
+   * the d-tag prefix. Returns { orderId, creatorPubkey } or null.
+   */
+  async queryOrderCreatorByPrefix(prefix, { timeoutMs = 4000 } = {}) {
+    if (!prefix || typeof prefix !== 'string' || prefix.length < 6) return null;
+    const p = prefix.toLowerCase();
+    const openSockets = [];
+    for (const [relayUrl, ws] of this._connections) {
+      if (ws && ws.readyState === WebSocket.OPEN) openSockets.push([relayUrl, ws]);
+    }
+    if (openSockets.length === 0) return null;
+
+    return new Promise((resolve) => {
+      const subId = `bro-wake-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const eoseFrom = new Set();
+      const handlers = new Map(); // ws → handler
+      let resolved = false;
+      let match = null;
+
+      const finish = (result) => {
+        if (resolved) return;
+        resolved = true;
+        for (const [, ws] of openSockets) {
+          try { ws.send(JSON.stringify(['CLOSE', subId])); } catch (_) { /* ignore */ }
+          const h = handlers.get(ws);
+          if (h) ws.off('message', h);
+        }
+        clearTimeout(timer);
+        resolve(result);
+      };
+
+      for (const [relayUrl, ws] of openSockets) {
+        const handler = (raw) => {
+          let msg;
+          try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
+          if (!Array.isArray(msg)) return;
+          if (msg[0] === 'EVENT' && msg[1] === subId && msg[2]) {
+            const ev = msg[2];
+            const dTag = (ev.tags || []).find((t) => t[0] === 'd');
+            if (!dTag) return;
+            const oid = String(dTag[1] || '').toLowerCase();
+            if (oid === p || oid.startsWith(p)) {
+              if (!match) {
+                match = { orderId: oid, creatorPubkey: ev.pubkey, relayUrl };
+              } else if (match.orderId !== oid) {
+                // Ambiguous prefix → abort
+                finish(null);
+              }
+            }
+          } else if (msg[0] === 'EOSE' && msg[1] === subId) {
+            eoseFrom.add(relayUrl);
+            if (eoseFrom.size >= openSockets.length) finish(match);
+          }
+        };
+        handlers.set(ws, handler);
+        ws.on('message', handler);
+        try {
+          ws.send(JSON.stringify(['REQ', subId, {
+            kinds: [KIND_ORDER],
+            '#t': ['bro-order'],
+            limit: 1000,
+          }]));
+        } catch (_) { /* ignore */ }
+      }
+
+      const timer = setTimeout(() => finish(match), timeoutMs);
+    });
+  }
+
+  /**
    * Notify registered users about a new order.
    * SECURITY: Only notify users who have registered push tokens (not ALL relay users).
    * Uses #p tags from the event to identify targeted providers if available,

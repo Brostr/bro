@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
@@ -15,6 +16,7 @@ import '../services/escrow_service.dart';
 import '../services/dispute_service.dart';
 import '../services/notification_service.dart';
 import '../services/nostr_order_service.dart';
+import '../services/api_service.dart';
 import '../config.dart';
 import '../l10n/app_localizations.dart';
 
@@ -75,11 +77,17 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
   // Timer para polling automático de updates de status
   Timer? _statusPollingTimer;
 
+  // v613: stuck-payment report (provider couldn't get billcode after 20min)
+  bool _isReportingStuck = false;
+  bool _stuckReported = false;
+  static const Duration _stuckReportThreshold = Duration(minutes: 20);
+
   @override
   void initState() {
     super.initState();
     // Aguardar o frame completo antes de acessar o Provider
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _loadStuckReportedFlag();
       await _loadOrderDetails(forceSync: true);
       _startStatusPolling();
       _fetchResolutionIfNeeded();
@@ -175,6 +183,124 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
     }
   }
   
+  /// v613: load persisted "stuck report sent" flag so the button stays disabled across restarts.
+  Future<void> _loadStuckReportedFlag() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final flag = prefs.getBool('stuck_report:${widget.orderId}') ?? false;
+      if (flag && mounted) setState(() => _stuckReported = true);
+    } catch (_) {}
+  }
+
+  /// v613: report stuck order to admin (no billcode after >20min).
+  Future<void> _reportStuckOrder() async {
+    if (_isReportingStuck || _stuckReported) return;
+    setState(() => _isReportingStuck = true);
+    try {
+      final res = await ApiService().post(
+        '/orders/${widget.orderId}/report-stuck',
+        {'reason': 'billcode_not_received'},
+      );
+      final ok = res != null && (res['ok'] == true);
+      if (ok) {
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setBool('stuck_report:${widget.orderId}', true);
+        } catch (_) {}
+        if (mounted) {
+          setState(() => _stuckReported = true);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(AppLocalizations.of(context)!.t('prov_det_stuck_report_sent')),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(AppLocalizations.of(context)!.t('prov_det_stuck_report_failed')),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      broLog('⚠️ report-stuck error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(AppLocalizations.of(context)!.t('prov_det_stuck_report_failed')),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isReportingStuck = false);
+    }
+  }
+
+  /// v613: returns true when the order has been accepted >20min ago and we
+  /// still don't have a billcode. Used to reveal the "comunicar erro" button.
+  bool _shouldShowStuckReport() {
+    if (_orderDetails == null) return false;
+    final acceptedStr = _orderDetails!['acceptedAt'] as String?;
+    if (acceptedStr == null) return false;
+    final accepted = DateTime.tryParse(acceptedStr);
+    if (accepted == null) return false;
+    return DateTime.now().difference(accepted) >= _stuckReportThreshold;
+  }
+
+  Widget _buildStuckReportButton() {
+    final loc = AppLocalizations.of(context)!;
+    if (_stuckReported) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+        decoration: BoxDecoration(
+          color: Colors.grey.withOpacity(0.15),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.grey.withOpacity(0.3)),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.check_circle, color: Colors.greenAccent, size: 18),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                loc.t('prov_det_stuck_report_already'),
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: _isReportingStuck ? null : _reportStuckOrder,
+        icon: _isReportingStuck
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.redAccent),
+              )
+            : const Icon(Icons.report_problem_outlined, color: Colors.redAccent, size: 18),
+        label: Text(
+          loc.t('prov_det_stuck_report_button'),
+          style: const TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.w600),
+        ),
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(color: Colors.redAccent.withOpacity(0.6)),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      ),
+    );
+  }
+
   /// Inicia polling automático para verificar updates de status
   /// Isso permite que o Bro veja quando o usuário confirma o pagamento
   void _startStatusPolling() {
@@ -921,6 +1047,11 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
                         fontSize: 12,
                       ),
                     ),
+                    // v613: após 20 min sem billcode, oferecer comunicar erro ao admin
+                    if (_shouldShowStuckReport()) ...[
+                      const SizedBox(height: 16),
+                      _buildStuckReportButton(),
+                    ],
                   ],
                 ),
               ),
