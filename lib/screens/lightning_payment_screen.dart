@@ -89,12 +89,14 @@ class _LightningPaymentScreenState extends State<LightningPaymentScreen> {
   }
 
   void _startPaymentCheck() {
-    broLog('Iniciando polling a cada 3 segundos (backup)...');
-    _checkPaymentTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+    broLog('Iniciando polling a cada 5 segundos (backup)...');
+    // v615: 3s -> 5s. Os eventos do SDK (listener acima) são o gatilho
+    // primário; este polling é só backup, 5s reduz carga sem prejudicar UX.
+    _checkPaymentTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       if (_isPaid) return;
       await _checkPayment();
     });
-    broLog('Polling configurado - verificando a cada 3s');
+    broLog('Polling configurado - verificando a cada 5s');
   }
 
   Future<void> _checkPayment() async {

@@ -17,6 +17,29 @@ const { verifyEvent } = require('nostr-tools/pure');
 // Tolerância de timestamp: 30 segundos
 const TIMESTAMP_TOLERANCE = 30;
 
+// SECURITY v615: NIP-98 host allowlist.
+// Antes só validávamos o PATH da tag "u", não o host. Isso permitia que um
+// evento NIP-98 assinado para https://attacker.com/orders/123 fosse reusado
+// contra o servidor real (mesmo path). Agora exigimos que o host pertença a
+// uma allowlist. Configurável via NIP98_ALLOWED_HOSTS (csv); default cobre os
+// hosts conhecidos do app + fly.io interno. Em dev, localhost é aceito.
+const NIP98_ALLOWED_HOSTS = (() => {
+  const fromEnv = (process.env.NIP98_ALLOWED_HOSTS || '')
+    .split(',')
+    .map(h => h.trim().toLowerCase())
+    .filter(Boolean);
+  const defaults = [
+    'api.brostr.app',
+    'brix.brostr.app',
+    'bro-api.fly.dev',
+  ];
+  // Em desenvolvimento aceitamos localhost / emulador Android.
+  if (process.env.NODE_ENV !== 'production') {
+    defaults.push('localhost', '127.0.0.1', '10.0.2.2');
+  }
+  return new Set([...defaults, ...fromEnv]);
+})();
+
 // Replay protection: track seen event IDs with TTL
 const seenEventIds = new Map(); // eventId → expiresAt (timestamp ms)
 const REPLAY_WINDOW_MS = (TIMESTAMP_TOLERANCE + 5) * 1000; // slightly beyond tolerance
@@ -179,8 +202,20 @@ function verifyNip98Event(event, req) {
     return { valid: false, reason: 'NIP-98: tag "u" (URL) é obrigatória' };
   }
   const eventUrl = urlTag[1];
-  // Comparação flexível: apenas verificar se o path bate
-  const eventPath = new URL(eventUrl).pathname;
+  // SECURITY v615: validar HOST (allowlist) + PATH. Antes só o path era checado,
+  // permitindo replay de um evento assinado para outro host com o mesmo path.
+  let parsedEventUrl;
+  try {
+    parsedEventUrl = new URL(eventUrl);
+  } catch (_) {
+    return { valid: false, reason: 'NIP-98: URL inválida na tag "u"' };
+  }
+  const eventHost = parsedEventUrl.hostname.toLowerCase();
+  if (!NIP98_ALLOWED_HOSTS.has(eventHost)) {
+    // Não vazar o host esperado para o atacante
+    return { valid: false, reason: 'URL host mismatch' };
+  }
+  const eventPath = parsedEventUrl.pathname;
   const requestPath = req.originalUrl.split('?')[0];
   if (eventPath !== requestPath) {
     // SECURITY v492: Don't leak path details to attacker

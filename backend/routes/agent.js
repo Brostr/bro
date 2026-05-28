@@ -11,8 +11,8 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const disputeAgent = require('../services/disputeAgentService');
 
-// Admin pubkey from env
-const ADMIN_PUBKEY = process.env.ADMIN_PUBKEY || '';
+// Admin pubkey from env (v615: normalize to lowercase for consistent compare)
+const ADMIN_PUBKEY = (process.env.ADMIN_PUBKEY || '').toLowerCase();
 
 // Rate limiting: 5 analysis requests per minute (LLM API cost protection)
 const analyzeLimiter = rateLimit({
@@ -35,7 +35,7 @@ function requireAdmin(req, res, next) {
   if (!ADMIN_PUBKEY || !/^[0-9a-f]{64}$/.test(ADMIN_PUBKEY)) {
     return res.status(503).json({ error: 'ADMIN_PUBKEY not configured or invalid' });
   }
-  if (req.verifiedPubkey !== ADMIN_PUBKEY) {
+  if ((req.verifiedPubkey || '').toLowerCase() !== ADMIN_PUBKEY) {
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();

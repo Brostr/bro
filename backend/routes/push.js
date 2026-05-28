@@ -124,6 +124,13 @@ router.post('/payment-methods', registerLimiter, (req, res) => {
   if (methods.length > 50) {
     return res.status(400).json({ error: 'Too many methods (max 50)' });
   }
+  // v615: validar cada elemento — ids curtos alfanuméricos (pix, boleto, mx_codi...)
+  const allValid = methods.every(
+    (m) => typeof m === 'string' && /^[a-z0-9_]{1,32}$/i.test(m)
+  );
+  if (!allValid) {
+    return res.status(400).json({ error: 'Invalid method id in array' });
+  }
   const ok = pushService.setProviderPaymentMethods(pubkey, methods);
   res.json({ ok });
 });
@@ -145,6 +152,13 @@ router.post('/accepted-currencies', registerLimiter, (req, res) => {
   }
   if (currencies.length > 32) {
     return res.status(400).json({ error: 'Too many currencies (max 32)' });
+  }
+  // v615: validar cada elemento — códigos ISO-4217 de 3 letras (BRL, MXN...)
+  const allValid = currencies.every(
+    (c) => typeof c === 'string' && /^[a-z]{3}$/i.test(c)
+  );
+  if (!allValid) {
+    return res.status(400).json({ error: 'Invalid currency code in array' });
   }
   const ok = pushService.setProviderAcceptedCurrencies(pubkey, currencies);
   res.json({ ok });
@@ -271,8 +285,8 @@ router.get('/diagnose', (req, res) => {
   });
 });
 
-// Admin pubkey from env
-const ADMIN_PUBKEY = process.env.ADMIN_PUBKEY || '';
+// Admin pubkey from env (v615: normalize to lowercase for consistent compare)
+const ADMIN_PUBKEY = (process.env.ADMIN_PUBKEY || '').toLowerCase();
 
 // Rate limiting: 1 broadcast per 5 minutes
 const broadcastLimiter = rateLimit({
@@ -296,7 +310,7 @@ router.post('/broadcast', broadcastLimiter, async (req, res) => {
   if (!ADMIN_PUBKEY || !/^[0-9a-f]{64}$/.test(ADMIN_PUBKEY)) {
     return res.status(503).json({ error: 'ADMIN_PUBKEY not configured' });
   }
-  if (req.verifiedPubkey !== ADMIN_PUBKEY) {
+  if ((req.verifiedPubkey || '').toLowerCase() !== ADMIN_PUBKEY) {
     return res.status(403).json({ error: 'Admin access required' });
   }
 
@@ -363,7 +377,7 @@ router.post('/admin-wake-order', async (req, res) => {
   if (!ADMIN_PUBKEY || !/^[0-9a-f]{64}$/.test(ADMIN_PUBKEY)) {
     return res.status(503).json({ error: 'ADMIN_PUBKEY not configured' });
   }
-  if (req.verifiedPubkey !== ADMIN_PUBKEY) {
+  if ((req.verifiedPubkey || '').toLowerCase() !== ADMIN_PUBKEY) {
     return res.status(403).json({ error: 'Admin access required' });
   }
 

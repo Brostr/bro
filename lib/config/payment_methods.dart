@@ -37,11 +37,11 @@ class PaymentMethods {
     PaymentMethod(id: 'electricity',  country: 'BR', flag: '🇧🇷', name: 'Luz',        currency: 'BRL', icon: Icons.bolt,            active: true),
     PaymentMethod(id: 'water',        country: 'BR', flag: '🇧🇷', name: 'Água',       currency: 'BRL', icon: Icons.water_drop,      active: true),
     PaymentMethod(id: 'internet',     country: 'BR', flag: '🇧🇷', name: 'Internet',   currency: 'BRL', icon: Icons.wifi,            active: true),
-    PaymentMethod(id: 'mx_codi',      country: 'MX', flag: '🇲🇽', name: 'CoDi/SPEI',  currency: 'MXN', icon: Icons.payment,         active: false),
+    PaymentMethod(id: 'mx_codi',      country: 'MX', flag: '🇲🇽', name: 'CoDi/SPEI',  currency: 'MXN', icon: Icons.payment,         active: true),
     PaymentMethod(id: 'ar_transf3',   country: 'AR', flag: '🇦🇷', name: 'Transf 3.0', currency: 'ARS', icon: Icons.payment,         active: true),
-    PaymentMethod(id: 'co_breb',      country: 'CO', flag: '🇨🇴', name: 'Bre-B',      currency: 'COP', icon: Icons.payment,         active: false),
+    PaymentMethod(id: 'co_breb',      country: 'CO', flag: '🇨🇴', name: 'Bre-B',      currency: 'COP', icon: Icons.payment,         active: true),
     PaymentMethod(id: 'in_upi',       country: 'IN', flag: '🇮🇳', name: 'UPI',        currency: 'INR', icon: Icons.payment,         active: false),
-    PaymentMethod(id: 'th_promptpay', country: 'TH', flag: '🇹🇭', name: 'PromptPay',  currency: 'THB', icon: Icons.payment,         active: false),
+    PaymentMethod(id: 'th_promptpay', country: 'TH', flag: '🇹🇭', name: 'PromptPay',  currency: 'THB', icon: Icons.payment,         active: true),
   ];
 
   /// Lookup by id. Returns null for unknown ids.
@@ -146,9 +146,9 @@ class PaymentMethods {
       ids: ['pix', 'boleto', 'electricity', 'water', 'internet'],
       active: true,
     ),
-    PaymentMethodGroup(key: 'mx', flag: '🇲🇽', label: 'CoDi/SPEI',  currency: 'MXN', ids: ['mx_codi'],      active: false),
+    PaymentMethodGroup(key: 'mx', flag: '🇲🇽', label: 'CoDi/SPEI',  currency: 'MXN', ids: ['mx_codi'],      active: true),
     PaymentMethodGroup(key: 'ar', flag: '🇦🇷', label: 'Transf 3.0', currency: 'ARS', ids: ['ar_transf3'],   active: true),
-    PaymentMethodGroup(key: 'co', flag: '🇨🇴', label: 'Bre-B',      currency: 'COP', ids: ['co_breb'],      active: false),
+    PaymentMethodGroup(key: 'co', flag: '🇨🇴', label: 'Bre-B',      currency: 'COP', ids: ['co_breb'],      active: true),
     PaymentMethodGroup(key: 'in', flag: '🇮🇳', label: 'UPI',        currency: 'INR', ids: ['in_upi'],       active: false),
     PaymentMethodGroup(key: 'th', flag: '🇹🇭', label: 'PromptPay',  currency: 'THB', ids: ['th_promptpay'], active: false),
   ];

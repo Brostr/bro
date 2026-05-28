@@ -259,6 +259,115 @@ function verifyBoletoLinhaDigitavel(linha, opts = {}) {
 
 // ---- Auto-detect & dispatch --------------------------------------------
 
+// v615: EMVCo currency tag (53) numeric codes for the countries Bro supports.
+// PIX/BRL (986) keeps its dedicated verifier above (verifyPixBrCode) untouched;
+// the others reuse the same TLV+CRC16 structure (CoDi/MX, PromptPay/TH,
+// Transferencias 3.0/AR, Bre-B/CO all follow the EMVCo QR spec).
+const EMVCO_CURRENCY_NAMES = {
+  '986': 'BRL',
+  '484': 'MXN',
+  '764': 'THB',
+  '032': 'ARS',
+  '170': 'COP',
+  '356': 'INR',
+  '840': 'USD',
+  '978': 'EUR',
+};
+
+/**
+ * Generic EMVCo QR verifier (non-PIX). Validates the same TLV structure and
+ * CRC16-CCITT checksum used by PIX, but does NOT assume BRL — it reads the
+ * currency (tag 53) and country (tag 58) and compares the amount (tag 54)
+ * against `opts.expectedAmount` in the order's own currency.
+ *
+ * Returns {valid, findings, parsed, currency, country}.
+ */
+function verifyEmvcoQr(code, opts = {}) {
+  const findings = [];
+  const result = { valid: false, findings, parsed: null, currency: null, country: null };
+  if (!code || typeof code !== 'string') {
+    findings.push({ id: 'emvco_empty', severity: 'high', detail: 'QR vazio' });
+    return result;
+  }
+  const trimmed = code.trim();
+  if (trimmed.length < 20 || trimmed.length > 1024) {
+    findings.push({ id: 'emvco_length', severity: 'medium', detail: `Tamanho fora da faixa: ${trimmed.length}` });
+    return result;
+  }
+  const crcTagPos = trimmed.length - 8;
+  if (trimmed.substring(crcTagPos, crcTagPos + 4) !== '6304') {
+    findings.push({ id: 'emvco_no_crc_tag', severity: 'high', detail: 'Tag 6304 não encontrada nos últimos 8 chars' });
+    return result;
+  }
+  const expectedCrc = trimmed.substring(crcTagPos + 4).toUpperCase();
+  const actualCrc = _crc16Ccitt(trimmed.substring(0, crcTagPos + 4))
+    .toString(16).toUpperCase().padStart(4, '0');
+  if (expectedCrc !== actualCrc) {
+    findings.push({ id: 'emvco_crc_mismatch', severity: 'high', detail: `CRC esperado=${expectedCrc} calculado=${actualCrc}` });
+    return result;
+  }
+
+  const tlv = _parseEmvTlv(trimmed.substring(0, crcTagPos));
+  const currencyNumeric = tlv.get('53') || null;
+  const countryCode = tlv.get('58') || null;
+  result.parsed = {
+    payloadFormat: tlv.get('00') || null,
+    merchantAccount: tlv.get('26') || tlv.get('27') || tlv.get('28') || null,
+    merchantCategory: tlv.get('52') || null,
+    txCurrency: currencyNumeric,
+    amount: tlv.get('54') || null,
+    countryCode,
+    merchantName: tlv.get('59') || null,
+    merchantCity: tlv.get('60') || null,
+    additional: tlv.get('62') || null,
+  };
+  result.country = countryCode;
+  result.currency = currencyNumeric ? (EMVCO_CURRENCY_NAMES[currencyNumeric] || currencyNumeric) : null;
+
+  // Optional: expected currency check (numeric or ISO alpha)
+  if (opts.expectedCurrency && currencyNumeric) {
+    const expected = String(opts.expectedCurrency).toUpperCase();
+    const actualAlpha = EMVCO_CURRENCY_NAMES[currencyNumeric] || currencyNumeric;
+    if (expected !== currencyNumeric && expected !== actualAlpha) {
+      findings.push({
+        id: 'emvco_currency_mismatch',
+        severity: 'high',
+        detail: `Moeda do QR (${actualAlpha}/${currencyNumeric}) != esperada (${expected})`,
+      });
+    }
+  }
+
+  // Optional: amount check in the QR's own currency
+  if (opts.expectedAmount != null && result.parsed.amount) {
+    const codeAmt = parseFloat(result.parsed.amount);
+    const expected = parseFloat(opts.expectedAmount);
+    if (Number.isFinite(codeAmt) && Number.isFinite(expected) &&
+        Math.abs(codeAmt - expected) > 0.01) {
+      findings.push({
+        id: 'emvco_amount_mismatch',
+        severity: 'high',
+        detail: `Valor do QR ${codeAmt} != ordem ${expected}`,
+      });
+    }
+  }
+
+  result.valid = !findings.some(f => f.severity === 'high');
+  return result;
+}
+
+/** Lê apenas a tag 53 (moeda) de um payload EMVCo, sem validar CRC. */
+function _peekEmvcoCurrency(trimmed) {
+  try {
+    const crcTagPos = trimmed.length - 8;
+    const body = crcTagPos > 0 && trimmed.substring(crcTagPos, crcTagPos + 4) === '6304'
+      ? trimmed.substring(0, crcTagPos)
+      : trimmed;
+    return _parseEmvTlv(body).get('53') || null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function verifyAny(code, opts = {}) {
   if (!code) return { type: 'unknown', valid: false, findings: [{ id: 'empty', severity: 'high', detail: 'Sem código' }] };
   const trimmed = String(code).trim();
@@ -266,8 +375,13 @@ function verifyAny(code, opts = {}) {
   if (E2E_REGEX.test(trimmed)) {
     return { type: 'pix_e2e', ...verifyPixE2E(trimmed, opts) };
   }
-  // BR Code: starts with 000201 (payload format indicator)
+  // EMVCo QR: starts with 000201 (payload format indicator).
+  // BRL (986) -> dedicated PIX verifier (unchanged). Outras moedas -> EMVCo genérico.
   if (trimmed.startsWith('000201')) {
+    const cur = _peekEmvcoCurrency(trimmed);
+    if (cur && cur !== '986') {
+      return { type: 'emvco_qr', ...verifyEmvcoQr(trimmed, opts) };
+    }
     return { type: 'pix_brcode', ...verifyPixBrCode(trimmed, opts) };
   }
   // Boleto: 47 digits
@@ -281,5 +395,6 @@ module.exports = {
   verifyPixBrCode,
   verifyPixE2E,
   verifyBoletoLinhaDigitavel,
+  verifyEmvcoQr,
   verifyAny,
 };

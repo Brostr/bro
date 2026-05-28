@@ -76,6 +76,9 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
   bool _isLoading = true;
   String? _error;
   DateTime? _expiresAt;
+  // v615: indica que estamos buscando o comprovante direto do relay (fetch
+  // de até 15s). Usado para mostrar o spinner "Carregando comprovante".
+  bool _fetchingProofDirectly = false;
   
   // Dados da disputa para exibição no relatório
   String? _disputeReason;
@@ -295,6 +298,8 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
   /// Isso acontece com proofs grandes (~65KB) que podem causar timeout no sync batch
   Future<void> _fetchProofDirectly() async {
     if (!mounted) return;
+    if (_fetchingProofDirectly) return; // evitar fetch concorrente
+    setState(() => _fetchingProofDirectly = true);
     try {
       final orderProvider = Provider.of<OrderProvider>(context, listen: false);
       final privateKey = orderProvider.nostrPrivateKey;
@@ -340,6 +345,8 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       }
     } catch (e) {
       broLog('⚠️ [PROOF] Erro ao buscar proof diretamente: $e');
+    } finally {
+      if (mounted) setState(() => _fetchingProofDirectly = false);
     }
   }
 
@@ -2499,10 +2506,11 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-            ] else if (orderProvider.isSyncing(widget.orderId)) ...[
+            ] else if (orderProvider.isSyncing(widget.orderId) || _fetchingProofDirectly) ...[
               // v552: Comprovante anunciado por push mas relay ainda nao
               // entregou o evento. Mostrar placeholder para o usuario
               // entender que esta carregando, nao que esta quebrado.
+              // v615: tambem cobre o fetch direto do relay (_fetchProofDirectly).
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(

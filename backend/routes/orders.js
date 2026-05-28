@@ -74,16 +74,38 @@ router.post('/create', async (req, res) => {
     }
 
     // v270: Validação de range (v398: rejeitar notação científica)
+    // v615: limites por moeda. O fluxo real publica direto no Nostr (ver
+    // OrderProvider.createOrder); este endpoint REST é legado/secundário, mas
+    // mantemos a validação coerente com o registro de métodos multi-moeda.
     const billValueParsed = parseStrictNumber(billValue);
     const btcAmountParsed = parseStrictNumber(btcAmount);
-    if (isNaN(billValueParsed) || billValueParsed <= 0 || billValueParsed > 100000) {
-      return res.status(400).json({ error: 'billValue deve ser entre 0 e R$ 100.000' });
+    // Tipos de pagamento suportados (espelha lib/config/payment_methods.dart)
+    const PAYMENT_TYPES = new Set([
+      'pix', 'boleto', 'electricity', 'water', 'internet', // BRL
+      'mx_codi',      // MXN
+      'ar_transf3',   // ARS
+      'co_breb',      // COP
+      'th_promptpay', // THB
+      'in_upi',       // INR
+    ]);
+    if (!PAYMENT_TYPES.has(paymentType)) {
+      return res.status(400).json({ error: 'paymentType não suportado' });
+    }
+    // Limite superior por moeda (valores altos em moedas fracas são normais).
+    const CURRENCY_MAX = {
+      pix: 100000, boleto: 100000, electricity: 100000, water: 100000, internet: 100000, // R$
+      mx_codi: 500000,        // MXN
+      ar_transf3: 50000000,   // ARS (alta inflação)
+      co_breb: 200000000,     // COP
+      th_promptpay: 1000000,  // THB
+      in_upi: 5000000,        // INR
+    };
+    const maxValue = CURRENCY_MAX[paymentType] || 100000;
+    if (isNaN(billValueParsed) || billValueParsed <= 0 || billValueParsed > maxValue) {
+      return res.status(400).json({ error: `billValue deve ser entre 0 e ${maxValue}` });
     }
     if (isNaN(btcAmountParsed) || btcAmountParsed <= 0 || btcAmountParsed > 1) {
       return res.status(400).json({ error: 'btcAmount deve ser entre 0 e 1 BTC' });
-    }
-    if (!['pix', 'boleto'].includes(paymentType)) {
-      return res.status(400).json({ error: 'paymentType deve ser pix ou boleto' });
     }
 
     // Criar ordem

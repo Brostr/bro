@@ -5,6 +5,7 @@ import '../services/bitcoin_price_service.dart';
 import '../services/local_collateral_service.dart';
 import '../services/nostr_service.dart';
 import '../services/nostr_order_service.dart';
+import '../services/error_utils.dart';
 
 /// Provider para gerenciar garantias (collateral) dos provedores
 /// Usa sistema local de garantia (fundos ficam na carteira do próprio provedor)
@@ -108,7 +109,7 @@ class CollateralProvider with ChangeNotifier {
       notifyListeners();
     } catch (e) {
       broLog('❌ Erro ao inicializar CollateralProvider: $e');
-      _error = e.toString();
+      _error = humanizeError(e);
       _isLoading = false;
       notifyListeners();
     }
@@ -221,7 +222,7 @@ class CollateralProvider with ChangeNotifier {
       };
     } catch (e) {
       broLog('❌ Erro ao configurar garantia: $e');
-      _error = e.toString();
+      _error = humanizeError(e);
       _isLoading = false;
       notifyListeners();
       return null;

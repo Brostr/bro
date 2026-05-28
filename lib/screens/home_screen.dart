@@ -1,4 +1,5 @@
 ﻿import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -383,7 +384,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _startPricePolling() {
-    _priceUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    // v615: jitter de ±0-5s para evitar "thundering herd" (muitos celulares
+    // batendo no servidor no mesmo segundo em redes lentas).
+    final jitter = Duration(milliseconds: math.Random().nextInt(5000));
+    _priceUpdateTimer = Timer.periodic(const Duration(seconds: 30) + jitter, (_) {
       if (mounted) {
         _fetchBitcoinPrice();
       }
@@ -418,7 +422,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   
   void _startOrdersPolling() {
     // v390: Increased from 15s to 45s to reduce WebSocket connections and CPU usage
-    _ordersUpdateTimer = Timer.periodic(const Duration(seconds: 45), (_) async {
+    // v615: + jitter de 0-8s para dessincronizar os celulares entre si.
+    final jitter = Duration(milliseconds: math.Random().nextInt(8000));
+    _ordersUpdateTimer = Timer.periodic(const Duration(seconds: 45) + jitter, (_) async {
       if (mounted) {
         final orderProvider = context.read<OrderProvider>();
         // PERFORMANCE v226: Pular sync de user quando provider mode está ativo
