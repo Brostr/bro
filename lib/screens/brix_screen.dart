@@ -62,6 +62,11 @@ class _BrixScreenState extends State<BrixScreen> {
   bool _showImportFlow = false;
   final _importUsernameController = TextEditingController();
 
+  // Claim web-created BRIX via email code (v617)
+  bool _claimWebMode = false;
+  String? _claimUsername;
+  final _claimCodeController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -76,6 +81,7 @@ class _BrixScreenState extends State<BrixScreen> {
     _editContactController.dispose();
     _editCodeController.dispose();
     _importUsernameController.dispose();
+    _claimCodeController.dispose();
     _usernameDebounce?.cancel();
     super.dispose();
   }
@@ -324,6 +330,19 @@ class _BrixScreenState extends State<BrixScreen> {
         _registerFcmToken();
       } else {
         final err = result.error ?? '';
+        final lower = err.toLowerCase();
+        // Conta criada na web: o servidor bloqueia link-pubkey e exige
+        // verificação por email (claim-web). Em vez de mostrar a mensagem
+        // crua, dispara o fluxo de código para o email cadastrado (v617).
+        final isWebAccount = lower.contains('claim-web-account') ||
+            lower.contains('web') ||
+            lower.contains('verificação de email') ||
+            lower.contains('verificacao de email') ||
+            lower.contains('vinculadas');
+        if (isWebAccount) {
+          await _startClaimWeb(username, pubkey);
+          return;
+        }
         setState(() {
           _isLoading = false;
           _error = err.contains('403') || err.contains('autorizado')
@@ -335,6 +354,76 @@ class _BrixScreenState extends State<BrixScreen> {
       }
     } catch (_) {
       setState(() { _isLoading = false; _error = loc.t('brix_import_error_not_found'); });
+    }
+  }
+
+  /// Web-created account detected: request an email code to claim it (v617).
+  Future<void> _startClaimWeb(String username, String pubkey) async {
+    final loc = AppLocalizations.of(context);
+    final result = await _brixService.claimWebRequest(
+      username: username,
+      nostrPubkey: pubkey,
+    );
+    if (!mounted) return;
+    if (result.success) {
+      setState(() {
+        _isLoading = false;
+        _claimWebMode = true;
+        _claimUsername = username;
+        _claimCodeController.clear();
+        _error = loc.t('brix_claim_web_code_sent');
+      });
+    } else {
+      setState(() {
+        _isLoading = false;
+        _error = result.error ?? loc.t('brix_import_error_not_found');
+      });
+    }
+  }
+
+  /// Submit the email code to claim a web-created BRIX account (v617).
+  Future<void> _submitClaimWebCode() async {
+    final loc = AppLocalizations.of(context);
+    final code = _claimCodeController.text.trim();
+    final username = _claimUsername;
+    if (username == null || code.length < 4) {
+      setState(() => _error = loc.t('brix_error_verify'));
+      return;
+    }
+
+    setState(() { _isLoading = true; _error = null; });
+    try {
+      final pubkey = await _storage.getNostrPublicKey();
+      if (pubkey == null || pubkey.isEmpty) {
+        setState(() { _isLoading = false; _error = 'Nostr key not available'; });
+        return;
+      }
+      final result = await _brixService.claimWebVerify(
+        username: username,
+        code: code,
+        nostrPubkey: pubkey,
+      );
+      if (!mounted) return;
+      if (result.success && result.brixAddress != null) {
+        setState(() {
+          _isLoading = false;
+          _brixAddress = result.brixAddress;
+          _username = result.username ?? username;
+          _pubkey = pubkey;
+          _step = BrixStep.active;
+          _showImportFlow = false;
+          _claimWebMode = false;
+        });
+        await _saveBrixLocal();
+        _registerFcmToken();
+      } else {
+        setState(() {
+          _isLoading = false;
+          _error = result.error ?? loc.t('brix_error_verify');
+        });
+      }
+    } catch (_) {
+      setState(() { _isLoading = false; _error = loc.t('brix_error_verify'); });
     }
   }
 
@@ -785,6 +874,65 @@ class _BrixScreenState extends State<BrixScreen> {
           ),
           if (_showImportFlow) ...[
             const SizedBox(height: 16),
+            if (_claimWebMode) ...[
+              Text(
+                loc.t('brix_claim_web_instructions'),
+                style: TextStyle(color: Colors.white.withOpacity(0.6), fontSize: 13),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _claimCodeController,
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white, fontSize: 24, letterSpacing: 8),
+                inputFormatters: [
+                  FilteringTextInputFormatter.digitsOnly,
+                  LengthLimitingTextInputFormatter(6),
+                ],
+                decoration: InputDecoration(
+                  hintText: '------',
+                  hintStyle: const TextStyle(color: Colors.white24, letterSpacing: 8),
+                  filled: true,
+                  fillColor: const Color(0xFF1A1A1A),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Colors.white.withOpacity(0.1)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Colors.amber),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: _isLoading ? null : _submitClaimWebCode,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.amber,
+                    foregroundColor: Colors.black,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                  ),
+                  child: _isLoading
+                      ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                      : Text(loc.t('brix_claim_web_verify_btn')),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: _isLoading
+                    ? null
+                    : () => setState(() { _claimWebMode = false; _error = null; }),
+                child: Text(loc.t('brix_back'), style: const TextStyle(color: Colors.white38)),
+              ),
+            ] else ...[
             TextField(
               controller: _importUsernameController,
               keyboardType: TextInputType.text,
@@ -829,6 +977,7 @@ class _BrixScreenState extends State<BrixScreen> {
                     : Text(loc.t('brix_import_btn')),
               ),
             ),
+            ],
           ],
         ],
       ),

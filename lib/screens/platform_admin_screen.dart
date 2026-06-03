@@ -239,6 +239,74 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
           }
         }
         
+        // 3.5 v616 FIX: fallback de resolução POR ORDEM para candidatas que
+        // sobraram como "abertas". O fetch em massa (fetchAllDisputeResolutions)
+        // usa limit alto mas SEM filtro #r, então resoluções antigas podem não
+        // vir. fetchDisputeResolution(orderId) filtra por #r e não sofre desse
+        // truncamento — é a checagem autoritativa. Em install novo (persistência
+        // local vazia) isso evita que disputas já resolvidas reapareçam abertas.
+        // Persistimos toda resolução encontrada para os próximos loads serem rápidos.
+        if (openNostr.isNotEmpty) {
+          final stillOpen = <Map<String, dynamic>>[];
+          const int batchSize = 4; // limita concorrência p/ não saturar relays
+          for (int i = 0; i < openNostr.length; i += batchSize) {
+            final batch = openNostr.skip(i).take(batchSize).toList();
+            final resList = await Future.wait(batch.map((d) async {
+              final oid = d['orderId'] as String? ?? '';
+              if (oid.isEmpty) return null;
+              try {
+                // Nível 1: evento dedicado de resolução (bro-resolucao, filtro #r)
+                final res = await nostrOrderService
+                    .fetchDisputeResolution(oid)
+                    .timeout(const Duration(seconds: 8), onTimeout: () => null);
+                if (res != null) return res;
+                // Nível 2: status terminal da ordem (completed/cancelled/liquidated).
+                // Cobre disputas cuja ordem foi concluída/cancelada normalmente,
+                // sem que houvesse um evento dedicado de resolução de disputa.
+                final st = await nostrOrderService
+                    .fetchLatestOrderStatus(oid)
+                    .timeout(const Duration(seconds: 8), onTimeout: () => null);
+                if (st != null &&
+                    const ['completed', 'cancelled', 'liquidated'].contains(st)) {
+                  return <String, dynamic>{
+                    'resolution': st == 'cancelled'
+                        ? 'resolved_user'
+                        : (st == 'completed'
+                            ? 'resolved_provider'
+                            : 'resolved_unknown'),
+                    'orderStatus': st,
+                    'source': 'order_status',
+                  };
+                }
+                return null;
+              } catch (_) {
+                return null;
+              }
+            }));
+            for (int j = 0; j < batch.length; j++) {
+              final dispute = batch[j];
+              final res = resList[j];
+              final dOrderId = dispute['orderId'] as String? ?? '';
+              if (res != null) {
+                final resTag = res['resolution'] as String? ?? 'resolved_unknown';
+                try {
+                  await storage.markDisputeResolved(dOrderId, resTag);
+                } catch (_) {}
+                dispute['resolution'] = res;
+                dispute['resolved'] = true;
+                resolvedNostr.add(dispute);
+                resolvedOrderIds.add(dOrderId);
+                broLog('💾 v616: resolução via fallback (${res['source'] ?? 'bro-resolucao'}) p/ ${dOrderId.length >= 8 ? dOrderId.substring(0, 8) : dOrderId} ($resTag)');
+              } else {
+                stillOpen.add(dispute);
+              }
+            }
+          }
+          openNostr
+            ..clear()
+            ..addAll(stillOpen);
+        }
+        
         // 4. CRÍTICO: Adicionar resoluções cujo evento original de disputa NÃO foi retornado
         // Isso garante que disputas resolvidas apareçam mesmo quando o relay limpa o evento original
         for (final res in allResolutions) {
@@ -2506,10 +2574,17 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
     );
   }
 
+  /// v617: localiza uma disputa Nostr carregada pelo orderId (aberta ou resolvida)
+  Map<String, dynamic>? _findDisputeByOrderId(String orderId) {
+    for (final d in [..._nostrDisputes, ..._resolvedNostrDisputes]) {
+      if ((d['orderId'] as String? ?? '') == orderId) return d;
+    }
+    return null;
+  }
+
   /// v579: Manual archive for stale legacy disputes whose resolution event
   /// was never published or was lost from relays. Marks resolved locally.
-  void _confirmArchiveStaleDispute(String orderId) async {
-    if (orderId.isEmpty) return;
+  void _confirmArchiveStaleDispute(String orderId) async {    if (orderId.isEmpty) return;
     final shortId = orderId.length > 8 ? orderId.substring(0, 8) : orderId;
     final confirm = await showDialog<bool>(
       context: context,
@@ -2538,10 +2613,41 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
     );
     if (confirm != true || !mounted) return;
     try {
+      // Persistência local imediata (fallback se o relay falhar)
       await StorageService().markDisputeResolved(orderId, 'archived_manually');
+
+      // v617: publicar resolução DURÁVEL (kind 1 bro-resolucao, sem expiração)
+      // para que o arquivamento sobreviva a reinstalações de APK e propague
+      // para outros dispositivos admin. Sem isto, o arquivamento era só local
+      // (SharedPreferences) e a disputa reaparecia "aberta" após reinstalar.
+      try {
+        final orderProvider = context.read<OrderProvider>();
+        final privateKey = orderProvider.nostrPrivateKey;
+        if (privateKey != null) {
+          final dispute = _findDisputeByOrderId(orderId);
+          final userPubkey = dispute?['userPubkey'] as String? ?? '';
+          final providerId = dispute?['provider_id'] as String? ?? '';
+          final published = await NostrOrderService()
+              .publishDisputeResolution(
+                privateKey: privateKey,
+                orderId: orderId,
+                resolution: 'archived_manually',
+                notes: 'Disputa antiga arquivada manualmente pelo admin (sem evento de resolução original).',
+                userPubkey: userPubkey.isNotEmpty ? userPubkey : null,
+                providerId: providerId.isNotEmpty ? providerId : null,
+              )
+              .timeout(const Duration(seconds: 15), onTimeout: () => false);
+          broLog('📤 v617: arquivamento publicado no relay para $shortId: $published');
+        } else {
+          broLog('⚠️ v617: sem chave privada, arquivamento apenas local para $shortId');
+        }
+      } catch (e) {
+        broLog('⚠️ v617: falha ao publicar arquivamento no relay: $e (mantido local)');
+      }
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Disputa $shortId arquivada localmente')),
+        SnackBar(content: Text('Disputa $shortId arquivada (relay + local)')),
       );
       await _loadData();
     } catch (e) {

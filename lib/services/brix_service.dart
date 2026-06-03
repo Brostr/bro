@@ -240,6 +240,59 @@ class BrixService {
     }
   }
 
+  /// Request an email verification code to claim a web-created BRIX account.
+  /// The code is sent to the email on file for that username. The caller must
+  /// be NIP-98 authenticated with their app's real nostr pubkey.
+  Future<BrixVerifyResult> claimWebRequest({
+    required String username,
+    required String nostrPubkey,
+  }) async {
+    try {
+      final body = {'username': username};
+      final response = await _dio.post('/brix/claim-web-request',
+        data: body,
+        options: _signedOptions('/brix/claim-web-request', 'POST', pubkey: nostrPubkey, body: body),
+      );
+      final data = response.data;
+      return BrixVerifyResult(
+        success: data?['success'] == true,
+        username: username,
+      );
+    } on DioException catch (e) {
+      final msg = e.response?.data?['error'] ?? 'Erro ao solicitar verificação';
+      return BrixVerifyResult(success: false, error: msg.toString());
+    } catch (e) {
+      return BrixVerifyResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+    }
+  }
+
+  /// Verify the email code and link the web-created BRIX account to the
+  /// caller's nostr pubkey, keeping the original username.
+  Future<BrixVerifyResult> claimWebVerify({
+    required String username,
+    required String code,
+    required String nostrPubkey,
+  }) async {
+    try {
+      final body = {'username': username, 'code': code};
+      final response = await _dio.post('/brix/claim-web-verify',
+        data: body,
+        options: _signedOptions('/brix/claim-web-verify', 'POST', pubkey: nostrPubkey, body: body),
+      );
+      final data = response.data;
+      return BrixVerifyResult(
+        success: data?['success'] == true,
+        brixAddress: data?['brix_address'] as String?,
+        username: data?['username'] as String?,
+      );
+    } on DioException catch (e) {
+      final msg = e.response?.data?['error'] ?? 'Código inválido ou expirado';
+      return BrixVerifyResult(success: false, error: msg.toString());
+    } catch (e) {
+      return BrixVerifyResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+    }
+  }
+
   /// Get pending payments for a pubkey
   Future<List<BrixPendingPayment>> getPendingPayments(String pubkey) async {
     try {

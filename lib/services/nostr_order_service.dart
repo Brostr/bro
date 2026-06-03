@@ -1230,6 +1230,13 @@ class NostrOrderService {
     return null;
   }
   
+  /// Wrapper público: retorna o status mais recente de uma ordem no Nostr
+  /// (kind 30080/30081). Usado pelo admin para detectar disputas cujas ordens
+  /// já chegaram a um estado terminal (completed/cancelled/liquidated) sem que
+  /// houvesse um evento dedicado de resolução de disputa (bro-resolucao).
+  Future<String?> fetchLatestOrderStatus(String orderId) =>
+      _fetchLatestOrderStatus(orderId);
+
   /// Busca o status mais recente de uma ordem dos eventos de UPDATE (kind 30080) e COMPLETE (kind 30081)
   /// NOTA: Esta função é lenta e deve ser usada apenas quando necessário, não em batch
   Future<String?> _fetchLatestOrderStatus(String orderId) async {
@@ -3770,16 +3777,19 @@ class NostrOrderService {
           final events = <Map<String, dynamic>>[];
           
           // Estratégia 1: Kind 1 com bro-resolucao
+          // v616: limite elevado 100->500. Com 100, resoluções antigas eram
+          // truncadas, fazendo disputas resolvidas reaparecerem como abertas
+          // (sobretudo em install novo, onde a persistência local está vazia).
           channel.sink.add(jsonEncode(['REQ', subId, {
             'kinds': [1],
             '#t': ['bro-resolucao'],
-            'limit': 100,
+            'limit': 500,
           }]));
           // Estratégia 2: Kind 30080 (audit) com bro-resolucao (v240)
           channel.sink.add(jsonEncode(['REQ', subId2, {
             'kinds': [kindBroPaymentProof],
             '#t': ['bro-resolucao'],
-            'limit': 100,
+            'limit': 500,
           }]));
           
           int eoseCount = 0;
