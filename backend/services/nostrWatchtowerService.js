@@ -966,14 +966,27 @@ class NostrWatchtowerService {
       return;
     }
 
-    // v588: Also reject orders whose `createdAt` in content is too old. The
-    // event's `created_at` (Nostr timestamp) is set fresh on every publish,
-    // but the JSON `createdAt` field reflects the actual order birth time.
-    // Real new orders are created seconds ago; > 5 min is always a republish.
+    // v618: Reject only ANCIENT orders by `createdAt`. The event's `created_at`
+    // (Nostr timestamp) is set fresh on every publish, but the JSON `createdAt`
+    // field reflects the actual order birth time.
+    //
+    // REGRESSION FIX: the previous 5-minute threshold silently killed every
+    // re-publish of a still-pending order. The buyer's app republishes the same
+    // kind 30078 (line ~1476 in nostr_order_service.dart) carrying the ORIGINAL
+    // createdAt whenever no provider has accepted yet. If the very first
+    // broadcast was missed (relay lag, backend restarting, event arriving before
+    // EOSE), providers would NEVER get pushed for that order again. A
+    // still-pending order — even one created hours ago — is a valid, open order
+    // that providers SHOULD be able to see.
+    //
+    // Safety against phantom re-pushes is already guaranteed by the persistent
+    // broadcast dedup (_seenPushes + _persistBroadcastSeen, 7-day TTL): each
+    // orderId broadcasts at most once. So this gate only needs to block truly
+    // ancient republishes (days old). 24h is a generous, safe bound.
     if (content && typeof content.createdAt === 'string') {
       const createdAtMs = Date.parse(content.createdAt);
-      if (!Number.isNaN(createdAtMs) && Date.now() - createdAtMs > 5 * 60 * 1000) {
-        console.log(`🛑 [Watchtower] Skipping broadcast for ${orderId.substring(0, 8)} — content.createdAt is ${Math.round((Date.now() - createdAtMs) / 1000)}s old`);
+      if (!Number.isNaN(createdAtMs) && Date.now() - createdAtMs > 24 * 60 * 60 * 1000) {
+        console.log(`🛑 [Watchtower] Skipping broadcast for ${orderId.substring(0, 8)} — content.createdAt is ${Math.round((Date.now() - createdAtMs) / 1000)}s old (ancient)`);
         return;
       }
     }

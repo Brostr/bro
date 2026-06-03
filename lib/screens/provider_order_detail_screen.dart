@@ -265,45 +265,72 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
 
   /// Inicia polling automático para verificar updates de status
   /// Isso permite que o Bro veja quando o usuário confirma o pagamento
+  ///
+  /// v618: Polling ADAPTATIVO + sync CORRETO.
+  /// - Logo após aceitar a ordem o Bro fica esperando o billCode (código PIX/
+  ///   boleto). Esse código chega via kind 30080 (billCode_nip44), buscado por
+  ///   syncAllPendingOrdersFromNostr — NÃO por syncOrdersFromNostr. Por isso o
+  ///   _loadOrderDetails agora usa o sync de pending (ver abaixo).
+  /// - Enquanto o billCode ainda não chegou, fazemos polling rápido (4s) para
+  ///   reduzir a latência. Depois que o código aparece, voltamos a 10s.
   void _startStatusPolling() {
-    // Polling a cada 10 segundos para TODOS os estados não-terminais
-    _statusPollingTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+    _scheduleNextPoll();
+  }
+
+  void _scheduleNextPoll() {
+    if (!mounted) return;
+    // Intervalo curto enquanto aguardamos o billCode; normal nos demais estados.
+    final billCodeRaw = (_orderDetails?['billCode'] as String?) ?? '';
+    final hasBillCode = billCodeRaw.isNotEmpty && billCodeRaw != '[encrypted]';
+    final interval = hasBillCode
+        ? const Duration(seconds: 10)
+        : const Duration(seconds: 4);
+
+    _statusPollingTimer?.cancel();
+    _statusPollingTimer = Timer(interval, () async {
+      if (!mounted) return;
       final currentStatus = _orderDetails?['status'] ?? '';
-      
+
       // Polling para qualquer estado ativo (não apenas awaiting_confirmation)
       const terminalStatuses = {'completed', 'liquidated', 'cancelled', 'expired', 'disputed'};
-      if (!terminalStatuses.contains(currentStatus) && mounted) {
-        broLog('🔄 [POLLING] Verificando status da ordem ${widget.orderId.substring(0, 8)} (status=$currentStatus)...');
-        await _loadOrderDetails(forceSync: true);
-        
-        // CORREÇÃO v234: Recalcular _timeRemaining a cada tick pra manter o countdown atualizado
-        if (_receiptSubmittedAt != null && mounted) {
-          final deadline = _receiptSubmittedAt!.add(const Duration(hours: 36));
-          setState(() {
-            _timeRemaining = deadline.difference(DateTime.now());
-          });
-        }
-        
-        // Se mudou para completed ou liquidated, parar o polling
-        final newStatus = _orderDetails?['status'] ?? '';
-        if (newStatus == 'completed' || newStatus == 'liquidated') {
-          broLog('🎉 [POLLING] Ordem ${newStatus}! Parando polling.');
-          timer.cancel();
-          
-          // Mostrar notificação ao Bro
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(newStatus == 'completed' 
-                    ? AppLocalizations.of(context)!.t('prov_det_user_confirmed') 
-                    : AppLocalizations.of(context)!.t('prov_det_auto_settled')),
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 5),
-              ),
-            );
-          }
-        }
+      if (terminalStatuses.contains(currentStatus)) {
+        return; // estado terminal: parar polling
       }
+
+      broLog('🔄 [POLLING] Verificando status da ordem ${widget.orderId.substring(0, 8)} (status=$currentStatus)...');
+      await _loadOrderDetails(forceSync: true);
+
+      // CORREÇÃO v234: Recalcular _timeRemaining a cada tick pra manter o countdown atualizado
+      if (_receiptSubmittedAt != null && mounted) {
+        final deadline = _receiptSubmittedAt!.add(const Duration(hours: 36));
+        setState(() {
+          _timeRemaining = deadline.difference(DateTime.now());
+        });
+      }
+
+      // Se mudou para completed ou liquidated, parar o polling
+      final newStatus = _orderDetails?['status'] ?? '';
+      if (newStatus == 'completed' || newStatus == 'liquidated') {
+        broLog('🎉 [POLLING] Ordem ${newStatus}! Parando polling.');
+        _statusPollingTimer?.cancel();
+
+        // Mostrar notificação ao Bro
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(newStatus == 'completed'
+                  ? AppLocalizations.of(context)!.t('prov_det_user_confirmed')
+                  : AppLocalizations.of(context)!.t('prov_det_auto_settled')),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+        return;
+      }
+
+      // Reagenda o próximo poll com intervalo recalculado (adaptativo).
+      _scheduleNextPoll();
     });
   }
 
@@ -325,10 +352,16 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
       
       // IMPORTANTE: Sempre sincronizar com Nostr para buscar updates de status
       // Isso permite que o Bro veja quando o usuário confirmou pagamento
+      //
+      // v618 FIX (latência do billCode): usar syncAllPendingOrdersFromNostr, que
+      // busca os status updates kind 30080 e DECRIPTA o billCode_nip44
+      // (código PIX/boleto). O antigo syncOrdersFromNostr só buscava kind 30078
+      // (ordens do usuário, SEM billCode), então o código demorava muito a
+      // aparecer para o Bro. force:true ignora o throttle de 30s.
       if (forceSync) {
-        broLog('🔄 [SYNC] Sincronizando com Nostr para buscar updates...');
-        await orderProvider.syncOrdersFromNostr().timeout(
-          const Duration(seconds: 5),
+        broLog('🔄 [SYNC] Sincronizando pending (kind 30080 + billCode) com Nostr...');
+        await orderProvider.syncAllPendingOrdersFromNostr(force: true).timeout(
+          const Duration(seconds: 8),
           onTimeout: () {
             broLog('⏱️ [SYNC] Timeout - continuando com dados locais');
           },
