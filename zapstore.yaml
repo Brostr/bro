@@ -1,4 +1,4 @@
-repository: https://github.com/Brostr/bro
+repository: https://github.com/Quizzicarol/bro-app
 name: Bro
 description: |
     Bro is an open peer-to-peer application protocol that lets anyone pay bills
@@ -19,6 +19,7 @@ description: |
     - Login with Nostr key (nsec) or BIP-39 seed
 summary: Pay bills with Bitcoin. No banks. No KYC.
 license: MIT
-metadata_sources:
+remote_metadata:
     - github
-pubkey: npub14dkurlx4vkd5qmf7q5fwqh52lh3mn078wms2jetl2l4wnmcxnghqlud5dt
+assets:
+    - bro-v.*-arm64-v8a\.apk
