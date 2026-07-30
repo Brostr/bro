@@ -8,6 +8,11 @@
 </p>
 
 <p align="center">
+  <strong>Active development has moved to <a href="https://github.com/Brostr/bro">Brostr/bro</a>.</strong><br>
+  This repository remains as a migration and reference copy.
+</p>
+
+<p align="center">
   <a href="https://testflight.apple.com/join/rkHbPQ94">
     <img src="https://img.shields.io/badge/TestFlight_Beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white" alt="TestFlight">
   </a>

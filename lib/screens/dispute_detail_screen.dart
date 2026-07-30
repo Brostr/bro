@@ -1071,16 +1071,31 @@ class _DisputeDetailScreenState extends State<DisputeDetailScreen> {
           ..._allEvidence.asMap().entries.map((entry) {
             final idx = entry.key;
             final ev = entry.value;
-            final role = ev['senderRole'] as String? ?? 'unknown';
+            var role = ev['senderRole'] as String? ?? 'unknown';
             final desc = ev['description'] as String? ?? '';
             final image = ev['image'] as String? ?? '';
             final sentAt = ev['sentAt'] as String? ?? '';
+            final evSenderPubkey = ev['senderPubkey'] as String? ?? '';
+            final isEncryptedOnly = ev['decryptable'] == false; // v-fix: metadados sem descriptografar
+
+            // v-fix: quando não foi possível descriptografar, senderRole fica no payload
+            // cifrado. Inferimos o papel comparando o senderPubkey (que fica no envelope).
+            if (role == 'unknown' && evSenderPubkey.isNotEmpty) {
+              if (evSenderPubkey == userPubkey) {
+                role = 'user';
+              } else if (evSenderPubkey == providerId) {
+                role = 'provider';
+              }
+            }
+
             final isUser = role == 'user';
             final isMediator = role == 'mediator'; // v246
             
             // v246: Cor por papel
             final roleColor = isMediator ? Colors.purple : (isUser ? Colors.blue : Colors.green);
-            final roleLabel = isMediator ? 'Mediador' : (isUser ? 'Usuário' : 'Provedor');
+            final roleLabel = isMediator
+                ? 'Mediador'
+                : (isUser ? 'Usuário' : (role == 'provider' ? 'Provedor' : 'Parte'));
             final roleIcon = isMediator ? Icons.gavel : (isUser ? Icons.person : Icons.storefront);
             
             String dateStr = '';
@@ -1107,12 +1122,46 @@ class _DisputeDetailScreenState extends State<DisputeDetailScreen> {
                       Text(roleLabel,
                         style: TextStyle(color: roleColor, 
                           fontWeight: FontWeight.bold, fontSize: 12)),
+                      if (isEncryptedOnly) ...[
+                        const SizedBox(width: 6),
+                        const Icon(Icons.lock, color: Colors.orangeAccent, size: 13),
+                      ],
                       const Spacer(),
                       if (dateStr.isNotEmpty)
                         Text(dateStr, style: const TextStyle(color: Colors.white38, fontSize: 11)),
                     ],
                   ),
-                  if (desc.isNotEmpty) ...[
+                  if (evSenderPubkey.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text('de ${evSenderPubkey.substring(0, evSenderPubkey.length >= 12 ? 12 : evSenderPubkey.length)}…',
+                      style: const TextStyle(color: Colors.white38, fontSize: 10, fontFamily: 'monospace')),
+                  ],
+                  if (isEncryptedOnly) ...[
+                    const SizedBox(height: 6),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withOpacity(0.08),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.orange.withOpacity(0.25)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.info_outline, color: Colors.orangeAccent, size: 14),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              desc.isNotEmpty
+                                  ? desc
+                                  : 'Evidência criptografada salva no relay. Faça login com a identidade admin para ver o conteúdo.',
+                              style: const TextStyle(color: Colors.orangeAccent, fontSize: 11),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ] else if (desc.isNotEmpty) ...[
                     const SizedBox(height: 6),
                     Text(desc, style: const TextStyle(color: Colors.white70, fontSize: 12)),
                   ],
@@ -1785,8 +1834,18 @@ class _DisputeDetailScreenState extends State<DisputeDetailScreen> {
     // 4. ANÁLISE DE EVIDÊNCIAS DAS PARTES
     // ═══════════════════════════════════════════
     if (_allEvidence.isNotEmpty) {
-      final userEvidences = _allEvidence.where((e) => e['senderRole'] == 'user').toList();
-      final providerEvidences = _allEvidence.where((e) => e['senderRole'] == 'provider').toList();
+      // v-fix: evidência criptografada não tem senderRole (fica no payload cifrado).
+      // Inferimos o papel pelo senderPubkey do envelope para não subcontar defesas.
+      String resolveRole(Map<String, dynamic> e) {
+        final r = e['senderRole'] as String? ?? '';
+        if (r.isNotEmpty && r != 'unknown') return r;
+        final pk = e['senderPubkey'] as String? ?? '';
+        if (pk.isNotEmpty && pk == userPubkey) return 'user';
+        if (pk.isNotEmpty && pk == providerId) return 'provider';
+        return r;
+      }
+      final userEvidences = _allEvidence.where((e) => resolveRole(e) == 'user').toList();
+      final providerEvidences = _allEvidence.where((e) => resolveRole(e) == 'provider').toList();
       
       if (userEvidences.isNotEmpty && providerEvidences.isEmpty) {
         score -= 0.10;

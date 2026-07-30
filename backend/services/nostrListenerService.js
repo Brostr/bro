@@ -10,11 +10,11 @@
 const WebSocket = require('ws');
 const EventEmitter = require('events');
 
-const RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.primal.net',
-];
+// Relays podem ser sobrescritos via env RELAYS (CSV). Fallback = padrão atual.
+const RELAYS = (process.env.RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 // Nostr event kinds we care about
 const DISPUTE_FILTERS = [

@@ -1261,7 +1261,10 @@ class BreezProvider with ChangeNotifier {
             'amountSats': invoice.amountMsat != null 
                 ? (invoice.amountMsat! ~/ BigInt.from(1000)).toString()
                 : null,
-            'expiry': invoice.expiry,
+            'expiry': invoice.expiry.toString(),
+            // v622: timestamp de criação (segundos epoch) p/ detectar invoice expirado
+            // no auto-pagamento e evitar retentar invoice vencido (bug da carol).
+            'timestamp': invoice.timestamp.toString(),
             'payeePubkey': invoice.payeePubkey,
           },
         };

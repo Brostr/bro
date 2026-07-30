@@ -30,11 +30,19 @@ const BROADCAST_SEEN_FILE = process.env.NODE_ENV === 'production'
   : path.join(__dirname, '..', 'data', 'watchtower_broadcasts.json');
 const BROADCAST_SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-const RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.primal.net',
-];
+// Relays podem ser sobrescritos via env RELAYS (CSV). Fallback = padrão atual.
+const RELAYS = (process.env.RELAYS || 'wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// v621: "Espelho" (mirror). Republica cada evento de ordem válido no relay
+// PRÓPRIO do coordinator, para o nó guardar uma cópia local de todas as ordens
+// e não depender só de relays de terceiros. Alvo = relays locais (ws://) da
+// lista RELAYS, ou o CSV explícito em MIRROR_RELAYS. Vazio = mirror desligado.
+const MIRROR_RELAYS = (process.env.MIRROR_RELAYS
+  ? process.env.MIRROR_RELAYS.split(',').map((s) => s.trim()).filter(Boolean)
+  : RELAYS.filter((r) => r.startsWith('ws://')));
 
 // Nostr event kinds for Bro orders
 const KIND_ORDER = 30078;
@@ -130,6 +138,11 @@ class NostrWatchtowerService {
     if (this._running) return;
     this._running = true;
     console.log('🗼 [Watchtower] Starting order event monitor on', RELAYS.length, 'relays');
+
+    // v621: mirror para relay(s) próprio(s) do coordinator (cópia local)
+    if (MIRROR_RELAYS.length > 0) {
+      console.log('🪞 [Watchtower] Mirror ativo — copiando ordens para relay(s) próprio(s):', MIRROR_RELAYS.join(', '));
+    }
 
     // v588: load persistent broadcast dedup
     this._loadBroadcastSeen();
@@ -348,6 +361,25 @@ class NostrWatchtowerService {
     }
   }
 
+  /**
+   * v621: Espelho (mirror). Republica um evento de ordem já validado (assinatura
+   * verificada) nos relays PRÓPRIOS do coordinator (MIRROR_RELAYS). Isso dá ao
+   * nó uma cópia local de todas as ordens, sem depender só de relays públicos.
+   * Não republica de volta no relay de origem (evita eco/loop). O relay faz
+   * dedup por id, então reenvios são inofensivos.
+   */
+  _mirrorEvent(sourceRelayUrl, event) {
+    if (MIRROR_RELAYS.length === 0) return;
+    const frame = JSON.stringify(['EVENT', event]);
+    for (const target of MIRROR_RELAYS) {
+      if (target === sourceRelayUrl) continue; // já veio de lá
+      const ws = this._connections.get(target);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(frame); } catch (_) { /* best-effort */ }
+      }
+    }
+  }
+
   async _handleEvent(relayUrl, event) {
     if (!event || !event.id) return;
 
@@ -372,6 +404,11 @@ class NostrWatchtowerService {
       this._stats.sigFailed++;
       return; // Malformed event
     }
+
+    // v621: espelha o evento válido no relay próprio do coordinator ANTES dos
+    // gates de idade/EOSE abaixo — esses gates só evitam PUSH duplicado; ainda
+    // queremos um arquivo local COMPLETO (incluindo eventos de catch-up).
+    this._mirrorEvent(relayUrl, event);
 
     // Skip events older than 5 minutes (catch-up from subscription, already delivered)
     const eventAge = Math.floor(Date.now() / 1000) - (event.created_at || 0);

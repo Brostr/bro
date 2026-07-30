@@ -2809,20 +2809,28 @@ class NostrOrderService {
     final orders = <Map<String, dynamic>>[];
     final seenIds = <String>{};
 
-    // v390: Sequential relay fallback — try first relay, use next only if first fails
-    for (final relay in _relays) {
+    // v620: Consulta TODOS os relays em paralelo e mescla (sem early-exit).
+    // Antes (v390) parávamos no primeiro relay com dados, o que perdia ordens
+    // que só existiam em nos.lol/primal quando damus respondia primeiro
+    // (ex.: restore em novo aparelho mostrava histórico incompleto).
+    // Mesmo padrão já usado em _fetchPendingOrdersRaw / _fetchProviderOrdersRaw.
+    final futures = _relays.map((relay) async {
       try {
-        final relayOrders = await _fetchUserOrdersFromRelay(relay, pubkey);
-        for (final order in relayOrders) {
-          final id = order['id'];
-          if (!seenIds.contains(id)) {
-            seenIds.add(id);
-            orders.add(order);
-          }
+        return await _fetchUserOrdersFromRelay(relay, pubkey);
+      } catch (_) {
+        return <Map<String, dynamic>>[];
+      }
+    }).toList();
+
+    final results = await Future.wait(futures, eagerError: false);
+    for (final relayOrders in results) {
+      for (final order in relayOrders) {
+        final id = order['id'];
+        if (id != null && !seenIds.contains(id)) {
+          seenIds.add(id);
+          orders.add(order);
         }
-        // If this relay returned data, skip remaining relays
-        if (orders.isNotEmpty) break;
-      } catch (_) {}
+      }
     }
 
     return orders;
@@ -3928,6 +3936,34 @@ class NostrOrderService {
 
   /// Publica resolução de disputa no Nostr (kind 1 com tag bro-resolucao)
   /// Chamado pelo admin ao resolver uma disputa a favor de uma das partes
+  /// v621: Publica um evento em TODOS os relays, mas resolve assim que >=1
+  /// confirmar — nao bloqueia esperando relays lentos (damus/nostr.band as vezes
+  /// travam ~20s). Os demais relays continuam publicando em background
+  /// (fire-and-forget) para durabilidade. Evita o falso-negativo "falha ao
+  /// publicar" quando o evento na verdade JA entrou em pelo menos um relay.
+  Future<bool> _publishToAnyRelay(Event event, String label) {
+    final firstSuccess = Completer<bool>();
+    int done = 0;
+    int successCount = 0;
+    for (final relay in _relays) {
+      _publishToRelay(relay, event).then((ok) {
+        if (ok) {
+          successCount++;
+          if (!firstSuccess.isCompleted) firstSuccess.complete(true);
+        }
+      }).catchError((_) {
+        // erro por-relay ignorado — outros relays ainda podem confirmar
+      }).whenComplete(() {
+        done++;
+        if (done == _relays.length) {
+          broLog('📤 $label publicado em $successCount/${_relays.length} relays');
+          if (!firstSuccess.isCompleted) firstSuccess.complete(false);
+        }
+      });
+    }
+    return firstSuccess.future;
+  }
+
   Future<bool> publishDisputeResolution({
     required String privateKey,
     required String orderId,
@@ -3982,18 +4018,11 @@ class NostrOrderService {
         privkey: keychain.private,
       );
       
-      final results = await Future.wait(
-        _relays.map((relay) async {
-          try {
-            return await _publishToRelay(relay, event);
-          } catch (_) {
-            return false;
-          }
-        }),
+      // v621: Resolve assim que >=1 relay confirmar (nao espera os lentos).
+      final anyPublished = await _publishToAnyRelay(
+        event,
+        'publishDisputeResolution: kind 1 (orderId=${orderId.substring(0, 8)}, resolution=$resolution)',
       );
-      
-      final successCount = results.where((r) => r).length;
-      broLog('📤 publishDisputeResolution: kind 1 publicado em $successCount/${_relays.length} relays (orderId=${orderId.substring(0, 8)}, resolution=$resolution)');
       
       // AUDITABILIDADE: Publicar também como kind 30080 com tags de status
       // Isso permite que QUALQUER pessoa busque a resolução pela cadeia de eventos da ordem
@@ -4029,16 +4058,19 @@ class NostrOrderService {
           privkey: keychain.private,
         );
         
-        final auditResults = await Future.wait(
-          _relays.map((relay) => _publishToRelay(relay, auditEvent).catchError((_) => false)),
+        // v621: idem — retorna assim que >=1 relay confirmar o evento de auditoria.
+        final auditPublished = await _publishToAnyRelay(
+          auditEvent,
+          'publishDisputeResolution: kind 30080 (audit)',
         );
-        final auditSuccess = auditResults.where((r) => r).length;
-        broLog('📤 publishDisputeResolution: kind 30080 (audit) publicado em $auditSuccess/${_relays.length} relays');
+        if (!auditPublished) {
+          broLog('⚠️ Audit event (kind 30080) não confirmado em nenhum relay');
+        }
       } catch (e) {
         broLog('⚠️ Audit event (kind 30080) falhou: $e');
       }
       
-      return successCount > 0;
+      return anyPublished;
     } catch (e) {
       broLog('❌ publishDisputeResolution EXCEPTION: $e');
       return false;
@@ -4502,28 +4534,63 @@ class NostrOrderService {
             if (data is List && data.length >= 3 && data[0] == 'EVENT') {
               try {
                 final eventData = data[2] as Map<String, dynamic>;
+                final eventId = eventData['id'] as String? ?? '';
+                final eventPubkey = eventData['pubkey'] as String? ?? '';
+                final createdAt = eventData['created_at'] as int? ?? 0;
+                final createdAtIso = createdAt > 0
+                    ? DateTime.fromMillisecondsSinceEpoch(createdAt * 1000, isUtc: true).toIso8601String()
+                    : '';
                 var content = jsonDecode(eventData['content'] as String) as Map<String, dynamic>;
                 
+                final isEncrypted = content['encrypted'] == true && content['encryption'] == 'nip44v2';
+                final outerSenderPubkey = content['senderPubkey'] as String? ?? eventPubkey;
+                
                 // 🔓 Tentar descriptografar se o conteúdo está criptografado com NIP-44
-                if (content['encrypted'] == true && content['encryption'] == 'nip44v2' && adminPrivateKey != null) {
-                  try {
-                    final senderPubkey = content['senderPubkey'] as String? ?? eventData['pubkey'] as String? ?? '';
-                    final payload = content['payload'] as String;
-                    final decrypted = _nip44.decryptBetween(payload, adminPrivateKey, senderPubkey);
-                    content = jsonDecode(decrypted) as Map<String, dynamic>;
-                    broLog('🔓 Evidência descriptografada de ${senderPubkey.substring(0, 8)}');
-                  } catch (e) {
-                    broLog('⚠️ Falha ao descriptografar evidência: $e');
-                    content['description'] = '[Conteúdo criptografado — não foi possível descriptografar]';
-                    content['image'] = null;
+                if (isEncrypted) {
+                  bool decrypted = false;
+                  if (adminPrivateKey != null) {
+                    try {
+                      final payload = content['payload'] as String;
+                      final plain = _nip44.decryptBetween(payload, adminPrivateKey, outerSenderPubkey);
+                      content = jsonDecode(plain) as Map<String, dynamic>;
+                      decrypted = true;
+                      broLog('🔓 Evidência descriptografada de ${outerSenderPubkey.substring(0, 8)}');
+                    } catch (e) {
+                      broLog('⚠️ Falha ao descriptografar evidência: $e');
+                    }
+                  }
+                  if (!decrypted) {
+                    // v-fix: NÃO descartar evidência não-descriptografável.
+                    // orderId/type/senderRole ficam DENTRO do payload cifrado, então
+                    // sem descriptografar o guard antigo descartava tudo silenciosamente.
+                    // Aqui retornamos os metadados disponíveis (o que ficou no relay),
+                    // para o admin ver que a evidência EXISTE mesmo sem a imagem.
+                    content = <String, dynamic>{
+                      'orderId': orderId,
+                      'type': 'bro_dispute_evidence',
+                      'senderPubkey': outerSenderPubkey,
+                      'encrypted': true,
+                      'decryptable': false,
+                      'sentAt': createdAtIso,
+                      'description': adminPrivateKey == null
+                          ? '[Evidência criptografada — faça login com a identidade admin (ADMIN_PUBKEY) para visualizar o conteúdo]'
+                          : '[Evidência criptografada — não foi possível descriptografar com a identidade atual. O conteúdo foi cifrado para o ADMIN_PUBKEY configurado no build.]',
+                      'image': null,
+                    };
+                  } else {
+                    content['decryptable'] = true;
                   }
                 }
                 
                 if (content['orderId'] == orderId && content['type'] == 'bro_dispute_evidence') {
                   // Evitar duplicatas por eventId
-                  final eventId = eventData['id'] as String? ?? '';
                   if (!evidences.any((e) => e['eventId'] == eventId)) {
                     content['eventId'] = eventId;
+                    // Garantir sentAt/senderPubkey para ordenação e exibição
+                    content['sentAt'] = (content['sentAt'] as String?)?.isNotEmpty == true
+                        ? content['sentAt']
+                        : createdAtIso;
+                    content['senderPubkey'] = content['senderPubkey'] ?? outerSenderPubkey;
                     evidences.add(content);
                   }
                 }

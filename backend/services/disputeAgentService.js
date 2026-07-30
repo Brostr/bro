@@ -494,6 +494,38 @@ class DisputeAgentService {
       }
     }
 
+    // v-fix: Status-based comprovante check.
+    // The mediator cannot read the happy-path comprovante (kind 30081, encrypted
+    // to the user only), but the ORDER STATUS reveals whether one was ever sent:
+    //   - stuck at pending/payment_received/accepted → NO comprovante (kind 30081)
+    //   - reached awaiting_confirmation → comprovante WAS submitted, dispute is
+    //     about its validity (verify E2E/amount/date, not its existence)
+    const flowStatus = String(dispute.previous_status || (order && order.status) || '').toLowerCase();
+    const comprovanteSubmitted = !!(order && order.proofReceivedAt) ||
+      flowStatus === 'awaiting_confirmation' || flowStatus === 'completed' ||
+      flowStatus === 'liquidated';
+    const preProofStatuses = ['pending', 'payment_received', 'accepted'];
+
+    if (dispute.openedBy === 'user' && preProofStatuses.includes(flowStatus) && !comprovanteSubmitted) {
+      out.push({
+        id: 'flow_no_comprovante_submitted',
+        severity: 'high',
+        detail: `Ordem parada em '${flowStatus}' sem comprovante (nenhum kind 30081) — provedor não entregou. Escrow deve retornar ao usuário`,
+        scoreDelta: -0.20,
+        favors: 'user',
+      });
+    }
+
+    if (flowStatus === 'awaiting_confirmation') {
+      out.push({
+        id: 'flow_comprovante_awaiting_confirmation',
+        severity: 'medium',
+        detail: "Comprovante submetido e ordem chegou a 'awaiting_confirmation' — disputa é sobre a VALIDADE do comprovante; verificar E2E/valor/data antes de decidir",
+        scoreDelta: 0.0,
+        favors: 'neutral',
+      });
+    }
+
     // No evidence at all from disputer
     const hasEvidence = !!(dispute.user_evidence_nip44 && dispute.user_evidence_nip44.length > 100);
     if (!hasEvidence) {

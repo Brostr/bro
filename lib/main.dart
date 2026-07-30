@@ -701,6 +701,20 @@ class BroApp extends StatelessWidget {
               if (breezProvider.isInitialized) {
                 final decoded = await breezProvider.decodeInvoice(providerInvoice);
                 if (decoded != null && decoded['success'] == true) {
+                  // v622: proteção anti-carol — NÃO tentar pagar invoice EXPIRADO.
+                  // Pagar um invoice vencido faz o SDK emitir "Pagamento falhou"
+                  // (notificação chata que aparecia toda madrugada). Se expirou,
+                  // pulamos silenciosamente; o provedor renova o invoice a cada
+                  // 30min e o pagamento acontece assim que chega um fresco.
+                  final tsSecs = int.tryParse(decoded['invoice']?['timestamp']?.toString() ?? '0') ?? 0;
+                  final expSecs = int.tryParse(decoded['invoice']?['expiry']?.toString() ?? '0') ?? 0;
+                  if (tsSecs > 0 && expSecs > 0) {
+                    final expiresAt = DateTime.fromMillisecondsSinceEpoch((tsSecs + expSecs) * 1000);
+                    if (DateTime.now().isAfter(expiresAt)) {
+                      broLog('⏳ [AutoPay-Main] Invoice EXPIRADO em $expiresAt — pulando sem tentar pagar (aguardando invoice fresco do provedor).');
+                      return false;
+                    }
+                  }
                   final invoiceSats = int.tryParse(decoded['invoice']?['amountSats']?.toString() ?? '0') ?? 0;
                   if (invoiceSats <= 0) {
                     broLog('🚨 [AutoPay-Main] BLOQUEADO: invoice com 0 sats! Aguardando invoice válido.');
@@ -710,11 +724,18 @@ class BroApp extends StatelessWidget {
                     broLog('🚨 [AutoPay-Main] BLOQUEADO: invoice inflado! $invoiceSats > $maxAllowed (esperado ~$expectedWithFee). Aguardando novo invoice do provedor.');
                     return false;
                   }
+                  // v621: NÃO adiar mais invoices ABAIXO do esperado. O invoice é
+                  // assinado pelo provedor (evento bro_complete) e um valor menor só
+                  // beneficia o comprador — sem vetor de ataque. Bloquear aqui deixava
+                  // o PROVEDOR SEM RECEBER (ordem marcada "liquidada" mas auto-pagamento
+                  // adiado p/ sempre) quando order.btcAmount ficou poluído com base+5%
+                  // (bug de taxa composta) → esperado inflado rejeitava o invoice correto
+                  // base+3%. Mantemos só o teto anti-inflação (maxAllowed) e o >0.
                   if (invoiceSats < minAllowed) {
-                    broLog('⚠️ [AutoPay-Main] ADIADO: invoice abaixo do esperado ($invoiceSats < $minAllowed). Provedor com versão antiga? Aguardando atualização.');
-                    return false;
+                    broLog('⚠️ [AutoPay-Main] Invoice abaixo do esperado ($invoiceSats < $minAllowed) — pagando mesmo assim (valor autorizado pelo provedor, sem risco p/ comprador).');
+                  } else {
+                    broLog('✅ [AutoPay-Main] Invoice validado: $invoiceSats sats (esperado ~$expectedWithFee, range $minAllowed-$maxAllowed)');
                   }
-                  broLog('✅ [AutoPay-Main] Invoice validado: $invoiceSats sats (esperado ~$expectedWithFee, range $minAllowed-$maxAllowed)');
                 }
               }
             } catch (e) {
@@ -739,8 +760,12 @@ class BroApp extends StatelessWidget {
                 if (payResult != null && payResult['success'] == true) {
                   broLog('✅ [AutoPay-Main] Pagamento OK na tentativa $attempt');
                   // Pagar taxa da plataforma
-                  final amountSats = (order.metadata?['amountSats'] as num?)?.toInt()
-                      ?? (order.btcAmount * 100000000).round();
+                  // v621: taxa da plataforma = 2% da BASE (order.btcAmount). Antes usava
+                  // metadata['amountSats'] que em fluxos wallet guardava o TOTAL (base+5%),
+                  // cobrando 2% do total (~2.1% da base) e deixando o comprador levemente
+                  // curto. Derivar da base garante comprador paga exatamente base+5%
+                  // (provider base+3% + plataforma 2%), com a plataforma absorvendo roteamento.
+                  final amountSats = (order.btcAmount * 100000000).round();
                   if (AppConfig.platformLightningAddress.isNotEmpty && amountSats > 0) {
                     await PlatformFeeService.sendPlatformFee(
                       orderId: orderId,

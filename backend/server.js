@@ -150,6 +150,40 @@ cron.schedule('*/5 * * * *', async () => {
   }
 });
 
+// ============================================
+// Download do APK (público, sem auth)
+// ============================================
+// Corrige o link "Baixar" (do site www.brostr.app e de builds antigos do app)
+// que apontava para api.brostr.app e caía no 404 "Endpoint não encontrado".
+// Redireciona (302) sempre para o APK mais recente publicado no GitHub Releases.
+const LATEST_APK_URL =
+  'https://github.com/Quizzicarol/bro-app/releases/latest/download/bro-latest.apk';
+const RELEASES_PAGE_URL =
+  'https://github.com/Quizzicarol/bro-app/releases/latest';
+
+app.get(
+  [
+    '/download',
+    '/download/apk',
+    '/apk',
+    '/apk/latest',
+    '/latest',
+    '/app/latest',
+    '/app-release.apk',
+    '/bro-latest.apk',
+    '/baixar',
+  ],
+  generalLimiter,
+  (req, res) => {
+    res.redirect(302, LATEST_APK_URL);
+  },
+);
+
+// Página de releases (para escolher uma versão manualmente)
+app.get(['/releases', '/release'], generalLimiter, (req, res) => {
+  res.redirect(302, RELEASES_PAGE_URL);
+});
+
 // Tratamento de erro 404
 app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint não encontrado' });

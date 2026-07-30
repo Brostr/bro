@@ -219,15 +219,18 @@ class BrixRelayService {
       broLog('[BRIX-RELAY] Poll #$_pollCount (running=$_running, fcmRegistered=$_fcmRegistered, pubkey=${_pubkey?.substring(0, 8) ?? "null"})');
     }
 
-    // Retry FCM registration every ~30s (20 polls) until successful
-    if ((!_fcmRegistered || !_backendFcmRegistered) && _pollCount % 20 == 1) {
+    // Retry FCM registration every ~30s until successful.
+    // v620: poll passou de 1.5s→5s (v535) mas o módulo continuava 20, o que
+    // esticou o retry real para ~100s. % 6 com poll de 5s = ~30s (intenção original).
+    if ((!_fcmRegistered || !_backendFcmRegistered) && _pollCount % 6 == 1) {
       _ensureFcmRegistered();
     }
 
-    // v524: Every ~2min, verify the backend ACTUALLY has our token.
-    // Protects against silent deregistration (e.g. FCM rotates token without
-    // firing onTokenRefresh, or server evicts stale tokens).
-    if (_backendFcmRegistered && _pollCount % 80 == 1) {
+    // v524: A cada ~2min, verifica se o backend REALMENTE tem nosso token.
+    // Protege contra deregistro silencioso (FCM rotaciona sem disparar
+    // onTokenRefresh, ou servidor descarta tokens antigos).
+    // v620: % 24 com poll de 5s = ~120s (antes % 80 = ~6,7min por causa do 5s).
+    if (_backendFcmRegistered && _pollCount % 24 == 1) {
       unawaited(_verifyBackendRegistration());
     }
 

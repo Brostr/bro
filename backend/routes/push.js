@@ -41,7 +41,15 @@ const ALLOWED_TYPES = new Set(['order_update', 'brix_invoice_request']);
 // to be open. Plaintext billCode in kind 30078 still works for backward compat.
 // v576: 'app_update_available' is a self-addressed informational push so the
 // server can nudge users on outdated builds (pre-v575) to update.
-const ALLOWED_SUBTYPES = new Set(['accepted', 'accept_relay', 'app_update_available', 'billcode_encrypted', 'payment_received', 'completed', 'disputed', 'cancelled']);
+// v622: 'autopay_nudge' is a SILENT data-only push sent to the ORDER CREATOR
+// (buyer) right after the provider republishes a fresh invoice for a liquidated
+// order. It wakes the buyer's app so it syncs and auto-pays the provider NOW
+// instead of waiting for the next 15min background poll. No visible notification
+// (would be spammy every 30min) — kept data-only like accept_relay.
+const ALLOWED_SUBTYPES = new Set(['accepted', 'accept_relay', 'app_update_available', 'billcode_encrypted', 'payment_received', 'completed', 'disputed', 'cancelled', 'autopay_nudge']);
+
+// v622: subtypes that must stay SILENT (data-only) — no visible notification.
+const SILENT_SUBTYPES = new Set(['autopay_nudge']);
 
 /**
  * POST /push/register-token
@@ -213,7 +221,7 @@ router.post('/notify', notifyLimiter, async (req, res) => {
   // Build notification for order_update → guaranteed background delivery
   // BRIX invoice requests stay data-only (need silent background processing)
   let notification = null;
-  if (type === 'order_update') {
+  if (type === 'order_update' && !SILENT_SUBTYPES.has(subtype)) {
     const notifMap = {
       accepted:           { title: '🤝 Ordem aceita!',        body: 'Um Bro aceitou sua ordem' },
       payment_received:   { title: '📸 Comprovante recebido!', body: 'Verifique o comprovante e confirme' },

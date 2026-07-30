@@ -1992,7 +1992,12 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
     // v560: Usar fórmula canônica (baseSats × 3%) — mesma usada pelo Bro ao
     // gerar o invoice e pelo AutoPay (main.dart) ao validar. Antes usávamos
     // providerFeeBrl / btcPrice que dava off-by-one e travava confirmação.
-    final baseSats = widget.amountSats;
+    // v621: base = order.btcAmount (fonte canônica). widget.amountSats pode conter
+    // o TOTAL (base+5%) em fluxos wallet/lightning; usar btcAmount garante que o
+    // "valor da conta" e a taxa de 3% batam com o invoice do Bro (base+3%).
+    final baseSats = (fullOrder != null && fullOrder.btcAmount > 0)
+        ? (fullOrder.btcAmount * 100000000).round()
+        : widget.amountSats;
     var providerFeeSats = (baseSats * AppConfig.providerFeePercent).round();
     if (providerFeeSats < 1 && baseSats > 0) providerFeeSats = 1;
     final totalSats = baseSats + providerFeeSats;
@@ -2033,7 +2038,7 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
             // Valor da conta em sats
             _buildDetailRow(
               l.t('order_detail_bill_value'),
-              '${widget.amountSats} sats',
+              '$baseSats sats',
             ),
             // Taxa do provedor Bro
             if (providerFeeSats > 0) ...[
@@ -2722,9 +2727,33 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
           errorBuilder: (context, error, stackTrace) => _buildImageError(l.tp('order_error_load_file', {'error': error.toString()})),
         );
       } else {
-        return _buildImageError(l.tp('order_error_file_not_found', {'path': imageUrl}));
+        // O valor recebido não é imagem/base64/URL nem um arquivo local existente.
+        // Caso típico: provedor em versão antiga publicou o CAMINHO local da imagem
+        // (que só existe no aparelho dele) em vez dos bytes em base64.
+        return _buildOldVersionProofNotice();
       }
     }
+  }
+
+  /// Aviso amigável quando o comprovante chegou num formato não exibível
+  /// (ex.: caminho de arquivo enviado por uma versão antiga do app do provedor).
+  Widget _buildOldVersionProofNotice() {
+    final l = AppLocalizations.of(context)!;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(Icons.image_not_supported_outlined, color: Colors.white54, size: 64),
+        const SizedBox(height: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Text(
+            l.t('order_proof_old_version'),
+            style: const TextStyle(color: Colors.white70, fontSize: 14),
+            textAlign: TextAlign.center,
+          ),
+        ),
+      ],
+    );
   }
 
   /// Verifica se uma string parece ser base64 de imagem
@@ -4460,11 +4489,24 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
               decoded['invoice']?['amountSats']?.toString() ?? '0'
             ) ?? 0;
             // Expected: base + 3% provider fee
-            final baseSats = widget.amountSats;
+            // v621: base = order.btcAmount (fonte canônica — mesma usada pelo Bro
+            // ao gerar o invoice e pelo AutoPay em main.dart). widget.amountSats
+            // podia conter o TOTAL (base+5%) em fluxos wallet/lightning, o que
+            // bloqueava o invoice correto do Bro (base+3%) como "abaixo do esperado".
+            final baseSats = (order != null && order.btcAmount > 0)
+                ? (order.btcAmount * 100000000).round()
+                : widget.amountSats;
             final expectedWithFee = baseSats + (baseSats * AppConfig.providerFeePercent).round();
             final maxAllowed = (expectedWithFee * 1.03).ceil();
-            final minAllowed = (expectedWithFee * 0.97).floor(); // Mínimo 97% do esperado
-            if (invoiceAmountSats <= 0 || invoiceAmountSats > maxAllowed || invoiceAmountSats < minAllowed) {
+            final minAllowed = (expectedWithFee * 0.97).floor(); // referência p/ log
+            // v621: bloquear SÓ invoice inflado (ataque) ou 0. Um invoice ABAIXO do
+            // esperado é assinado pelo provedor e só beneficia o comprador — bloquear
+            // deixava o provedor sem receber quando order.btcAmount ficou poluído com
+            // base+5% (bug de taxa composta). Pagamos o valor que o provedor pediu.
+            if (invoiceAmountSats < minAllowed && invoiceAmountSats > 0 && invoiceAmountSats <= maxAllowed) {
+              broLog('⚠️ Invoice abaixo do esperado ($invoiceAmountSats < $minAllowed) — pagando mesmo assim (valor autorizado pelo provedor).');
+            }
+            if (invoiceAmountSats <= 0 || invoiceAmountSats > maxAllowed) {
               final isInflated = invoiceAmountSats > maxAllowed;
               broLog('🚨 SEGURANÇA: Invoice com valor ${isInflated ? "inflado" : "incorreto"}! invoice=$invoiceAmountSats esperado=$expectedWithFee');
               if (mounted) {

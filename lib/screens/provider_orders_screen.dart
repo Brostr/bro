@@ -43,7 +43,7 @@ class ProviderOrdersScreen extends StatefulWidget {
 }
 
 class _ProviderOrdersScreenState extends State<ProviderOrdersScreen> with SingleTickerProviderStateMixin {
-  final EscrowService _escrowService = EscrowService();
+  // NOTA: usamos apenas EscrowService.providerFeePercent (estático) nesta tela.
   final NotificationService _notificationService = NotificationService();
   final LocalCollateralService _collateralService = LocalCollateralService();
   

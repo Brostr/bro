@@ -1087,6 +1087,16 @@ class OrderProvider with ChangeNotifier {
       final providerFee = amount * AppConfig.providerFeePercent;
       final platformFee = amount * AppConfig.platformFeePercent;
       final total = amount + providerFee + platformFee;
+
+      // v621: btcAmount DEVE ser SEMPRE a BASE (valor da conta), consistente com
+      // `amount`. Alguns fluxos (wallet/lightning/onchain) passavam btcAmount JA com
+      // as taxas embutidas (base+5%), fazendo o invoice do Bro (base+3%) e a taxa da
+      // plataforma (2%) serem calculados EM CIMA do total — cobrando ~10% do comprador
+      // em vez dos 5% acordados. Derivar da base garante: provider=base+3%,
+      // plataforma=base+2%, comprador paga base+5% (plataforma absorve roteamento).
+      // O caminho de ordem estrangeira (_createForeignOrder) ja passava base — este
+      // derive apenas alinha os demais fluxos sem quebrar aquele.
+      final double baseBtcAmount = (btcPrice > 0) ? (amount / btcPrice) : btcAmount;
       
       // ðŸ�?�¥ SIMPLIFICADO: Status 'pending' = Aguardando Bro
       // A ordem j�?¡ est�?¡ paga (invoice/endere�?§o j�?¡ foi criado)
@@ -1097,7 +1107,7 @@ class OrderProvider with ChangeNotifier {
         billCode: billCode,
         currency: currency.toUpperCase(),
         amount: amount,
-        btcAmount: btcAmount,
+        btcAmount: baseBtcAmount,
         btcPrice: btcPrice,
         providerFee: providerFee,
         platformFee: platformFee,
@@ -2932,6 +2942,23 @@ class OrderProvider with ChangeNotifier {
         'completed',
         'awaiting_confirmation',
       };
+      // v622: Reabilitar ordens marcadas 'stale' pelo antigo corte de 48h.
+      // Essas nunca foram pagas de verdade — só puladas por idade — deixando
+      // o provedor sem sats (ex: order 9f3986a6). Limpamos os flags para que
+      // voltem a ser elegíveis; pagar invoice expirado agora é evitado no
+      // onAutoPayLiquidation (checa expiry e pula silenciosamente).
+      bool clearedAnyStale = false;
+      for (int i = 0; i < _orders.length; i++) {
+        final m = _orders[i].metadata;
+        if (m != null && m['autoPaymentReconciledStale'] == true) {
+          final cleaned = Map<String, dynamic>.from(m);
+          cleaned.remove('autoPaymentReconciledStale');
+          cleaned['autoPaymentCompleted'] = false;
+          _orders[i] = _orders[i].copyWith(metadata: cleaned);
+          clearedAnyStale = true;
+        }
+      }
+      if (clearedAnyStale) await _saveOrders();
       final unpaidLiquidated = _orders.where((order) {
         if (!autopayEligibleStatuses.contains(order.status)) return false;
         // Sou o criador da ordem (usu�rio que precisa pagar)
@@ -2953,37 +2980,14 @@ class OrderProvider with ChangeNotifier {
           final hasInvoiceCandidate = (meta['providerInvoice'] != null && meta['providerInvoice'].toString().isNotEmpty);
           if (!hasProof && !hasInvoiceCandidate) return false;
         }
-        // v592: hard cutoff — não tentar auto-pagar ordens muito antigas.
-        // Bug observado em carol/v587: order completed em 02/abril ficou
-        // re-tentando pagar invoice expirado todo dia (carteira mostrava
-        // "Pagamento de Conta failed" às 02h). Se a ordem tem mais de 48h
-        // e não foi auto-paga até agora, claramente foi paga manualmente
-        // (ou abandonada) — tratar como já reconciliada.
-        try {
-          final updatedAtStr = order.metadata?['updatedAt']?.toString()
-              ?? order.metadata?['lastUpdate']?.toString();
-          final ts = updatedAtStr != null
-              ? DateTime.tryParse(updatedAtStr)
-              : null;
-          final reference = ts ?? order.createdAt;
-          final ageHours = DateTime.now().difference(reference).inHours;
-          if (ageHours > 48) {
-            broLog('[AutoPay] Ordem ${order.id.substring(0, 8)} muito antiga (${ageHours}h) — marcando como reconciliada e pulando');
-            // Marcar in-memory + persistir para nunca mais tentar
-            final index = _orders.indexWhere((o) => o.id == order.id);
-            if (index != -1) {
-              _orders[index] = _orders[index].copyWith(
-                metadata: {
-                  ...(_orders[index].metadata ?? {}),
-                  'autoPaymentCompleted': true,
-                  'autoPaymentReconciledStale': true,
-                  'autoPaymentAt': DateTime.now().toIso8601String(),
-                },
-              );
-            }
-            return false;
-          }
-        } catch (_) {}
+        // v622: REMOVIDO o corte de 48h que abandonava o provedor.
+        // Antes: ordens > 48h eram marcadas 'reconciled/stale' e nunca mais
+        // pagas → provedor ficava sem sats (ex: order 9f3986a6). A proteção
+        // contra o bug da carol (retentar invoice EXPIRADO toda madrugada →
+        // notificação "Pagamento falhou") agora é feita no onAutoPayLiquidation:
+        // ele decodifica o invoice e PULA silenciosamente se estiver expirado,
+        // sem tentar pagar. Assim a ordem permanece elegível e auto-cura assim
+        // que o provedor republica um invoice fresco (renovação a cada 30min).
         return true;
       }).toList();
       
@@ -3113,9 +3117,24 @@ class OrderProvider with ChangeNotifier {
               );
             }
             broLog('[InvoiceRefresh] ? Invoice refreshed para ${order.id.substring(0, 8)}');
+            // v622: "cutução" — acordar o app do comprador para pagar o invoice
+            // fresco AGORA, em vez de esperar o próximo poll (15min). O push
+            // order_update (silencioso) dispara sync → _autoPayLiquidatedOrders
+            // no lado dele. Sem notificação visível (seria spam a cada 30min).
+            final buyerPubkey = order.userPubkey ?? '';
+            if (buyerPubkey.isNotEmpty && buyerPubkey != _currentUserPubkey) {
+              _apiService.notifyUser(
+                targetPubkey: buyerPubkey,
+                type: 'order_update',
+                subtype: 'autopay_nudge',
+                orderId: order.id,
+              ).then((ok) {
+                broLog('[InvoiceRefresh] Cutução p/ comprador ${buyerPubkey.substring(0, 8)}: ${ok ? "enviado" : "falhou"}');
+              }).catchError((_) => false);
+            }
           }
         } catch (e) {
-          broLog('[InvoiceRefresh] ? Erro para ${order.id.substring(0, 8)}: $e');
+          broLog('[InvoiceRefresh] ⚠️ Erro para ${order.id.substring(0, 8)}: $e');
         }
       }
 
@@ -3874,7 +3893,18 @@ class OrderProvider with ChangeNotifier {
               final isExistingDecrypted = existingProof != null && 
                   existingProof.isNotEmpty && 
                   !existingProof.startsWith('[encrypted:');
-              
+
+              // v620: Ancorar o timer de auto-liquidação (36h) no timestamp REAL do
+              // evento Nostr (created_at), NÃO no horário de sync. Antes usávamos
+              // DateTime.now(), que reescrevia a âncora a cada sync — o relógio de 36h
+              // "andava pra frente" e podia atrasar (ou nunca disparar) a liquidação.
+              // created_at é determinístico, então o mesmo evento sempre resolve o
+              // mesmo horário. Mesmo padrão de nostr_order_service.dart (v584).
+              final proofCreatedAtSec = update['created_at'] as int?;
+              final proofTimeIso = proofCreatedAtSec != null
+                  ? DateTime.fromMillisecondsSinceEpoch(proofCreatedAtSec * 1000).toIso8601String()
+                  : DateTime.now().toIso8601String();
+
               updatedMetadata = {
                 ...?existing.metadata,
                 if (decryptedProofImage != null) 'proofImage': decryptedProofImage,
@@ -3887,7 +3917,11 @@ class OrderProvider with ChangeNotifier {
                 if (proofImageNip44 != null) 'proofImage_nip44': proofImageNip44,
                 if (senderPubkey != null) 'proofImage_senderPubkey': senderPubkey,
                 if (update['encryption'] != null) 'encryption': update['encryption'],
-                'proofReceivedAt': DateTime.now().toIso8601String(),
+                // v620: timestamp do evento (determinístico) em vez de DateTime.now().
+                // receipt_submitted_at é a âncora primária da auto-liquidação; preservar
+                // valor canônico já existente se houver.
+                'proofReceivedAt': proofTimeIso,
+                'receipt_submitted_at': existing.metadata?['receipt_submitted_at'] ?? proofTimeIso,
               };
             } else {
               updatedMetadata = existing.metadata;
