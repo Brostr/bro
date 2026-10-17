@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../providers/provider_balance_provider.dart';
 import '../providers/breez_provider_export.dart';
 import '../models/provider_balance.dart';
+import '../services/input_validation_service.dart';
 import '../services/nostr_service.dart';
 
 /// Tela para visualizar saldo e histórico do provedor
@@ -640,7 +641,7 @@ class _ProviderBalanceScreenState extends State<ProviderBalanceScreen> {
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: Row(
           children: [
             const Icon(Icons.currency_bitcoin, color: Colors.deepOrange),
@@ -681,7 +682,7 @@ class _ProviderBalanceScreenState extends State<ProviderBalanceScreen> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: Text(l.t('cancel')),
           ),
           ElevatedButton(
@@ -710,13 +711,30 @@ class _ProviderBalanceScreenState extends State<ProviderBalanceScreen> {
                 return;
               }
 
-              Navigator.pop(context);
+              final addressValidation =
+                  InputValidationService().validateBitcoinAddress(address);
+              if (!addressValidation.isValid) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      addressValidation.error ?? 'Endereço Bitcoin inválido',
+                    ),
+                  ),
+                );
+                return;
+              }
+
+              Navigator.pop(dialogContext);
 
               try {
-                await balanceProvider.withdrawOnchain(
+                final sent = await balanceProvider.withdrawOnchain(
                   amountSats: amount.toDouble(),
-                  address: address,
+                  address: addressValidation.sanitizedValue ?? address,
                 );
+
+                if (!sent) {
+                  throw Exception(balanceProvider.error ?? 'Saque onchain falhou');
+                }
 
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
