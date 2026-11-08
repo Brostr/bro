@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:provider/provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'dart:async';
 import '../providers/breez_provider_export.dart';
 import '../providers/order_provider.dart';
@@ -156,6 +157,35 @@ class _OnchainPaymentScreenState extends State<OnchainPaymentScreen> {
         content: Text('$label copiado!'),
         backgroundColor: const Color(0xFF4CAF50),
         duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _openAddressInExplorer() async {
+    final uri = Uri(
+      scheme: 'https',
+      host: 'mempool.space',
+      pathSegments: ['address', widget.address],
+    );
+
+    try {
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!launched) _showExplorerError();
+    } catch (e) {
+      // Do not log the full exception because platform errors can include
+      // the URL and therefore the user's Bitcoin address.
+      broLog('❌ Erro ao abrir explorador: ${e.runtimeType}');
+      _showExplorerError();
+    }
+  }
+
+  void _showExplorerError() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Não foi possível abrir o explorador. Tente novamente.'),
+        backgroundColor: Colors.red,
       ),
     );
   }
@@ -385,6 +415,11 @@ class _OnchainPaymentScreenState extends State<OnchainPaymentScreen> {
                 IconButton(
                   icon: const Icon(Icons.copy, color: Color(0xFF4CAF50)),
                   onPressed: () => _copyToClipboard(widget.address, 'Endereço'),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.open_in_new, color: Color(0xFF4CAF50)),
+                  tooltip: 'Abrir no explorador',
+                  onPressed: _openAddressInExplorer,
                 ),
               ],
             ),
