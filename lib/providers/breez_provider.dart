@@ -752,8 +752,12 @@ class BreezProvider with ChangeNotifier {
 
       return {
         'paid': isPaid,
-        'status': payment.status.toString(),
+        'status': payment.status.name,
         'amountSats': payment.amount.toString(),
+        'paymentHash': paymentHash,
+        'direction': payment.paymentType == spark.PaymentType.receive
+            ? 'receive'
+            : 'send',
       };
     } catch (e) {
       broLog('?? Erro checking payment: $e');
@@ -1144,7 +1148,12 @@ class BreezProvider with ChangeNotifier {
   /// (a carteira é formada por sats livres + sats travados em escrow). Sem isso,
   /// um comprador honesto ficava travado em "saldo insuficiente" mesmo tendo
   /// pago o escrow (caso real: ordem 3dd5cb49).
-  Future<Map<String, dynamic>?> payInvoice(String bolt11, {int? amountSats, int escrowCoverSats = 0}) async {
+  Future<Map<String, dynamic>?> payInvoice(
+    String bolt11, {
+    int? amountSats,
+    int escrowCoverSats = 0,
+    String? idempotencyKey,
+  }) async {
     if (!_isInitialized || _sdk == null) {
       return {'success': false, 'error': 'SDK não inicializado'};
     }
@@ -1244,6 +1253,7 @@ class BreezProvider with ChangeNotifier {
       final sendReq = spark.SendPaymentRequest(
         prepareResponse: prepareResp,
         options: null,
+        idempotencyKey: idempotencyKey,
       );
 
       broLog('📤 Enviando pagamento... (aguarde até 60s para roteamento)');

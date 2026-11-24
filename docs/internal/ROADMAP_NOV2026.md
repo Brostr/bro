@@ -5,13 +5,15 @@
 
 Prazo: tudo entregue e aprovado até **30/nov**.
 
-## Estabilização v846 — BRIX e taxas (24/11)
+## Estabilização v847 — BRIX e taxas (24/11)
 
 - R3/expiração automática de aceites permanece **descartado** nesta linha; não reintroduzir com as correções de estabilização ou performance.
 - BRIX: o evento Spark pode persistir o recebimento antes do claim autenticado. O merge por `paymentHash` agora enriquece o mesmo registro com bruto/taxa do servidor, inclusive quando o SDK já contém a transação. Leitura/merge/escrita são serializados para não perder metadados ou pagamentos concorrentes.
 - Taxa da plataforma: os caminhos AutoPay/Winner/Reconcile com provedor já liquidado também reconciliam a taxa. Hash salvo não confirmado na carteira é fail-closed: não autoriza nova cobrança. O Winner mantém a pendência para retry se a taxa não puder ser confirmada.
 - Build interno do Codemagic passa a ser somente manual; pushes em `test/*` não consomem minutos macOS automaticamente.
-- Validação local: gate `test/race test/integration` **105/105**; segunda revisão independente sem achados restantes. Liberação externa ainda depende de validação real Android/iOS e aprovação da Carol.
+- Taxa BRIX online: máquina de estados persistente (`awaitingPaymentHash`, `awaitingReceipt`, `sending`, `pendingSettlement`). Nenhum envio por tempo ou por invoice apenas criada; recebimento exige hash/direção/valor liquidados. Envio exige invoice com valor exato e persistência prévia. Timeout/crash reconcilia a mesma invoice/key; falha ambígua preserva a tentativa original.
+- A 846 foi descartada antes de instalação por ainda conter o envio BRIX temporizado. A 847 substitui esse identificador.
+- Validação local: gate `test/race test/integration` **133/133**; análise dos arquivos da recuperação sem problemas; revisão independente final sem achados significativos. Testes financeiros com mocks, sem pagamentos reais. Liberação externa ainda depende de validação real Android/iOS e aprovação da Carol.
 
 ---
 
