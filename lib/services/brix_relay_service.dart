@@ -426,7 +426,7 @@ class BrixRelayService {
 
             if (ok) {
               final paymentHash = invoiceResult['paymentHash'] as String?;
-              final feeSats = (request.amountSats * AppConfig.brixFeePercent).round();
+              final feeSats = calculateBrixFee(request.amountSats);
               if (feeSats > 0) {
                 await _queueBrixFee(
                   requestId: request.id,
@@ -534,6 +534,7 @@ class BrixRelayService {
   // could re-pay the 0.5% BRIX fee for a still-pending request id).
   final Set<String> _paidFees = {};
   static const _paidFeesKey = 'brix_paid_fee_request_ids';
+  static const _settledFeeHashesKey = 'brix_settled_fee_payment_hashes';
   bool _paidFeesLoaded = false;
   // v661: Track claims to prevent duplicates — agora PERSISTENTE. Antes era só
   // em memória: se o app crashava/fechava entre marcar o pagamento como
@@ -566,6 +567,15 @@ class BrixRelayService {
     }
     final saved = await prefs.setStringList(_paidFeesKey, ids);
     if (!saved) throw StateError('Could not persist settled BRIX fees');
+  }
+
+  static Future<Set<String>> getSettledFeePaymentHashes() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return (prefs.getStringList(_settledFeeHashesKey) ?? const <String>[]).toSet();
+    } catch (_) {
+      return <String>{};
+    }
   }
 
   // v661: carregar/persistir os claims (mesmo padrão do _paidFees).
@@ -718,6 +728,13 @@ class BrixRelayService {
   bool _processingFees = false;
   Future<void> _feeStorageLock = Future<void>.value();
   Future<SharedPreferences> Function() _feePrefs = SharedPreferences.getInstance;
+
+  @visibleForTesting
+  static int calculateBrixFee(int amountSats) {
+    if (amountSats <= 1) return 0;
+    final calculated = (amountSats * AppConfig.brixFeePercent).round();
+    return calculated < 1 ? 1 : calculated;
+  }
 
   @visibleForTesting
   static bool isSettledIncomingPayment(
@@ -1040,7 +1057,7 @@ class BrixRelayService {
       paymentHash: feePaymentHash,
       feeSats: fee['feeSats'] as int,
     )) {
-      await _settleBrixFee(requestId);
+      await _settleBrixFee(requestId, paymentHash: feePaymentHash);
       return;
     }
     if (isMissingOutgoingPayment(status)) {
@@ -1065,9 +1082,17 @@ class BrixRelayService {
     }
   }
 
-  Future<void> _settleBrixFee(String requestId) async {
+  Future<void> _settleBrixFee(String requestId, {String? paymentHash}) async {
     await _withFeeStorageLock(() async {
       final prefs = await _feePrefs();
+      if (paymentHash != null && paymentHash.isNotEmpty) {
+        final hashes = prefs.getStringList(_settledFeeHashesKey) ?? <String>[];
+        if (!hashes.contains(paymentHash)) {
+          hashes.add(paymentHash);
+          final saved = await prefs.setStringList(_settledFeeHashesKey, hashes);
+          if (!saved) throw StateError('Could not persist BRIX fee display hash');
+        }
+      }
       final wasPaid = _paidFees.contains(requestId);
       _paidFees.add(requestId);
       try {
@@ -1185,7 +1210,7 @@ class BrixRelayService {
           feeSats: feeSats,
         );
         if (settled) {
-          await _settleBrixFee(requestId);
+          await _settleBrixFee(requestId, paymentHash: feePaymentHash);
           broLog('⚡ [BRIX-RELAY] Fee settled: $feeSats sats');
           return;
         }

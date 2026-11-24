@@ -60,6 +60,7 @@ class _WalletScreenState extends State<WalletScreen> {
   String _lastLanguageCode = 'pt';
   bool _showAllTransactions = false;
   int _sdkPaymentsCount = 0;  // v499: diagnostic
+  Set<String> _brixFeePaymentHashes = <String>{};
 
   /// Total sats queued for outgoing BRIX payments (not yet deducted from wallet).
   /// Excludes expired payments (they were never sent).
@@ -126,6 +127,7 @@ class _WalletScreenState extends State<WalletScreen> {
 
       final balance = await breezProvider.getBalance();
       final payments = await breezProvider.listPayments();
+      _brixFeePaymentHashes = await BrixRelayService.getSettledFeePaymentHashes();
 
       // v673: forense automático — registrar pagamentos GRANDES (>= 500 mil sats)
       // no log local com TODOS os detalhes. Caso 18/out: um envio interno de
@@ -190,7 +192,8 @@ class _WalletScreenState extends State<WalletScreen> {
         // escondido de antes e o item separado da v703).
         final paymentHash = p['paymentHash']?.toString() ?? '';
         if (paymentHash.isNotEmpty) {
-          if (PlatformFeeService.feePaymentHashes.contains(paymentHash)) return false;
+          if (PlatformFeeService.feePaymentHashes.contains(paymentHash) &&
+              !_brixFeePaymentHashes.contains(paymentHash)) return false;
           final opFee = context.read<OrderProvider>();
           if (opFee.orders.any((o) => o.metadata?['feePaymentHash'] == paymentHash)) return false;
         }
@@ -3195,12 +3198,19 @@ class _WalletScreenState extends State<WalletScreen> {
       if (marketplaceProduct.isEmpty) marketplaceProduct = 'Produto';
     }
     
+    final isBrixFee = !isReceived &&
+        _brixFeePaymentHashes.contains(paymentHash);
+
     // Determinar o label e cor baseado no tipo
     String label;
     Color iconColor;
     IconData icon;
     
-    if (isMarketplace) {
+    if (isBrixFee) {
+      label = '⚡ Taxa BRIX (0,5%, mín. 1 sat)';
+      iconColor = Colors.orange;
+      icon = Icons.receipt_long;
+    } else if (isMarketplace) {
       // v246: Transação do Marketplace
       if (isReceived) {
         label = AppLocalizations.of(context).tp('wallet_marketplace_sale', {'product': marketplaceProduct});
@@ -3455,6 +3465,11 @@ class _WalletScreenState extends State<WalletScreen> {
     // on-chain era rotulado "Enviado via Lightning" e virava mistério pro
     // usuário (caso 18/out: registro txid:vout de 5,89M sats rotulado errado).
     final method = payment['method']?.toString() ?? '';
+    final isBrixPayment = payment['isBrix'] == true ||
+        description == 'BRIX Payment' ||
+        description.startsWith('BRIX: ');
+    final isBrixFee = !isReceived &&
+        _brixFeePaymentHashes.contains(paymentHash);
     
     // v411: Extract BRIX memo from description (format: "BRIX: <memo>")
     String? brixMemo;
@@ -3508,7 +3523,7 @@ class _WalletScreenState extends State<WalletScreen> {
     
     // v406: Correlacionar pagamentos ENVIADOS com ordens que eu criei (modo usuário)
     // Quando o usuário cria uma ordem, ele ENVIA sats para o escrow
-    if (!isReceived && correlatedOrder == null) {
+    if (!isReceived && !isBrixFee && correlatedOrder == null) {
       // Tentar correlação por paymentHash
       if (paymentHash.isNotEmpty) {
         try {
@@ -3568,7 +3583,11 @@ class _WalletScreenState extends State<WalletScreen> {
       isGanhoBro = true;
     }
     
-    if (method.contains('withdraw')) {
+    if (isBrixFee) {
+      typeLabel = 'Taxa BRIX (0,5%, mín. 1 sat)';
+      typeColor = Colors.orange;
+      typeIcon = Icons.receipt_long;
+    } else if (method.contains('withdraw')) {
       // v673: saque on-chain rotulado corretamente (não é "envio Lightning")
       typeLabel = AppLocalizations.of(context).t('wallet_type_withdraw_onchain');
       typeColor = Colors.orange;
@@ -3603,7 +3622,7 @@ class _WalletScreenState extends State<WalletScreen> {
     if (!isReceived) {
       final netFeeRaw = payment['fees'];
       detailAmount += netFeeRaw is int ? netFeeRaw : (netFeeRaw is num ? netFeeRaw.toInt() : 0);
-      if (correlatedOrderId != null) {
+      if (!isBrixFee && correlatedOrderId != null) {
         detailAmount += _platformFeeForOrder(correlatedOrderId!, baseSats: baseSats);
       }
     }
@@ -3785,9 +3804,10 @@ class _WalletScreenState extends State<WalletScreen> {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      _buildDetailRow(feeLabel, feeValue),
+                      if (networkFeeSats == null || networkFeeSats > 0)
+                        _buildDetailRow(feeLabel, feeValue),
                       // BRIX: mostrar bruto − taxa = líquido quando disponível
-                      if (isReceived && (payment['isBrix'] == true || description.startsWith('BRIX'))) ...[
+                      if (isReceived && isBrixPayment) ...[
                         Builder(builder: (context) {
                           final feeSats = (payment['feeSats'] as num?)?.toInt() ?? 0;
                           if (feeSats <= 0) return const SizedBox.shrink();
@@ -3807,7 +3827,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       // v706: TODAS as taxas condensadas aqui — Bro provedor
                       // (3%), app Bro (2%) e Spark. A nota embaixo virou uma
                       // linha só; o detalhamento é que explica (pedido Carol).
-                      if (!isReceived && correlatedOrderId != null) ...[
+                      if (!isReceived && !isBrixFee && correlatedOrderId != null) ...[
                         Builder(builder: (context) {
                           final provFee = (baseSats * AppConfig.providerFeePercent).round();
                           if (provFee <= 0) return const SizedBox.shrink();
@@ -3822,7 +3842,7 @@ class _WalletScreenState extends State<WalletScreen> {
                       ],
                       // v704: taxa da plataforma consolidada AQUI no detalhe —
                       // nunca escondida, mas sem virar item separado na lista.
-                      if (!isReceived && correlatedOrderId != null) ...[
+                      if (!isReceived && !isBrixFee && correlatedOrderId != null) ...[
                         Builder(builder: (context) {
                           final pf = _platformFeeForOrder(correlatedOrderId!, baseSats: baseSats);
                           if (pf <= 0) return const SizedBox.shrink();
@@ -3851,7 +3871,11 @@ class _WalletScreenState extends State<WalletScreen> {
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                AppLocalizations.of(context).t('wallet_fees_note'),
+                                isBrixFee
+                                    ? 'Taxa BRIX de 0,5% (mínimo 1 sat), cobrada somente após o recebimento liquidado.'
+                                    : isBrixPayment
+                                        ? 'Recebimento BRIX online: o valor acima é integral. A taxa de 0,5% (mínimo 1 sat) aparece como uma saída separada após liquidar. No recebimento offline, bruto − taxa = líquido.'
+                                        : AppLocalizations.of(context).t('wallet_fees_note'),
                                 style: TextStyle(
                                   color: Colors.white.withOpacity(0.55),
                                   fontSize: 12,

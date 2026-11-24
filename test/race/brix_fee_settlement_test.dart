@@ -80,6 +80,15 @@ void main() {
     );
   });
 
+  group('BRIX fee amount', () {
+    test('uses 0.5% with a one-sat minimum for online and offline rules', () {
+      expect(BrixRelayService.calculateBrixFee(1), 0);
+      expect(BrixRelayService.calculateBrixFee(14), 1);
+      expect(BrixRelayService.calculateBrixFee(200), 1);
+      expect(BrixRelayService.calculateBrixFee(1000), 5);
+    });
+  });
+
   group('outgoing fee settlement', () {
     Map<String, dynamic> payResult(String status) => {
           'success': true,
@@ -640,6 +649,52 @@ void main() {
       expect(await pendingFees(), isEmpty);
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getStringList('brix_paid_fee_request_ids'), [requestId]);
+      expect(prefs.getStringList('brix_settled_fee_payment_hashes'), [feeHash]);
+      expect(await BrixRelayService.getSettledFeePaymentHashes(), {feeHash});
+    });
+
+    test('display hash persists before paid marker and queue removal', () async {
+      final service = BrixRelayService();
+      await queueFee(service);
+      final prefs = await SharedPreferences.getInstance();
+      final writes = <String>[];
+      service.resetFeeStateForTest(
+        preferences: () async => RecordingWritePreferences(prefs, writes),
+      );
+
+      await sendFee(service, (_, __) async => {
+            'success': true,
+            'payment': {
+              'status': 'PaymentStatus.completed',
+              'paymentHash': feeHash,
+              'amount': '1405',
+            },
+          });
+
+      expect(writes, [
+        'brix_pending_fee_payments',
+        'brix_pending_fee_payments',
+        'brix_settled_fee_payment_hashes',
+        'brix_paid_fee_request_ids',
+        'brix_pending_fee_payments',
+      ]);
+    });
+
+    test('settled hash registration survives service restart', () async {
+      final service = BrixRelayService();
+      await queueFee(service);
+      await sendFee(service, (_, __) async => {
+            'success': true,
+            'payment': {
+              'status': 'PaymentStatus.completed',
+              'paymentHash': feeHash,
+              'amount': '1405',
+            },
+          });
+
+      service.resetFeeStateForTest();
+      expect(await BrixRelayService.getSettledFeePaymentHashes(), {feeHash});
+      expect(await pendingFees(), isEmpty);
     });
 
     test('concurrent sends make at most one payment call', () async {
@@ -693,6 +748,34 @@ void main() {
       expect(prefs.getString('second'), 'kept');
     });
   });
+}
+
+class RecordingWritePreferences implements SharedPreferences {
+  RecordingWritePreferences(this._delegate, this.writes);
+
+  final SharedPreferences _delegate;
+  final List<String> writes;
+
+  @override
+  Future<bool> setString(String key, String value) {
+    writes.add(key);
+    return _delegate.setString(key, value);
+  }
+
+  @override
+  Future<bool> setStringList(String key, List<String> value) {
+    writes.add(key);
+    return _delegate.setStringList(key, value);
+  }
+
+  @override
+  String? getString(String key) => _delegate.getString(key);
+
+  @override
+  List<String>? getStringList(String key) => _delegate.getStringList(key);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class FailingWritePreferences implements SharedPreferences {
