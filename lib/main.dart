@@ -998,6 +998,7 @@ class BroApp extends StatelessWidget {
                     await PlatformFeeService.sendPlatformFee(
                       orderId: orderId,
                       totalSats: amountSats,
+                      knownFeeHash: order.metadata?['feePaymentHash'] as String?,
                     );
                   }
                   // v823a: atestar a entrega no relay (preimage = prova
@@ -1027,6 +1028,14 @@ class BroApp extends StatelessWidget {
                   if (evAuto == true) {
                     broLog('✅ [AutoPay-Main] Invoice já pago E liquidado (verificado)');
                     await ProviderPaymentGuard.markPaid(orderId);
+                    final amountSats = (order.btcAmount * 100000000).round();
+                    if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                      await PlatformFeeService.sendPlatformFee(
+                        orderId: orderId,
+                        totalSats: amountSats,
+                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                      );
+                    }
                     return true;
                   }
                   if (evAuto == false) {
@@ -1047,6 +1056,14 @@ class BroApp extends StatelessWidget {
                   if (evAuto2 == true) {
                     broLog('✅ [AutoPay-Main] Invoice já pago E liquidado (exception, verificado)');
                     await ProviderPaymentGuard.markPaid(orderId);
+                    final amountSats = (order.btcAmount * 100000000).round();
+                    if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                      await PlatformFeeService.sendPlatformFee(
+                        orderId: orderId,
+                        totalSats: amountSats,
+                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                      );
+                    }
                     return true;
                   }
                   if (evAuto2 == false) {
@@ -1192,7 +1209,23 @@ class BroApp extends StatelessWidget {
                 broLog('⚠️ [WinnerAutoPay-Main] v820e: flag isPaid SEM evidência settled (verificado) — limpando e pagando o vencedor');
                 await ProviderPaymentGuard.clearPaid(orderId);
               } else {
-                broLog('🛡️ [WinnerAutoPay-Main] Ordem ${orderId.substring(0, 8)} já paga (evidência: ${ev == true ? 'ok' : 'não verificável agora — fail-closed'}) — pulando (anti double-spend)');
+                if (ev == null) {
+                  broLog('🛡️ [WinnerAutoPay-Main] pagamento não verificável — mantendo pendente para retry');
+                  return false;
+                }
+                final amountSats = (order.btcAmount * 100000000).round();
+                if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                  final feePaid = await PlatformFeeService.sendPlatformFee(
+                    orderId: orderId,
+                    totalSats: amountSats,
+                    knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                  );
+                  if (!feePaid) {
+                    broLog('⏳ [WinnerAutoPay-Main] provedor pago, mas taxa não confirmada — mantendo pendente para retry');
+                    return false;
+                  }
+                }
+                broLog('🛡️ [WinnerAutoPay-Main] Ordem ${orderId.substring(0, 8)} já paga e taxa confirmada — concluindo');
                 return true;
               }
             }
@@ -1272,7 +1305,11 @@ class BroApp extends StatelessWidget {
                   // Taxa da plataforma (2% da base, padrão v621)
                   final amountSats = (order.btcAmount * 100000000).round();
                   if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
-                    await PlatformFeeService.sendPlatformFee(orderId: orderId, totalSats: amountSats);
+                    await PlatformFeeService.sendPlatformFee(
+                      orderId: orderId,
+                      totalSats: amountSats,
+                      knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                    );
                   }
                   // v823a: atestar a entrega no relay (preimage = prova
                   // verificável por qualquer um: sha256 == payment_hash)
@@ -1302,7 +1339,11 @@ class BroApp extends StatelessWidget {
                     // sucesso SEM enviar a taxa da plataforma.
                     final amountSats = (order.btcAmount * 100000000).round();
                     if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
-                      await PlatformFeeService.sendPlatformFee(orderId: orderId, totalSats: amountSats);
+                      await PlatformFeeService.sendPlatformFee(
+                        orderId: orderId,
+                        totalSats: amountSats,
+                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                      );
                     }
                     return true;
                   }
@@ -1322,7 +1363,11 @@ class BroApp extends StatelessWidget {
                     await ProviderPaymentGuard.markPaid(orderId);
                     final amountSats = (order.btcAmount * 100000000).round();
                     if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
-                      await PlatformFeeService.sendPlatformFee(orderId: orderId, totalSats: amountSats);
+                      await PlatformFeeService.sendPlatformFee(
+                        orderId: orderId,
+                        totalSats: amountSats,
+                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                      );
                     }
                     return true;
                   }
@@ -1350,7 +1395,15 @@ class BroApp extends StatelessWidget {
             final ev = await verifySettledProviderPayment(orderId);
             if (ev == true) {
               await ProviderPaymentGuard.markPaid(orderId);
-              broLog('✅ [ReconcilePay-Main] ${orderId.substring(0, 8)} já paga (evidência) — só marcando');
+              final amountSats = (order.btcAmount * 100000000).round();
+              if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                await PlatformFeeService.sendPlatformFee(
+                  orderId: orderId,
+                  totalSats: amountSats,
+                  knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                );
+              }
+              broLog('✅ [ReconcilePay-Main] ${orderId.substring(0, 8)} já paga (evidência) — taxa reconciliada');
               return true;
             }
             if (ev == null) {
@@ -1412,7 +1465,11 @@ class BroApp extends StatelessWidget {
                 await ProviderPaymentGuard.markPaid(orderId);
                 final amountSats = (order.btcAmount * 100000000).round();
                 if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
-                  await PlatformFeeService.sendPlatformFee(orderId: orderId, totalSats: amountSats);
+                  await PlatformFeeService.sendPlatformFee(
+                    orderId: orderId,
+                    totalSats: amountSats,
+                    knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                  );
                 }
                 broLog('✅ [ReconcilePay-Main] ${orderId.substring(0, 8)} PAGA na reconciliação');
                 // v823a: atestar a entrega no relay (preimage = prova verificável)
@@ -1439,7 +1496,11 @@ class BroApp extends StatelessWidget {
                   await ProviderPaymentGuard.markPaid(orderId);
                   final amountSats = (order.btcAmount * 100000000).round();
                   if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
-                    await PlatformFeeService.sendPlatformFee(orderId: orderId, totalSats: amountSats);
+                    await PlatformFeeService.sendPlatformFee(
+                      orderId: orderId,
+                      totalSats: amountSats,
+                      knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                    );
                   }
                   return true;
                 }

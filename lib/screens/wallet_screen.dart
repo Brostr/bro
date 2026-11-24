@@ -25,6 +25,20 @@ import '../services/brix_relay_service.dart';
 import 'provider_order_detail_screen.dart';
 import 'user_order_detail_screen.dart';
 
+@visibleForTesting
+Map<String, dynamic> mergeBrixWalletPayment(
+    Map<String, dynamic> sdkPayment, Map<String, dynamic> localPayment) {
+  final merged = Map<String, dynamic>.from(sdkPayment);
+  final localFee = (localPayment['feeSats'] as num?)?.toInt() ?? 0;
+  final sdkFee = (merged['feeSats'] as num?)?.toInt() ?? 0;
+  if (localFee > 0 && sdkFee == 0) {
+    merged['feeSats'] = localFee;
+    merged['grossAmountSats'] = localPayment['grossAmountSats'];
+  }
+  if (localFee > 0 || sdkFee > 0) merged['isBrix'] = true;
+  return merged;
+}
+
 /// Tela de Carteira Lightning - Apenas BOLT11 (invoice)
 /// Funções: Ver saldo, Enviar pagamento, Receber (gerar invoice)
 class WalletScreen extends StatefulWidget {
@@ -288,7 +302,14 @@ class _WalletScreenState extends State<WalletScreen> {
           int added = 0;
           for (final bp in localBrix) {
             final bpHash = bp['paymentHash']?.toString() ?? '';
-            if (bpHash.isNotEmpty && existingHashes.contains(bpHash)) continue;
+            if (bpHash.isNotEmpty && existingHashes.contains(bpHash)) {
+              final index = allPayments.indexWhere(
+                  (p) => p['paymentHash']?.toString() == bpHash);
+              if (index != -1) {
+                allPayments[index] = mergeBrixWalletPayment(allPayments[index], bp);
+              }
+              continue;
+            }
             // Also dedup by amount+timestamp (for entries without hash)
             final bpAmount = bp['amountSats'] ?? 0;
             final bpTs = bp['createdAt']?.toString() ?? '';

@@ -575,12 +575,54 @@ class BrixRelayService {
     } catch (_) {}
   }
 
+  @visibleForTesting
+  static bool mergeBrixPayment(List<dynamic> payments, Map<String, dynamic> incoming) {
+    final hash = incoming['paymentHash']?.toString() ?? '';
+    final index = hash.isEmpty
+        ? -1
+        : payments.indexWhere((p) => p is Map && p['paymentHash']?.toString() == hash);
+    if (index == -1) {
+      payments.add(incoming);
+      return true;
+    }
+
+    final existing = Map<String, dynamic>.from(payments[index] as Map);
+    final existingFee = (existing['feeSats'] as num?)?.toInt() ?? 0;
+    final incomingFee = (incoming['feeSats'] as num?)?.toInt() ?? 0;
+    final existingGross = (existing['grossAmountSats'] as num?)?.toInt() ?? 0;
+    final incomingGross = (incoming['grossAmountSats'] as num?)?.toInt() ?? 0;
+    if (existingFee > 0 && incomingFee > 0 &&
+        (existingFee != incomingFee || existingGross != incomingGross)) {
+      broLog('⚠️ [BRIX] Conflicting fee metadata ignored for hash ${hash.substring(0, hash.length > 8 ? 8 : hash.length)}');
+      return false;
+    }
+    if (existingFee > 0 && incomingFee == 0) return false;
+
+    // O evento Spark pode chegar antes do claim. Nesse caso, enriquecer o
+    // mesmo registro com os valores autenticados do servidor, sem duplicá-lo.
+    if (incomingFee > 0) {
+      existing['feeSats'] = incomingFee;
+      existing['grossAmountSats'] = incomingGross;
+    }
+    existing['isBrix'] = true;
+    payments[index] = existing;
+    return true;
+  }
+
   static const _secureStorage = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
   );
   static const _brixPaymentsKey = 'brix_received_payments';
   static bool _migrated = false;
+  static Future<void> _brixStorageQueue = Future.value();
+
+  @visibleForTesting
+  static Future<T> serializeBrixStorage<T>(Future<T> Function() operation) {
+    final result = _brixStorageQueue.then((_) => operation());
+    _brixStorageQueue = result.then((_) {}, onError: (_, __) {});
+    return result;
+  }
 
   /// One-time migration from SharedPreferences to FlutterSecureStorage
   static Future<void> _migrateIfNeeded() async {
@@ -610,43 +652,47 @@ class BrixRelayService {
     DateTime? timestamp,
     int grossAmountSats = 0,
     int feeSats = 0,
-  }) async {
-    try {
-      await _migrateIfNeeded();
-      final raw = await _secureStorage.read(key: _brixPaymentsKey) ?? '[]';
-      final List<dynamic> list = json.decode(raw);
-      // Dedup by paymentHash
-      if (paymentHash != null && list.any((p) => p['paymentHash'] == paymentHash)) return;
-      list.add({
-        'amountSats': amountSats,
-        'grossAmountSats': grossAmountSats > 0 ? grossAmountSats : amountSats + feeSats,
-        'feeSats': feeSats,
-        'description': description,
-        'paymentHash': paymentHash,
-        'createdAt': (timestamp ?? DateTime.now()).toIso8601String(),
-        'type': 'received',
-        'direction': 'incoming',
-        'status': 'Complete',
-        'isBrix': true,
-      });
-      await _secureStorage.write(key: _brixPaymentsKey, value: json.encode(list));
-      broLog('💾 [BRIX] Persisted local: $amountSats sats (fee=$feeSats), hash=${paymentHash?.substring(0, 8) ?? "N/A"}');
-    } catch (e) {
-      broLog('❌ [BRIX] Failed to persist: $e');
-    }
+  }) {
+    return serializeBrixStorage(() async {
+      try {
+        await _migrateIfNeeded();
+        final raw = await _secureStorage.read(key: _brixPaymentsKey) ?? '[]';
+        final List<dynamic> list = json.decode(raw);
+        final payment = <String, dynamic>{
+          'amountSats': amountSats,
+          'grossAmountSats': grossAmountSats > 0 ? grossAmountSats : amountSats + feeSats,
+          'feeSats': feeSats,
+          'description': description,
+          'paymentHash': paymentHash,
+          'createdAt': (timestamp ?? DateTime.now()).toIso8601String(),
+          'type': 'received',
+          'direction': 'incoming',
+          'status': 'Complete',
+          'isBrix': true,
+        };
+        final merged = mergeBrixPayment(list, payment);
+        if (!merged) return;
+        await _secureStorage.write(key: _brixPaymentsKey, value: json.encode(list));
+        broLog('💾 [BRIX] Persisted local: $amountSats sats (fee=$feeSats), hash=${paymentHash?.substring(0, 8) ?? "N/A"}');
+      } catch (e) {
+        broLog('❌ [BRIX] Failed to persist: $e');
+      }
+    });
   }
 
   /// Load locally persisted BRIX payments for wallet screen fallback.
-  static Future<List<Map<String, dynamic>>> getLocalBrixPayments() async {
-    try {
-      await _migrateIfNeeded();
-      final raw = await _secureStorage.read(key: _brixPaymentsKey) ?? '[]';
-      final List<dynamic> list = json.decode(raw);
-      return list.map((p) => Map<String, dynamic>.from(p)).toList();
-    } catch (e) {
-      broLog('❌ [BRIX] Failed to load local: $e');
-      return [];
-    }
+  static Future<List<Map<String, dynamic>>> getLocalBrixPayments() {
+    return serializeBrixStorage(() async {
+      try {
+        await _migrateIfNeeded();
+        final raw = await _secureStorage.read(key: _brixPaymentsKey) ?? '[]';
+        final List<dynamic> list = json.decode(raw);
+        return list.map((p) => Map<String, dynamic>.from(p)).toList();
+      } catch (e) {
+        broLog('❌ [BRIX] Failed to load local: $e');
+        return <Map<String, dynamic>>[];
+      }
+    });
   }
 
   /// Send the 0.5% BRIX fee to the platform Lightning address

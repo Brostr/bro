@@ -437,6 +437,7 @@ class PlatformFeeService {
     required String orderId,
     required int totalSats,
     String? knownFeeHash, // paymentHash da taxa salvo na ordem (se já paga antes)
+    @visibleForTesting Future<bool> Function(String paymentHash)? hashConfirmedOverride,
   }) async {
     // VERIFICAÇÃO CRÍTICA: Evitar pagamento duplicado
     if (_paidOrderIds.contains(orderId)) {
@@ -448,14 +449,24 @@ class PlatformFeeService {
     // salvo (persistido no Nostr, sobrevive à reinstalação) E ele consta no
     // histórico real da carteira, a taxa JÁ foi paga — re-marca e NÃO re-paga.
     if (knownFeeHash != null && knownFeeHash.isNotEmpty) {
-      if (await _hashConfirmedInWallet(knownFeeHash)) {
+      final confirmed = hashConfirmedOverride != null
+          ? await hashConfirmedOverride(knownFeeHash)
+          : await _hashConfirmedInWallet(knownFeeHash);
+      if (confirmed) {
         broLog('💼 Taxa da ordem ${orderId.length > 8 ? orderId.substring(0, 8) : orderId} confirmada no histórico (hash) — SEM re-pagar');
         _paidOrderIds.add(orderId);
         await _savePaidOrderIds();
         return true;
       }
+      // Um hash salvo é evidência de tentativa anterior. Histórico vazio,
+      // incompleto ou indisponível NÃO autoriza uma nova cobrança.
+      broLog('🛡️ Taxa da ordem ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}: hash salvo não confirmado — NÃO re-pagar');
+      return false;
     }
-    
+
+    // Outra chamada pode ter concluído a taxa durante a verificação acima.
+    if (_paidOrderIds.contains(orderId)) return true;
+
     // CORREÇÃO v1.0.129+224: LOCK IMEDIATO para prevenir race condition
     // Adicionar ao Set SINCRONAMENTE antes de qualquer await.
     // Sem isso, duas chamadas concorrentes (order_status_screen + onPaymentSent)

@@ -409,8 +409,9 @@ workflows:
   #   Codemagic — baixa e instala via USB nos celulares de teste.
   # - iOS: vai pro TestFlight (testadores INTERNOS apenas — o grupo
   #   externo "Beta Público" NÃO está configurado aqui).
-  # Fluxo da casa: commit → push test/vXXX → testa nos 3 celulares →
-  # só depois push no main (que dispara o full-release público).
+  # Fluxo da casa: commit → push test/vXXX → validação local → iniciar
+  # manualmente este workflow → testa nos 3 celulares → só depois push no
+  # main (que dispara o full-release público).
   # ============================================
   internal-test:
     name: Teste Interno (APK artifact + TestFlight)
@@ -439,12 +440,9 @@ workflows:
       cocoapods: default
       java: 17
 
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: 'test/*'
-          include: true
+    # Build interno somente manual: pushes de correção não consomem minutos
+    # macOS nem publicam um TestFlight antes da validação local.
+    triggering: {}
 
     scripts:
       - name: Generate env.json from CI variables
