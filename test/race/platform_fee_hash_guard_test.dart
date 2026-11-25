@@ -31,6 +31,53 @@ void main() {
     expect(PlatformFeeService.isFeePaid('unconfirmed-hash-order'), isFalse);
   });
 
+  test('retained uncertain lock is not treated as settled', () async {
+    var paymentCalls = 0;
+    PlatformFeeService.setPaymentCallback((invoice) async {
+      paymentCalls++;
+      return {'success': false, 'mayStillSucceed': true};
+    }, 'test');
+
+    final first = await PlatformFeeService.sendPlatformFee(
+      orderId: 'uncertain-lock-order',
+      totalSats: 1000,
+    );
+    final second = await PlatformFeeService.sendPlatformFee(
+      orderId: 'uncertain-lock-order',
+      totalSats: 1000,
+      knownFeeHash: 'uncertain-fee-hash',
+      hashConfirmedOverride: (_) async => false,
+    );
+
+    expect(first, isFalse);
+    expect(second, isFalse);
+    expect(paymentCalls, 0);
+  });
+
+  test('pending or failed wallet entries do not confirm fee settlement', () async {
+    PlatformFeeService.setWalletHistoryFetcher(() async => [
+      {
+        'paymentHash': 'pending-fee-hash',
+        'type': 'sent',
+        'status': 'PaymentStatus.pending',
+      },
+      {
+        'paymentHash': 'failed-fee-hash',
+        'type': 'sent',
+        'status': 'PaymentStatus.failed',
+      },
+      {
+        'paymentHash': 'completed-fee-hash',
+        'type': 'sent',
+        'status': 'PaymentStatus.completed',
+      },
+    ]);
+
+    expect(await PlatformFeeService.isFeePaymentConfirmed('pending-fee-hash'), isFalse);
+    expect(await PlatformFeeService.isFeePaymentConfirmed('failed-fee-hash'), isFalse);
+    expect(await PlatformFeeService.isFeePaymentConfirmed('completed-fee-hash'), isTrue);
+  });
+
   test('concurrent hash checks cannot acquire the payment lock twice', () async {
     final firstCheck = Completer<void>();
     final releaseCheck = Completer<void>();

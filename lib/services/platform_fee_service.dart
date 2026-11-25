@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config.dart';
 import 'lnaddress_service.dart';
 import 'coordinator_service.dart';
+import '../providers/breez_provider_export.dart';
 
 /// Serviço para rastrear taxas da plataforma
 /// 
@@ -63,8 +64,15 @@ class PlatformFeeService {
       for (final p in payments) {
         final hash = (p is Map ? (p['paymentHash'] ?? '') : '').toString();
         final type = (p is Map ? (p['type'] ?? p['direction'] ?? '') : '').toString().toLowerCase();
-        final isSent = type.contains('send') || type.contains('enviado') || type.contains('outgoing');
-        if (isSent && hash == paymentHash) return true;
+        final isSent = type == 'sent' ||
+            type.contains('send') ||
+            type.contains('enviado') ||
+            type.contains('outgoing');
+        final status = (p is Map ? (p['status'] ?? '') : '').toString().toLowerCase();
+        final isCompleted = status == 'complete' ||
+            status == 'completed' ||
+            status == 'paymentstatus.completed';
+        if (isSent && isCompleted && hash == paymentHash) return true;
       }
       return false;
     } catch (e) {
@@ -431,18 +439,33 @@ class PlatformFeeService {
     await _savePaidOrderIds();
   }
 
+  static Future<bool> isFeePaymentConfirmed(String paymentHash) {
+    return _hashConfirmedInWallet(paymentHash);
+  }
+
   /// Envia a taxa da plataforma para o Lightning Address configurado
   /// Retorna true se o pagamento foi bem sucedido OU se já foi pago anteriormente
   static Future<bool> sendPlatformFee({
     required String orderId,
     required int totalSats,
     String? knownFeeHash, // paymentHash da taxa salvo na ordem (se já paga antes)
+    double? feePercentOverride,
+    Future<void> Function(String paymentHash)? onPaid,
+    Future<void> Function(String invoice, String paymentHash)? onAttempt,
     @visibleForTesting Future<bool> Function(String paymentHash)? hashConfirmedOverride,
   }) async {
     // VERIFICAÇÃO CRÍTICA: Evitar pagamento duplicado
     if (_paidOrderIds.contains(orderId)) {
+      if (knownFeeHash != null && knownFeeHash.isNotEmpty) {
+        final confirmed = hashConfirmedOverride != null
+            ? await hashConfirmedOverride(knownFeeHash)
+            : await _hashConfirmedInWallet(knownFeeHash);
+        if (confirmed) return true;
+        broLog('🛡️ Taxa da ordem ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}: tentativa anterior não confirmada — NÃO repetir');
+        return false;
+      }
       broLog('💼 Taxa já foi paga para ordem ${orderId.length > 8 ? orderId.substring(0, 8) : orderId} - ignorando');
-      return true; // Retorna true pois já foi pago
+      return true;
     }
 
     // ANTI RE-PAGAMENTO (definitivo): se a ordem já tem um paymentHash de taxa
@@ -476,7 +499,8 @@ class PlatformFeeService {
     broLog('💼 Lock adquirido para ordem ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}');
     
     // Calcular taxa da plataforma: 2% do valor total (mínimo 1 sat)
-    final platformFeeRaw = (totalSats * AppConfig.platformFeePercent).round();
+    final feePercent = feePercentOverride ?? AppConfig.platformFeePercent;
+    final platformFeeRaw = (totalSats * feePercent).round();
     final platformFeeSats = platformFeeRaw < 1 ? 1 : platformFeeRaw;
     
     if (platformFeeSats <= 0) {
@@ -497,7 +521,7 @@ class PlatformFeeService {
     broLog('💼 ENVIANDO TAXA DA PLATAFORMA');
     broLog('💼 Ordem: ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}...');
     broLog('💼 Valor total: $totalSats sats');
-    broLog('💼 Taxa (${(AppConfig.platformFeePercent * 100).toStringAsFixed(0)}%): $platformFeeSats sats');
+    broLog('💼 Taxa (${(feePercent * 100).toStringAsFixed(1)}%): $platformFeeSats sats');
     broLog('💼 Destino: ${await _resolveFeeDestination()}');
     broLog('💼 Backend: $_currentBackend');
     broLog('💼 ════════════════════════════════════════════════');
@@ -535,6 +559,13 @@ class PlatformFeeService {
 
         final invoice = result['invoice'] as String;
         broLog('💼 Invoice obtido: ${invoice.substring(0, 50)}...');
+        if (onAttempt != null) {
+          final decoded = await BreezProvider().decodeInvoice(invoice);
+          final attemptHash = decoded?['invoice']?['paymentHash'] as String?;
+          if (attemptHash != null && attemptHash.isNotEmpty) {
+            await onAttempt(invoice, attemptHash);
+          }
+        }
         broLog('💼 Pagando via $_currentBackend...');
 
         final payResult = await _payInvoiceCallback!(invoice);
@@ -547,6 +578,7 @@ class PlatformFeeService {
           final payHash = payResult['payment']?['paymentHash'] as String?;
           if (payHash != null && payHash.isNotEmpty) {
             await _saveFeePaymentHash(payHash);
+            if (onPaid != null) await onPaid(payHash);
             // ANTI RE-PAGAMENTO: persistir o hash NA ORDEM (Nostr) — sobrevive à
             // reinstalação. Assim o FeeReconcile consegue confirmar que a taxa
             // já foi paga mesmo com o app reinstalado, e nunca re-paga.
@@ -570,7 +602,9 @@ class PlatformFeeService {
           return true;
         } else {
           broLog('❌ Falha no pagamento: $payResult');
-          _paidOrderIds.remove(orderId); // Liberar lock para retry
+          if (payResult?['mayStillSucceed'] != true) {
+            _paidOrderIds.remove(orderId);
+          }
           return false;
         }
 
@@ -583,6 +617,13 @@ class PlatformFeeService {
       } else if (platformAddress.toLowerCase().startsWith('ln')) {
         // Invoice BOLT11 direto
         broLog('💼 Pagando invoice BOLT11 direto...');
+        if (onAttempt != null) {
+          final decoded = await BreezProvider().decodeInvoice(platformAddress);
+          final attemptHash = decoded?['invoice']?['paymentHash'] as String?;
+          if (attemptHash != null && attemptHash.isNotEmpty) {
+            await onAttempt(platformAddress, attemptHash);
+          }
+        }
         
         final payResult = await _payInvoiceCallback!(platformAddress);
         
@@ -594,6 +635,7 @@ class PlatformFeeService {
           final payHash = payResult['payment']?['paymentHash'] as String?;
           if (payHash != null && payHash.isNotEmpty) {
             await _saveFeePaymentHash(payHash);
+            if (onPaid != null) await onPaid(payHash);
           }
           
           broLog('✅ TAXA DA PLATAFORMA PAGA COM SUCESSO via $_currentBackend!');
@@ -601,7 +643,9 @@ class PlatformFeeService {
           return true;
         } else {
           broLog('❌ Falha no pagamento: $payResult');
-          _paidOrderIds.remove(orderId); // Liberar lock para retry
+          if (payResult?['mayStillSucceed'] != true) {
+            _paidOrderIds.remove(orderId);
+          }
           return false;
         }
       }
@@ -613,7 +657,10 @@ class PlatformFeeService {
     } catch (e, stack) {
       broLog('❌ ERRO ao pagar taxa da plataforma: $e');
       broLog('   Stack: $stack');
-      _paidOrderIds.remove(orderId); // Liberar lock para retry
+      final pending = e.toString().toLowerCase().contains('timeout') ||
+          e.toString().toLowerCase().contains('alreadyexists') ||
+          e.toString().toLowerCase().contains('already paid');
+      if (!pending) _paidOrderIds.remove(orderId);
       return false;
     }
   }

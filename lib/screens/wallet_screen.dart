@@ -36,45 +36,6 @@ bool shouldHideFeePayment({
 }
 
 @visibleForTesting
-List<Map<String, dynamic>> consolidateBrixReceipts(
-    List<Map<String, dynamic>> payments,
-    Set<String> feeHashes,
-    Map<String, Map<String, dynamic>> feeLinks) {
-  final consolidated = payments
-      .map((payment) => Map<String, dynamic>.from(payment))
-      .toList();
-  final hideFeeHashes = <String>{};
-  for (var i = 0; i < consolidated.length; i++) {
-    final payment = consolidated[i];
-    final link = feeLinks[payment['paymentHash']?.toString() ?? ''];
-    if (link == null) continue;
-    final feeSats = (link['feeSats'] as num?)?.toInt() ?? 0;
-    final feeHash = link['feePaymentHash']?.toString() ?? '';
-    if (feeSats <= 0 || feeHash.isEmpty) continue;
-    final feeIndex = consolidated.indexWhere(
-        (candidate) => candidate['paymentHash']?.toString() == feeHash);
-    final gross =
-        ((payment['amountSats'] ?? payment['amount'] ?? 0) as num).toInt();
-    final outgoingNetworkFee = feeIndex == -1
-        ? 0
-        : (consolidated[feeIndex]['fees'] as num?)?.toInt() ?? 0;
-    consolidated[i] = {
-      ...payment,
-      'grossAmountSats': gross,
-      'feeSats': feeSats,
-      'amountSats': gross - feeSats,
-      'brixNetworkFeeSats': outgoingNetworkFee,
-      'isBrix': true,
-    };
-    hideFeeHashes.add(feeHash);
-  }
-  return consolidated
-      .where((payment) =>
-          !hideFeeHashes.contains(payment['paymentHash']?.toString() ?? ''))
-      .toList();
-}
-
-@visibleForTesting
 Map<String, dynamic> mergeBrixWalletPayment(
     Map<String, dynamic> sdkPayment, Map<String, dynamic> localPayment) {
   final merged = Map<String, dynamic>.from(sdkPayment);
@@ -110,7 +71,7 @@ class _WalletScreenState extends State<WalletScreen> {
   bool _showAllTransactions = false;
   int _sdkPaymentsCount = 0;  // v499: diagnostic
   Set<String> _brixFeePaymentHashes = <String>{};
-  Map<String, Map<String, dynamic>> _brixFeeLinks = <String, Map<String, dynamic>>{};
+  Map<String, Map<String, dynamic>> _brixOutgoingFees = <String, Map<String, dynamic>>{};
 
   /// Total sats queued for outgoing BRIX payments (not yet deducted from wallet).
   /// Excludes expired payments (they were never sent).
@@ -178,7 +139,7 @@ class _WalletScreenState extends State<WalletScreen> {
       final balance = await breezProvider.getBalance();
       final payments = await breezProvider.listPayments();
       _brixFeePaymentHashes = await BrixRelayService.getSettledFeePaymentHashes();
-      _brixFeeLinks = await BrixRelayService.getSettledFeeLinks();
+      _brixOutgoingFees = await BrixRelayService.getSettledOutgoingFees();
 
       // v673: forense automático — registrar pagamentos GRANDES (>= 500 mil sats)
       // no log local com TODOS os detalhes. Caso 18/out: um envio interno de
@@ -248,6 +209,8 @@ class _WalletScreenState extends State<WalletScreen> {
             platformFeeHashes: PlatformFeeService.feePaymentHashes,
             brixFeeHashes: _brixFeePaymentHashes,
           )) return false;
+          if (_brixOutgoingFees.values.any((fee) =>
+              fee['feePaymentHash']?.toString() == paymentHash)) return false;
           final opFee = context.read<OrderProvider>();
           if (opFee.orders.any((o) => o.metadata?['feePaymentHash'] == paymentHash)) return false;
         }
@@ -385,9 +348,6 @@ class _WalletScreenState extends State<WalletScreen> {
       } catch (e) {
         broLog('⚠️ [BRIX] Error loading local: $e');
       }
-
-      allPayments = consolidateBrixReceipts(
-          allPayments, _brixFeePaymentHashes, _brixFeeLinks);
 
       // Ordenar por data (mais recente primeiro)
       allPayments.sort((a, b) {
@@ -1482,6 +1442,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           
                           // Se for phone, username BRIX, email ou BRIX address, resolver primeiro via BRIX
                           var resolvedDest = destination;
+                          var confirmedBrixDestination = isBrixAddress;
                           if (needsBrixResolve) {
                             final brixService = BrixService();
                             // For BRIX addresses (user@brix.app), extract username for resolve
@@ -1504,6 +1465,7 @@ class _WalletScreenState extends State<WalletScreen> {
                               broLog('🔍 Email não encontrado no BRIX, tentando como Lightning Address: $destination');
                             } else {
                               resolvedDest = resolveResult.brixAddress!;
+                              confirmedBrixDestination = true;
                               broLog('🔍 BRIX resolvido: $destination → $resolvedDest (via ${resolveResult.matchedBy})');
                             }
                           }
@@ -1554,6 +1516,14 @@ class _WalletScreenState extends State<WalletScreen> {
                           final result = await breezProvider.payInvoice(invoice);
                           
                           if (result != null && result['success'] == true) {
+                            final paymentHash = result['payment']?['paymentHash']?.toString() ?? '';
+                            if (confirmedBrixDestination && paymentHash.isNotEmpty) {
+                              await BrixRelayService.recordSettledOutgoingFee(
+                                paymentHash: paymentHash,
+                                amountSats: amountSats,
+                                feeSats: BrixRelayService.calculateBrixFee(amountSats),
+                              );
+                            }
                             if (context.mounted) {
                               Navigator.pop(context);
                               ScaffoldMessenger.of(context).showSnackBar(
@@ -2422,6 +2392,17 @@ class _WalletScreenState extends State<WalletScreen> {
                         
                         if (result != null && result['success'] == true) {
                           broLog('✅ Pagamento bem sucedido!');
+                          if (isBrixAddress) {
+                            final paymentHash = result['payment']?['paymentHash']?.toString() ?? '';
+                            final amountSats = int.tryParse(amountController.text.trim()) ?? 0;
+                            if (paymentHash.isNotEmpty && amountSats > 0) {
+                              await BrixRelayService.recordSettledOutgoingFee(
+                                paymentHash: paymentHash,
+                                amountSats: amountSats,
+                                feeSats: BrixRelayService.calculateBrixFee(amountSats),
+                              );
+                            }
+                          }
                           if (context.mounted) {
                             Navigator.pop(context);
                             _loadWalletInfo();
@@ -3274,11 +3255,7 @@ class _WalletScreenState extends State<WalletScreen> {
     } else if (description == 'BRIX Payment' || description.toLowerCase().contains('brix payment') || description.startsWith('BRIX: ') ||
                (!isReceived && (description.toLowerCase().contains('@brostr.app') || description.toLowerCase().contains('@brix.app')))) {
       if (isReceived) {
-        final feeSats = (payment['feeSats'] as num?)?.toInt() ?? 0;
-        final netSats = (amount is int) ? amount : (amount as num).toInt();
-        label = feeSats > 0
-            ? '⚡ brix recebido +$netSats sats (taxa $feeSats sats)'
-            : '⚡ brix recebido';
+        label = '⚡ brix recebido';
         iconColor = Colors.green;
         icon = Icons.flash_on;
       } else {
@@ -3518,10 +3495,8 @@ class _WalletScreenState extends State<WalletScreen> {
     final isBrixPayment = payment['isBrix'] == true ||
         description == 'BRIX Payment' ||
         description.startsWith('BRIX: ');
-    final brixFeeLink = _brixFeeLinks[paymentHash];
-    final brixFeeSats = (payment['feeSats'] as num?)?.toInt() ??
-        (brixFeeLink?['feeSats'] as num?)?.toInt() ??
-        0;
+    final brixOutgoingFee = _brixOutgoingFees[paymentHash];
+    final brixFeeSats = (brixOutgoingFee?['feeSats'] as num?)?.toInt() ?? 0;
     
     // v411: Extract BRIX memo from description (format: "BRIX: <memo>")
     String? brixMemo;
@@ -3819,9 +3794,7 @@ class _WalletScreenState extends State<WalletScreen> {
                 // rede/roteamento (campo `fees` do SDK Spark) em TODA transação,
                 // além de uma nota explicando taxa Bro (ganho) e da plataforma.
                 Builder(builder: (context) {
-                  final feesRaw = isBrixPayment && payment['brixNetworkFeeSats'] != null
-                      ? payment['brixNetworkFeeSats']
-                      : payment['fees'];
+                  final feesRaw = payment['fees'];
                   final int? networkFeeSats = feesRaw is int
                       ? feesRaw
                       : (feesRaw is num ? feesRaw.toInt() : null);
@@ -3854,9 +3827,9 @@ class _WalletScreenState extends State<WalletScreen> {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      if (!isBrixPayment && (networkFeeSats == null || networkFeeSats > 0))
+                      if (networkFeeSats == null || networkFeeSats > 0)
                         _buildDetailRow(feeLabel, feeValue),
-                      if (isReceived && isBrixPayment && brixFeeSats > 0)
+                      if (!isReceived && brixOutgoingFee != null && brixFeeSats > 0)
                         _buildDetailRow('Taxa BRIX (0,5%)', '−$brixFeeSats sat'),
                       // v706: TODAS as taxas condensadas aqui — Bro provedor
                       // (3%), app Bro (2%) e Spark. A nota embaixo virou uma
@@ -3889,7 +3862,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           );
                         }),
                       ],
-                      if (!isBrixPayment) ...[
+                      if (!isBrixPayment && brixOutgoingFee == null) ...[
                         const SizedBox(height: 8),
                         Container(
                         width: double.infinity,

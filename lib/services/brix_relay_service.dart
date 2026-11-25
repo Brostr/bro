@@ -14,23 +14,10 @@ import 'package:bro_app/services/secure_storage_service.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/push_diag.dart';
 import 'package:bro_app/services/lnaddress_service.dart';
+import 'package:bro_app/services/platform_fee_service.dart';
 import 'package:bro_app/providers/breez_provider.dart';
 import 'package:bro_app/config.dart';
 import 'package:bro_app/config/payment_methods.dart';
-
-enum BrixFeeState {
-  awaitingPaymentHash,
-  awaitingReceipt,
-  sending,
-  pendingSettlement;
-
-  static BrixFeeState fromStorage(Object? value) {
-    return values.firstWhere(
-      (state) => state.name == value,
-      orElse: () => BrixFeeState.awaitingReceipt,
-    );
-  }
-}
 
 /// Global BRIX invoice relay service.
 /// Polls the BRIX server for incoming invoice requests and auto-generates
@@ -424,19 +411,6 @@ class BrixRelayService {
               );
             }
 
-            if (ok) {
-              final paymentHash = invoiceResult['paymentHash'] as String?;
-              final feeSats = calculateBrixFee(request.amountSats);
-              if (feeSats > 0) {
-                await _queueBrixFee(
-                  requestId: request.id,
-                  paymentHash: paymentHash,
-                  bolt11: bolt11,
-                  amountSats: request.amountSats,
-                  feeSats: feeSats,
-                );
-              }
-            }
           }
         }
       }
@@ -510,7 +484,7 @@ class BrixRelayService {
       }
     }
 
-    await _processBrixFees();
+    await _retryPendingOutgoingFees();
 
     // Retry queued outgoing BRIX payments (async, non-blocking)
     _scheduleRetryIfNeeded();
@@ -529,69 +503,19 @@ class BrixRelayService {
     _retryOutgoingPayments();
   }
 
-  // Track fees already sent to prevent duplicates.
-  // v635: now PERSISTENT across restarts (was in-memory only, so a restart
-  // could re-pay the 0.5% BRIX fee for a still-pending request id).
-  final Set<String> _paidFees = {};
-  static const _paidFeesKey = 'brix_paid_fee_request_ids';
-  static const _settledFeeHashesKey = 'brix_settled_fee_payment_hashes';
-  static const _settledFeeLinksKey = 'brix_settled_fee_links';
-  bool _paidFeesLoaded = false;
-  // v661: Track claims to prevent duplicates — agora PERSISTENTE. Antes era só
-  // em memória: se o app crashava/fechava entre marcar o pagamento como
-  // "claimed" e o servidor confirmar, o set se perdia no restart e o app
-  // reivindicava o MESMO pagamento offline de novo (risco de receber 2x).
-  // Mesmo padrão do _paidFees.
-  final Set<String> _claimedPayments = {};
-  static const _claimedPaymentsKey = 'brix_claimed_payment_ids';
-  bool _claimedPaymentsLoaded = false;
-
-  Future<void> _loadPaidFees() async {
-    if (_paidFeesLoaded) return;
-    _paidFeesLoaded = true;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getStringList(_paidFeesKey);
-      if (raw != null) _paidFees.addAll(raw);
-    } catch (_) {}
-  }
-
-  Future<void> _persistPaidFees() async {
-    final prefs = await _feePrefs();
-    // Bound growth: keep the most recent ids (insertion-ordered Set).
-    var ids = _paidFees.toList();
-    if (ids.length > 500) {
-      ids = ids.sublist(ids.length - 500);
-      _paidFees
-        ..clear()
-        ..addAll(ids);
-    }
-    final saved = await prefs.setStringList(_paidFeesKey, ids);
-    if (!saved) throw StateError('Could not persist settled BRIX fees');
-  }
-
   static Future<Set<String>> getSettledFeePaymentHashes() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      return (prefs.getStringList(_settledFeeHashesKey) ?? const <String>[]).toSet();
+      return (prefs.getStringList('brix_settled_fee_payment_hashes') ?? const <String>[]).toSet();
     } catch (_) {
       return <String>{};
     }
   }
+  final Set<String> _claimedPayments = {};
+  static const _claimedPaymentsKey = 'brix_claimed_payment_ids';
+  bool _claimedPaymentsLoaded = false;
 
-  static Future<Map<String, Map<String, dynamic>>> getSettledFeeLinks() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final decoded = jsonDecode(prefs.getString(_settledFeeLinksKey) ?? '{}');
-      if (decoded is! Map) return <String, Map<String, dynamic>>{};
-      return decoded.map((key, value) => MapEntry(
-          key.toString(), Map<String, dynamic>.from(value as Map)));
-    } catch (_) {
-      return <String, Map<String, dynamic>>{};
-    }
-  }
-
-  // v661: carregar/persistir os claims (mesmo padrão do _paidFees).
+  // v661: carregar/persistir os claims para evitar duplicidade offline.
   Future<void> _loadClaimedPayments() async {
     if (_claimedPaymentsLoaded) return;
     _claimedPaymentsLoaded = true;
@@ -736,564 +660,160 @@ class BrixRelayService {
     });
   }
 
-  static const _pendingFeesKey = 'brix_pending_fee_payments';
-  final Set<String> _feePaymentsInFlight = {};
-  bool _processingFees = false;
-  Future<void> _feeStorageLock = Future<void>.value();
-  Future<SharedPreferences> Function() _feePrefs = SharedPreferences.getInstance;
+  static const _settledOutgoingFeesKey = 'brix_settled_outgoing_fees';
+  static const _pendingOutgoingFeesKey = 'brix_pending_outgoing_fees';
+  static Future<void> _outgoingFeeStorageQueue = Future.value();
 
   @visibleForTesting
   static int calculateBrixFee(int amountSats) {
-    if (amountSats <= 1) return 0;
+    if (amountSats <= 0) return 0;
     final calculated = (amountSats * AppConfig.brixFeePercent).round();
     return calculated < 1 ? 1 : calculated;
   }
 
+  static Future<Map<String, Map<String, dynamic>>> getSettledOutgoingFees() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final decoded = jsonDecode(prefs.getString(_settledOutgoingFeesKey) ?? '{}');
+      if (decoded is! Map) return <String, Map<String, dynamic>>{};
+      return decoded.map((key, value) =>
+          MapEntry(key.toString(), Map<String, dynamic>.from(value as Map)));
+    } catch (_) {
+      return <String, Map<String, dynamic>>{};
+    }
+  }
+
+  static Future<Map<String, Map<String, dynamic>>> _getPendingOutgoingFees() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final decoded = jsonDecode(prefs.getString(_pendingOutgoingFeesKey) ?? '{}');
+      if (decoded is! Map) return <String, Map<String, dynamic>>{};
+      return decoded.map((key, value) =>
+          MapEntry(key.toString(), Map<String, dynamic>.from(value as Map)));
+    } catch (_) {
+      return <String, Map<String, dynamic>>{};
+    }
+  }
+
+  static Future<void> _savePendingOutgoingFee(
+      String paymentHash, int amountSats, int feeSats,
+      {String? feePaymentHash}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final pending = await _getPendingOutgoingFees();
+    final previous = pending[paymentHash];
+    pending[paymentHash] = {
+      'amountSats': amountSats,
+      'feeSats': feeSats,
+      'feePaymentHash': feePaymentHash ?? previous?['feePaymentHash'],
+    };
+    final saved = await prefs.setString(_pendingOutgoingFeesKey, jsonEncode(pending));
+    if (!saved) throw StateError('Could not persist pending outgoing BRIX fee');
+  }
+
+  static Future<void> _removePendingOutgoingFee(String paymentHash) async {
+    final prefs = await SharedPreferences.getInstance();
+    final pending = await _getPendingOutgoingFees();
+    pending.remove(paymentHash);
+    final saved = await prefs.setString(_pendingOutgoingFeesKey, jsonEncode(pending));
+    if (!saved) throw StateError('Could not remove pending outgoing BRIX fee');
+  }
+
   @visibleForTesting
-  static bool isSettledIncomingPayment(
-    Map<String, dynamic> status, {
+  static Future<bool> Function({
+    required String orderId,
+    required int totalSats,
+    required double feePercent,
+    required Future<void> Function(String paymentHash) onPaid,
+  })? chargeOutgoingFeeOverride;
+
+  static Future<void> recordSettledOutgoingFee({
     required String paymentHash,
-    required int amountSats,
-  }) {
-    return status['paid'] == true &&
-        status['paymentHash'] == paymentHash &&
-        status['direction'] == 'receive' &&
-        status['amountSats'] == amountSats.toString();
-  }
-
-  @visibleForTesting
-  static bool isSettledOutgoingFee(
-    Map<String, dynamic> payResult, {
-    required String paymentHash,
-    required int feeSats,
-  }) {
-    final payment = payResult['payment'];
-    return payResult['success'] == true &&
-        payment is Map &&
-        payment['status'] == 'PaymentStatus.completed' &&
-        payment['paymentHash'] == paymentHash &&
-        payment['amount']?.toString() == feeSats.toString();
-  }
-
-  @visibleForTesting
-  static bool isDefinitivelyFailedOutgoingFee(Map<String, dynamic> payResult) {
-    final payment = payResult['payment'];
-    return (payResult['success'] == true &&
-            payment is Map &&
-            payment['status'] == 'PaymentStatus.failed') ||
-        (payResult['success'] != true && payResult['mayStillSucceed'] != true);
-  }
-
-  @visibleForTesting
-  static bool isSettledOutgoingFeeStatus(
-    Map<String, dynamic> status, {
-    required String paymentHash,
-    required int feeSats,
-  }) {
-    return status['paid'] == true &&
-        status['paymentHash'] == paymentHash &&
-        status['direction'] == 'send' &&
-        status['amountSats'] == feeSats.toString();
-  }
-
-  @visibleForTesting
-  static bool isMissingOutgoingPayment(Map<String, dynamic> status) {
-    final error = status['error']?.toString().toLowerCase() ?? '';
-    return status['paid'] == false && error.contains('payment not found');
-  }
-
-  @visibleForTesting
-  static bool isFailedOutgoingFeeStatus(
-    Map<String, dynamic> status, {
-    required String paymentHash,
-    required int feeSats,
-  }) {
-    return status['status'] == 'failed' &&
-        status['paymentHash'] == paymentHash &&
-        status['direction'] == 'send' &&
-        status['amountSats'] == feeSats.toString();
-  }
-
-  Future<T> _withFeeStorageLock<T>(Future<T> Function() action) {
-    final previous = _feeStorageLock;
-    final completer = Completer<void>();
-    _feeStorageLock = completer.future;
-    return previous.then((_) => action()).whenComplete(completer.complete);
-  }
-
-  @visibleForTesting
-  void resetFeeStateForTest({
-    Future<SharedPreferences> Function()? preferences,
-  }) {
-    _paidFees.clear();
-    _paidFeesLoaded = false;
-    _feePaymentsInFlight.clear();
-    _processingFees = false;
-    _feeStorageLock = Future<void>.value();
-    _feePrefs = preferences ?? SharedPreferences.getInstance;
-  }
-
-  @visibleForTesting
-  Future<T> runWithFeeStorageLock<T>(Future<T> Function() action) {
-    return _withFeeStorageLock(action);
-  }
-
-  @visibleForTesting
-  Future<void> queueBrixFeeForTest({
-    required String requestId,
-    required String? paymentHash,
-    required String bolt11,
     required int amountSats,
     required int feeSats,
   }) {
-    return _queueBrixFee(
-      requestId: requestId,
-      paymentHash: paymentHash,
-      bolt11: bolt11,
-      amountSats: amountSats,
-      feeSats: feeSats,
-    );
-  }
-
-  @visibleForTesting
-  Future<Map<String, dynamic>?> updateBrixFeeForTest(
-    String requestId,
-    void Function(Map<String, dynamic> fee) update,
-  ) {
-    return _updateBrixFee(requestId, update);
-  }
-
-  @visibleForTesting
-  Future<void> settleBrixFeeForTest(String requestId) {
-    return _settleBrixFee(requestId);
-  }
-
-  @visibleForTesting
-  Future<void> reconcileBrixFeeForTest(
-    Map<String, dynamic> fee,
-    Future<Map<String, dynamic>> Function(String paymentHash) checkStatus, {
-    Future<void> Function(Map<String, dynamic> originalAttempt)? resumeSameAttempt,
-  }) {
-    return _reconcileBrixFee(
-      fee,
-      checkStatus,
-      resumeSameAttempt: resumeSameAttempt,
-    );
-  }
-
-  @visibleForTesting
-  Future<void> sendBrixFeeForTest(
-    Map<String, dynamic> fee, {
-    required Future<Map<String, dynamic>> Function() getInvoice,
-    required Future<Map<String, dynamic>?> Function(String bolt11) decodeInvoice,
-    required Future<Map<String, dynamic>?> Function(
-      String bolt11,
-      String idempotencyKey,
-    ) payInvoice,
-    bool resumingMissingPayment = false,
-  }) {
-    return _sendBrixFee(
-      fee,
-      getInvoiceOverride: getInvoice,
-      decodeInvoiceOverride: decodeInvoice,
-      payInvoiceOverride: payInvoice,
-      resumingMissingPayment: resumingMissingPayment,
-    );
-  }
-
-  Future<void> _queueBrixFee({
-    required String requestId,
-    required String? paymentHash,
-    required String bolt11,
-    required int amountSats,
-    required int feeSats,
-  }) async {
-    await _loadPaidFees();
-    if (_paidFees.contains(requestId)) return;
-
-    await _withFeeStorageLock(() async {
-      final prefs = await _feePrefs();
-      final pending = _loadPendingFees(prefs);
-      if (pending.any((fee) => fee['requestId'] == requestId)) return;
-
-      pending.add({
-        'requestId': requestId,
-        'paymentHash': paymentHash,
-        'bolt11': bolt11,
-        'amountSats': amountSats,
-        'feeSats': feeSats,
-        'state': paymentHash == null || paymentHash.isEmpty
-            ? BrixFeeState.awaitingPaymentHash.name
-            : BrixFeeState.awaitingReceipt.name,
-        'idempotencyKey': const Uuid().v4(),
-      });
-      await _savePendingFees(prefs, pending);
-    });
-  }
-
-  List<Map<String, dynamic>> _loadPendingFees(SharedPreferences prefs) {
-    try {
-      final decoded = jsonDecode(prefs.getString(_pendingFeesKey) ?? '[]');
-      if (decoded is! List) throw const FormatException('Fee queue is not a list');
-      final fees = decoded.whereType<Map>().map((fee) {
-        return fee.map((key, value) => MapEntry(key.toString(), value));
-      }).where((fee) {
-        return fee['requestId'] is String &&
-            fee['amountSats'] is int &&
-            fee['feeSats'] is int &&
-            (fee['paymentHash'] == null || fee['paymentHash'] is String) &&
-            (fee['bolt11'] == null || fee['bolt11'] is String);
-      }).toList();
-      if (fees.length != decoded.length) {
-        throw const FormatException('Fee queue contains an invalid entry');
-      }
-      return fees;
-    } catch (e) {
-      // Never overwrite unreadable financial state with an empty queue.
-      broLog('⚠️ [BRIX-RELAY] Invalid pending fee storage; processing stopped: $e');
-      throw StateError('Could not read BRIX fee queue');
-    }
-  }
-
-  Future<void> _savePendingFees(
-    SharedPreferences prefs,
-    List<Map<String, dynamic>> pending,
-  ) async {
-    final saved = await prefs.setString(_pendingFeesKey, jsonEncode(pending));
-    if (!saved) throw StateError('Could not persist BRIX fee queue');
-  }
-
-  Future<void> _processBrixFees() async {
-    if (_processingFees || _context == null) return;
-    _processingFees = true;
-    try {
-      await _loadPaidFees();
-      final prefs = await _feePrefs();
-      final pending = _loadPendingFees(prefs);
-      if (pending.isEmpty) return;
-
-      final breezProvider = _context!.read<BreezProvider>();
-      for (final storedFee in List<Map<String, dynamic>>.of(pending)) {
-        final requestId = storedFee['requestId'] as String;
-        if (_paidFees.contains(requestId) || _feePaymentsInFlight.contains(requestId)) {
-          continue;
-        }
-
-        var fee = storedFee;
-        final state = BrixFeeState.fromStorage(fee['state']);
-        if (state == BrixFeeState.pendingSettlement ||
-            (state == BrixFeeState.sending && fee['feePaymentHash'] is String)) {
-          // Após crash/timeout, primeiro reconciliar a tentativa original.
-          // Se o SDK não tem registro, retomar com a MESMA invoice e key.
-          await _reconcileBrixFee(
-            fee,
-            breezProvider.checkPaymentStatus,
-            resumeSameAttempt: (originalAttempt) =>
-                _sendBrixFee(originalAttempt, resumingMissingPayment: true),
-          );
-          continue;
-        }
-        if (state == BrixFeeState.sending) {
-          await _sendBrixFee(fee);
-          continue;
-        }
-        if (state != BrixFeeState.awaitingReceipt &&
-            state != BrixFeeState.awaitingPaymentHash) {
-          continue;
-        }
-
-        var paymentHash = fee['paymentHash'] as String?;
-        if (paymentHash == null || paymentHash.isEmpty) {
-          final bolt11 = fee['bolt11'] as String?;
-          if (bolt11 == null || bolt11.isEmpty) continue;
-          final decoded = await breezProvider.decodeInvoice(bolt11);
-          paymentHash = decoded?['invoice']?['paymentHash'] as String?;
-          if (paymentHash == null || paymentHash.isEmpty) continue;
-          final updated = await _updateBrixFee(requestId, (item) {
-            item['paymentHash'] = paymentHash;
-            item['state'] = BrixFeeState.awaitingReceipt.name;
-          });
-          if (updated == null) continue;
-          fee = updated;
-        }
-
-        final amountSats = fee['amountSats'] as int;
-        final status = await breezProvider.checkPaymentStatus(paymentHash);
-        if (!isSettledIncomingPayment(
-          status,
-          paymentHash: paymentHash,
-          amountSats: amountSats,
-        )) {
-          continue;
-        }
-
-        await _sendBrixFee(fee);
-      }
-    } catch (e) {
-      broLog('⚠️ [BRIX-RELAY] Fee settlement check failed; will retry: $e');
-    } finally {
-      _processingFees = false;
-    }
-  }
-
-  Future<Map<String, dynamic>?> _updateBrixFee(
-    String requestId,
-    void Function(Map<String, dynamic> fee) update,
-  ) {
-    return _withFeeStorageLock(() async {
-      final prefs = await _feePrefs();
-      final pending = _loadPendingFees(prefs);
-      final index = pending.indexWhere((fee) => fee['requestId'] == requestId);
-      if (index < 0) return null;
-      update(pending[index]);
-      await _savePendingFees(prefs, pending);
-      return pending[index];
-    });
-  }
-
-  Future<void> _reconcileBrixFee(
-    Map<String, dynamic> fee,
-    Future<Map<String, dynamic>> Function(String paymentHash) checkStatus, {
-    Future<void> Function(Map<String, dynamic> originalAttempt)? resumeSameAttempt,
-  }) async {
-    final requestId = fee['requestId'] as String;
-    final feePaymentHash = fee['feePaymentHash'] as String?;
-    if (feePaymentHash == null || feePaymentHash.isEmpty) {
-      // Legacy ambiguous entries must never trigger a blind second payment.
-      broLog('⚠️ [BRIX-RELAY] Pending fee has no outgoing hash; manual reconciliation required');
-      return;
-    }
-
-    final status = await checkStatus(feePaymentHash);
-    if (isSettledOutgoingFeeStatus(
-      status,
-      paymentHash: feePaymentHash,
-      feeSats: fee['feeSats'] as int,
-    )) {
-      await _settleBrixFee(
-        requestId,
-        paymentHash: feePaymentHash,
-        incomingPaymentHash: fee['paymentHash'] as String?,
-        feeSats: fee['feeSats'] as int,
-      );
-      return;
-    }
-    if (isMissingOutgoingPayment(status)) {
-      if (resumeSameAttempt != null &&
-          fee['feeInvoice'] is String &&
-          fee['idempotencyKey'] is String) {
-        await resumeSameAttempt(fee);
-      }
-      return;
-    }
-    if (isFailedOutgoingFeeStatus(
-      status,
-      paymentHash: feePaymentHash,
-      feeSats: fee['feeSats'] as int,
-    )) {
-      await _updateBrixFee(requestId, (item) {
-        item['state'] = BrixFeeState.awaitingReceipt.name;
-        item.remove('feePaymentHash');
-        item.remove('feeInvoice');
-        item['idempotencyKey'] = const Uuid().v4();
-      });
-    }
-  }
-
-  Future<void> _settleBrixFee(
-    String requestId, {
-    String? paymentHash,
-    String? incomingPaymentHash,
-    int? feeSats,
-  }) async {
-    await _withFeeStorageLock(() async {
-      final prefs = await _feePrefs();
-      if (paymentHash != null && paymentHash.isNotEmpty) {
-        if (incomingPaymentHash != null &&
-            incomingPaymentHash.isNotEmpty &&
-            feeSats != null) {
-          final links = await getSettledFeeLinks();
-          links[incomingPaymentHash] = {
-            'feePaymentHash': paymentHash,
-            'feeSats': feeSats,
-          };
-          final saved = await prefs.setString(
-              _settledFeeLinksKey, jsonEncode(links));
-          if (!saved) throw StateError('Could not persist BRIX fee link');
-        }
-        final hashes = prefs.getStringList(_settledFeeHashesKey) ?? <String>[];
-        if (!hashes.contains(paymentHash)) {
-          hashes.add(paymentHash);
-          final saved = await prefs.setStringList(_settledFeeHashesKey, hashes);
-          if (!saved) throw StateError('Could not persist BRIX fee display hash');
-        }
-      }
-      final wasPaid = _paidFees.contains(requestId);
-      _paidFees.add(requestId);
-      try {
-        await _persistPaidFees();
-      } catch (_) {
-        if (!wasPaid) _paidFees.remove(requestId);
-        rethrow;
-      }
-      final pending = _loadPendingFees(prefs);
-      pending.removeWhere((fee) => fee['requestId'] == requestId);
-      await _savePendingFees(prefs, pending);
-    });
-  }
-
-  /// Send the fee only after the exact incoming payment has settled.
-  Future<void> _sendBrixFee(
-    Map<String, dynamic> fee, {
-    Future<Map<String, dynamic>> Function()? getInvoiceOverride,
-    Future<Map<String, dynamic>?> Function(String bolt11)? decodeInvoiceOverride,
-    Future<Map<String, dynamic>?> Function(
-      String bolt11,
-      String idempotencyKey,
-    )? payInvoiceOverride,
-    bool resumingMissingPayment = false,
-  }) async {
-    final requestId = fee['requestId'] as String;
-    final feeSats = fee['feeSats'] as int;
-    if (_paidFees.contains(requestId) || !_feePaymentsInFlight.add(requestId)) return;
-
-    try {
-      if (payInvoiceOverride == null &&
-          (!AppConfig.isPlatformLightningAddressValid || _context == null)) {
-        return;
-      }
-
-      final prepared = await _updateBrixFee(requestId, (item) {
-        final savedKey = item['idempotencyKey'] as String?;
-        if (savedKey == null || savedKey.isEmpty) {
-          item['idempotencyKey'] = const Uuid().v4();
-        }
-        item['state'] = BrixFeeState.sending.name;
-      });
-      if (prepared == null) return;
-      final idempotencyKey = prepared['idempotencyKey'] as String;
-
-      var feeInvoice = fee['feeInvoice'] as String?;
-      if (feeInvoice == null || feeInvoice.isEmpty) {
-        final result = getInvoiceOverride != null
-            ? await getInvoiceOverride()
-            : await LnAddressService().getInvoice(
-                lnAddress: AppConfig.platformLightningAddress,
-                amountSats: feeSats,
-                comment: 'BRIX fee',
-              );
-        if (result['success'] != true || result['invoice'] == null) {
-          await _updateBrixFee(requestId, (item) {
-            item['state'] = BrixFeeState.awaitingReceipt.name;
-          });
+    final operation = _outgoingFeeStorageQueue.then((_) async {
+      final pending = await _getPendingOutgoingFees();
+      final previousFeeHash = pending[paymentHash]?['feePaymentHash'] as String?;
+      if (previousFeeHash != null && previousFeeHash.isNotEmpty) {
+        final confirmed = await PlatformFeeService.isFeePaymentConfirmed(previousFeeHash);
+        if (!confirmed) {
+          broLog('⏳ [BRIX] Taxa anterior ainda não confirmada; não repetir');
           return;
         }
-        feeInvoice = result['invoice'] as String;
-      }
-
-      final decoded = decodeInvoiceOverride != null
-          ? await decodeInvoiceOverride(feeInvoice)
-          : await _context!.read<BreezProvider>().decodeInvoice(feeInvoice);
-      final feePaymentHash = decoded?['invoice']?['paymentHash'] as String?;
-      final decodedAmount = int.tryParse(
-          decoded?['invoice']?['amountSats']?.toString() ?? '');
-      if (decoded?['success'] != true ||
-          feePaymentHash == null ||
-          feePaymentHash.isEmpty ||
-          decodedAmount != feeSats) {
-        // Uma tentativa persistida nunca volta ao fluxo comum por falha de
-        // decode: sua identidade precisa continuar protegida contra duplicidade.
-        await _updateBrixFee(requestId, (item) {
-          item['state'] = item['feePaymentHash'] is String
-              ? BrixFeeState.pendingSettlement.name
-              : BrixFeeState.awaitingReceipt.name;
-        });
+        await _saveSettledOutgoingFee(paymentHash, amountSats, feeSats, previousFeeHash);
         return;
       }
-      final previousHash = fee['feePaymentHash'] as String?;
-      if (previousHash != null &&
-          previousHash.isNotEmpty &&
-          previousHash != feePaymentHash) {
-        await _updateBrixFee(requestId, (item) {
-          item['state'] = BrixFeeState.pendingSettlement.name;
-        });
-        return;
-      }
-      await _updateBrixFee(requestId, (item) {
-        item['feeInvoice'] = feeInvoice;
-        item['feePaymentHash'] = feePaymentHash;
-        item['state'] = BrixFeeState.sending.name;
-      });
-
-      Map<String, dynamic>? payResult;
-      Object? paymentError;
-      try {
-        payResult = payInvoiceOverride != null
-            ? await payInvoiceOverride(feeInvoice, idempotencyKey)
-            : await _context!.read<BreezProvider>().payInvoice(
-                feeInvoice,
-                idempotencyKey: idempotencyKey,
+      await _savePendingOutgoingFee(paymentHash, amountSats, feeSats);
+      String? feePaymentHash;
+      if (feeSats > 0) {
+        final charged = chargeOutgoingFeeOverride != null
+            ? await chargeOutgoingFeeOverride!(
+                orderId: 'brix_send_$paymentHash',
+                totalSats: amountSats,
+                feePercent: AppConfig.brixFeePercent,
+                onPaid: (hash) async => feePaymentHash = hash,
+              )
+            : await PlatformFeeService.sendPlatformFee(
+                orderId: 'brix_send_$paymentHash',
+                totalSats: amountSats,
+                feePercentOverride: AppConfig.brixFeePercent,
+                onAttempt: (invoice, hash) async {
+                  feePaymentHash = hash;
+                  await _savePendingOutgoingFee(
+                    paymentHash,
+                    amountSats,
+                    feeSats,
+                    feePaymentHash: hash,
+                  );
+                },
+                onPaid: (hash) async => feePaymentHash = hash,
               );
-      } catch (e) {
-        paymentError = e;
-      }
-
-      if (paymentError == null) {
-        final settled = isSettledOutgoingFee(
-          payResult!,
-          paymentHash: feePaymentHash,
-          feeSats: feeSats,
+        if (!charged) {
+          await _savePendingOutgoingFee(
+            paymentHash,
+            amountSats,
+            feeSats,
+            feePaymentHash: feePaymentHash,
+          );
+          broLog('⏳ [BRIX] Taxa de envio pendente de confirmação; não repetir automaticamente');
+          return;
+        }
+        await _savePendingOutgoingFee(
+          paymentHash,
+          amountSats,
+          feeSats,
+          feePaymentHash: feePaymentHash,
         );
-        if (settled) {
-          await _settleBrixFee(
-            requestId,
-            paymentHash: feePaymentHash,
-            incomingPaymentHash: fee['paymentHash'] as String?,
-            feeSats: feeSats,
-          );
-          broLog('⚡ [BRIX-RELAY] Fee settled: $feeSats sats');
-          return;
-        }
-
-        final originalPayment = payResult['payment'];
-        final protectedAttempt = resumingMissingPayment ||
-            (fee['feePaymentHash'] is String && fee['feeInvoice'] is String);
-        final originalFailed = protectedAttempt &&
-            originalPayment is Map &&
-            originalPayment['status'] == 'PaymentStatus.failed' &&
-            originalPayment['paymentHash'] == feePaymentHash &&
-            originalPayment['amount']?.toString() == feeSats.toString();
-        if (originalFailed ||
-            (!protectedAttempt && isDefinitivelyFailedOutgoingFee(payResult))) {
-          await _updateBrixFee(requestId, (item) {
-            item['state'] = BrixFeeState.awaitingReceipt.name;
-            item.remove('feePaymentHash');
-            item.remove('feeInvoice');
-            item['idempotencyKey'] = const Uuid().v4();
-          });
-          return;
-        }
       }
+      await _saveSettledOutgoingFee(
+          paymentHash, amountSats, feeSats, feePaymentHash);
+    });
+    _outgoingFeeStorageQueue = operation.then((_) {}, onError: (_, __) {});
+    return operation;
+  }
+  static Future<void> _saveSettledOutgoingFee(
+      String paymentHash, int amountSats, int feeSats, String? feePaymentHash) async {
+    final prefs = await SharedPreferences.getInstance();
+    final fees = await getSettledOutgoingFees();
+    final previousFeeHash = fees[paymentHash]?['feePaymentHash'] as String?;
+    fees[paymentHash] = {
+      'amountSats': amountSats,
+      'feeSats': feeSats,
+      'feePaymentHash': feePaymentHash ?? previousFeeHash,
+    };
+    final saved = await prefs.setString(_settledOutgoingFeesKey, jsonEncode(fees));
+    if (!saved) throw StateError('Could not persist outgoing BRIX fee');
+    await _removePendingOutgoingFee(paymentHash);
+  }
 
-      await _updateBrixFee(requestId, (item) {
-        item['state'] = BrixFeeState.pendingSettlement.name;
-      });
-      broLog('⏳ [BRIX-RELAY] Fee pending settlement; will reconcile before any retry${paymentError == null ? '' : ': $paymentError'}');
-    } catch (e) {
-      // Once an outgoing hash exists, the attempt may have reached the SDK.
-      // Keep it pending instead of risking a blind second payment.
-      try {
-        await _updateBrixFee(requestId, (item) {
-          item['state'] = item['feePaymentHash'] is String
-              ? BrixFeeState.pendingSettlement.name
-              : BrixFeeState.awaitingReceipt.name;
-        });
-      } catch (storageError) {
-        broLog('⚠️ [BRIX-RELAY] Could not persist fee recovery state: $storageError');
-      }
-      broLog('⚠️ [BRIX-RELAY] Fee payment error; will reconcile: $e');
-    } finally {
-      _feePaymentsInFlight.remove(requestId);
+  Future<void> _retryPendingOutgoingFees() async {
+    final pending = await _getPendingOutgoingFees();
+    for (final entry in pending.entries) {
+      await recordSettledOutgoingFee(
+        paymentHash: entry.key,
+        amountSats: (entry.value['amountSats'] as num).toInt(),
+        feeSats: (entry.value['feeSats'] as num).toInt(),
+      );
     }
   }
 
@@ -1425,6 +945,11 @@ class BrixRelayService {
           if (settled != null) {
             payment['status'] = 'completed';
             changed = true;
+            await recordSettledOutgoingFee(
+              paymentHash: settled,
+              amountSats: amountSats,
+              feeSats: calculateBrixFee(amountSats),
+            );
             broLog('✅ [BRIX-QUEUE] Already settled by a prior attempt — NOT paying again: $amountSats sats → $recipient');
             onQueuedPaymentCompleted?.call(recipient, amountSats);
             continue;
@@ -1483,6 +1008,14 @@ class BrixRelayService {
           if (payResult != null && payResult['success'] == true) {
             payment['status'] = 'completed';
             changed = true;
+            final paymentHash = payResult['payment']?['paymentHash']?.toString() ?? '';
+            if (paymentHash.isNotEmpty) {
+              await recordSettledOutgoingFee(
+                paymentHash: paymentHash,
+                amountSats: amountSats,
+                feeSats: calculateBrixFee(amountSats),
+              );
+            }
             broLog('✅ [BRIX-QUEUE] Payment completed: $amountSats sats → $recipient');
             // Notify listeners
             onQueuedPaymentCompleted?.call(recipient, amountSats);
@@ -1524,3 +1057,5 @@ class BrixRelayService {
     await prefs.setString(_pendingOutgoingKey, jsonEncode(list));
   }
 }
+
+
