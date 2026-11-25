@@ -1,7 +1,36 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:bro_app/services/brix_relay_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('timeout attempt persists hash and stable idempotency key', () async {
+    SharedPreferences.setMockInitialValues({});
+    final service = BrixRelayService();
+    await service.queueOutgoingPayment(
+      recipient: 'carol@brix.brostr.app',
+      amountSats: 300,
+      attemptHash: 'prepared-invoice-hash',
+      idempotencyKey: 'brix-prepared-invoice-hash',
+      feeNetworkReserveSats: 1,
+    );
+
+    final pending = await service.getPendingOutgoing();
+    expect(pending.single['attemptHashes'], ['prepared-invoice-hash']);
+    expect(pending.single['idempotencyKey'], 'brix-prepared-invoice-hash');
+    expect(pending.single['feeNetworkReserveSats'], 1);
+
+    await service.markOutgoingPaymentCompletedByHash('prepared-invoice-hash');
+    expect(await service.getPendingOutgoing(), isEmpty);
+    final stored = jsonDecode((await SharedPreferences.getInstance())
+            .getString('brix_pending_outgoing') ??
+        '[]') as List;
+    expect(stored.single['status'], 'completed');
+  });
+
   group('BRIX-QUEUE anti double-spend (firstSettledHash)', () {
     test('returns null when no prior attempt settled', () async {
       final settled = await BrixRelayService.firstSettledHash(

@@ -33,12 +33,26 @@ void main() {
     expect(BrixRelayService.calculateBrixFee(1000), 5);
   });
 
-  test('send preview recognizes BRIX destinations and reserves its fee', () {
+  test('manual BRIX amount is the total debit including both fees', () {
     expect(isBrixSendDestination('carol@brix.brostr.app'), isTrue);
     expect(isBrixSendDestination('carol'), isTrue);
     expect(isBrixSendDestination('carol@coinos.io'), isFalse);
-    expect(maxBrixSendAmount(1000), 995);
-    expect(maxBrixSendAmount(1), 0);
+    expect(maxBrixSendAmount(1000), 1000);
+    expect(maxBrixSendAmount(1), 1);
+    expect(maxBrixSendAmount(0), 0);
+
+    expect(brixManualAmounts(totalSats: 300, networkFeeSats: 2), {
+      'totalSats': 300,
+      'brixFeeSats': 2,
+      'networkFeeSats': 2,
+      'receiverSats': 296,
+    });
+    expect(brixManualAmounts(totalSats: 200, networkFeeSats: 1), {
+      'totalSats': 200,
+      'brixFeeSats': 1,
+      'networkFeeSats': 1,
+      'receiverSats': 198,
+    });
   });
 
   test('only a completed payment can trigger the outgoing fee', () {

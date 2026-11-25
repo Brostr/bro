@@ -1,4 +1,4 @@
-﻿import 'package:bro_app/services/log_utils.dart';
+import 'package:bro_app/services/log_utils.dart';
 import 'package:flutter/material.dart';
 
 /// Stub para web/Windows/Linux - Breez SDK não funciona nessas plataformas
@@ -9,22 +9,24 @@ class BreezProvider with ChangeNotifier {
   String? get error => 'Lightning Network não disponível nesta plataforma';
   String? get mnemonic => null;
   dynamic get sdk => null;
-  bool get seedRecoveryNeeded => false;  // Para mostrar alerta de erro
+  bool get seedRecoveryNeeded => false; // Para mostrar alerta de erro
 
   // v748 (A3): stub — seed legada nunca pende fora das plataformas Breez
   bool get legacySeedPending => false;
   Future<void> resolveLegacySeed({required bool adopt}) async {}
 
   // Callback para notificar pagamentos recebidos
-  Function(String paymentId, int amountSats, String? paymentHash)? onPaymentReceived;
+  Function(String paymentId, int amountSats, String? paymentHash)?
+      onPaymentReceived;
   // Callback para notificar pagamentos enviados
-  Function(String paymentId, int amountSats, String? paymentHash)? onPaymentSent;
-  
+  Function(String paymentId, int amountSats, String? paymentHash)?
+      onPaymentSent;
+
   String? get lastPaymentId => null;
   int? get lastPaymentAmount => null;
-  
+
   void clearLastPayment() {}
-  
+
   /// Reset para novo usuário (stub)
   Future<void> resetForNewUser() async {
     broLog('⚠️ resetForNewUser não disponível nesta plataforma');
@@ -39,18 +41,27 @@ class BreezProvider with ChangeNotifier {
     int? amountSats,
     String? description,
   }) async {
-    return {'success': false, 'error': 'Lightning não disponível nesta plataforma'};
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
 
   Future<Map<String, dynamic>> checkPaymentStatus(String paymentHash) async {
-    return {'paid': false, 'error': 'Lightning não disponível nesta plataforma'};
+    return {
+      'paid': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
 
   Future<Map<String, dynamic>> waitForPayment({
     required String paymentHash,
     int timeoutSeconds = 300,
   }) async {
-    return {'paid': false, 'error': 'Lightning não disponível nesta plataforma'};
+    return {
+      'paid': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
 
   Future<Map<String, dynamic>> getBalance() async {
@@ -58,7 +69,41 @@ class BreezProvider with ChangeNotifier {
   }
 
   Future<Map<String, dynamic>?> createOnchainAddress() async {
-    return {'success': false, 'error': 'Lightning não disponível nesta plataforma'};
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
+  }
+
+  Future<Map<String, dynamic>> prepareBrixManualPayment({
+    required String destination,
+    required int totalSats,
+    String? comment,
+  }) async {
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
+  }
+
+  Future<Map<String, dynamic>?> payPreparedBrixPayment(
+    dynamic prepared, {
+    String? idempotencyKey,
+  }) async {
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
+  }
+
+  Future<Map<String, dynamic>> prepareInvoicePayment(
+    String bolt11, {
+    int? amountSats,
+  }) async {
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
 
   Future<Map<String, dynamic>?> payInvoice(
@@ -66,12 +111,19 @@ class BreezProvider with ChangeNotifier {
     int? amountSats,
     int escrowCoverSats = 0,
     String? idempotencyKey,
+    dynamic preparedPayment,
   }) async {
-    return {'success': false, 'error': 'Lightning não disponível nesta plataforma'};
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
 
   Future<Map<String, dynamic>?> decodeInvoice(String bolt11) async {
-    return {'success': false, 'error': 'Lightning não disponível nesta plataforma'};
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
 
   Future<List<Map<String, dynamic>>> listPayments() async {
@@ -84,7 +136,8 @@ class BreezProvider with ChangeNotifier {
   }
 
   /// Exportação de movimentações (stub)
-  Future<List<Map<String, dynamic>>> listPaymentsForExport({int limit = 1000}) async {
+  Future<List<Map<String, dynamic>>> listPaymentsForExport(
+      {int limit = 1000}) async {
     return [];
   }
 
@@ -96,8 +149,12 @@ class BreezProvider with ChangeNotifier {
 
   Future<void> refreshBalance() async {}
 
-  Future<Map<String, dynamic>?> createBitcoinAddress({String? description}) async {
-    return {'success': false, 'error': 'Lightning não disponível nesta plataforma'};
+  Future<Map<String, dynamic>?> createBitcoinAddress(
+      {String? description}) async {
+    return {
+      'success': false,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
 
   Future<Map<String, dynamic>> checkAddressStatus(String address) async {
@@ -111,17 +168,21 @@ class BreezProvider with ChangeNotifier {
   }
 
   Future<void> disconnect() async {}
-  
+
   /// Force sync da carteira (stub)
   Future<void> forceSyncWallet() async {
     broLog('⚠️ forceSyncWallet não disponível nesta plataforma');
   }
-  
+
   /// Recuperar depósitos não reclamados (stub)
   Future<Map<String, dynamic>> recoverUnclaimedDeposits() async {
-    return {'success': false, 'claimed': 0, 'error': 'Lightning não disponível nesta plataforma'};
+    return {
+      'success': false,
+      'claimed': 0,
+      'error': 'Lightning não disponível nesta plataforma'
+    };
   }
-  
+
   /// Diagnóstico completo (stub)
   Future<Map<String, dynamic>> getFullDiagnostics() async {
     return {
@@ -131,7 +192,7 @@ class BreezProvider with ChangeNotifier {
       'error': 'Lightning não disponível nesta plataforma',
     };
   }
-  
+
   @override
   void dispose() {
     super.dispose();

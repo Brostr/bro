@@ -5,6 +5,15 @@
 
 Prazo: tudo entregue e aprovado até **30/nov**.
 
+## Estabilização v854 — BRIX e taxas (25/11)
+
+- Envio BRIX manual: o valor digitado é o **débito total**. A taxa BRIX (0,5%, mínimo 1 sat) e a taxa de rede Spark são descontadas desse total; a confirmação mostra débito, taxas e valor líquido ao destinatário antes do pagamento.
+- O SDK prepara o LNURL com `feesIncluded` sobre o total menos a taxa BRIX e uma reserva de 1 sat para a rede dessa cobrança. A confirmação usa o valor real da invoice; a taxa BRIX só é cobrada após pagamento concluído e não envia se sua rede exceder a reserva.
+- A fila persiste hash e chave de idempotência antes do primeiro envio, reconcilia timeouts pelo hash e não usa fallback que cobraria taxas fora do total.
+- Invoice BOLT11 de valor fixo: destinatário recebe o valor integral; a taxa de rede é estimada e somada antes da confirmação, com validação do saldo disponível.
+- Histórico BRIX: `brix enviado` mostra o débito total; o detalhe informa o valor recebido e a taxa consolidada. Recebimento continua gratuito e integral.
+- Validação local: gate `test/race test/integration` **116/116**; análise sem erros nos arquivos alterados. Build de teste Android, sem merge para `main` e sem novo deploy do servidor.
+
 ## Estabilização v852 — BRIX e taxas (25/11)
 
 - R3/expiração automática de aceites permanece **descartado** nesta linha; não reintroduzir com as correções de estabilização ou performance.

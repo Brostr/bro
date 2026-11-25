@@ -14,7 +14,6 @@ import 'package:bro_app/services/storage_service.dart';
 import 'package:bro_app/services/secure_storage_service.dart';
 import 'package:bro_app/services/log_utils.dart';
 import 'package:bro_app/services/push_diag.dart';
-import 'package:bro_app/services/lnaddress_service.dart';
 import 'package:bro_app/services/platform_fee_service.dart';
 import 'package:bro_app/providers/breez_provider.dart';
 import 'package:bro_app/config.dart';
@@ -736,13 +735,14 @@ class BrixRelayService {
 
   static Future<void> _savePendingOutgoingFee(
       String paymentHash, int amountSats, int feeSats,
-      {String? feePaymentHash}) async {
+      {String? feePaymentHash, int feeNetworkReserveSats = 0}) async {
     final prefs = await SharedPreferences.getInstance();
     final pending = await _getPendingOutgoingFees();
     final previous = pending[paymentHash];
     pending[paymentHash] = {
       'amountSats': amountSats,
       'feeSats': feeSats,
+      'feeNetworkReserveSats': feeNetworkReserveSats,
       'feePaymentHash': feePaymentHash ?? previous?['feePaymentHash'],
     };
     final saved =
@@ -771,6 +771,7 @@ class BrixRelayService {
     required String paymentHash,
     required int amountSats,
     required int feeSats,
+    int feeNetworkReserveSats = 0,
   }) {
     final operation = _outgoingFeeStorageQueue.then((_) async {
       final settled = await getSettledOutgoingFees();
@@ -789,7 +790,8 @@ class BrixRelayService {
             paymentHash, amountSats, feeSats, previousFeeHash);
         return;
       }
-      await _savePendingOutgoingFee(paymentHash, amountSats, feeSats);
+      await _savePendingOutgoingFee(paymentHash, amountSats, feeSats,
+          feeNetworkReserveSats: feeNetworkReserveSats);
       String? feePaymentHash;
       if (feeSats > 0) {
         final charged = chargeOutgoingFeeOverride != null
@@ -803,6 +805,7 @@ class BrixRelayService {
                 orderId: 'brix_send_$paymentHash',
                 totalSats: amountSats,
                 feePercentOverride: AppConfig.brixFeePercent,
+                maxNetworkFeeSats: feeNetworkReserveSats,
                 onAttempt: (invoice, hash) async {
                   feePaymentHash = hash;
                   await _savePendingOutgoingFee(
@@ -810,6 +813,7 @@ class BrixRelayService {
                     amountSats,
                     feeSats,
                     feePaymentHash: hash,
+                    feeNetworkReserveSats: feeNetworkReserveSats,
                   );
                 },
                 onPaid: (hash) async => feePaymentHash = hash,
@@ -820,6 +824,7 @@ class BrixRelayService {
             amountSats,
             feeSats,
             feePaymentHash: feePaymentHash,
+            feeNetworkReserveSats: feeNetworkReserveSats,
           );
           broLog(
               '⏳ [BRIX] Taxa de envio pendente de confirmação; não repetir automaticamente');
@@ -830,6 +835,7 @@ class BrixRelayService {
           amountSats,
           feeSats,
           feePaymentHash: feePaymentHash,
+          feeNetworkReserveSats: feeNetworkReserveSats,
         );
       }
       await _saveSettledOutgoingFee(
@@ -862,6 +868,8 @@ class BrixRelayService {
         paymentHash: entry.key,
         amountSats: (entry.value['amountSats'] as num).toInt(),
         feeSats: (entry.value['feeSats'] as num).toInt(),
+        feeNetworkReserveSats:
+            (entry.value['feeNetworkReserveSats'] as num?)?.toInt() ?? 0,
       );
     }
   }
@@ -883,6 +891,9 @@ class BrixRelayService {
     required int amountSats,
     String? originalDest,
     String? comment,
+    String? attemptHash,
+    String? idempotencyKey,
+    int feeNetworkReserveSats = 0,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final list = _loadQueue(prefs);
@@ -893,6 +904,20 @@ class BrixRelayService {
         p['amountSats'] == amountSats &&
         p['status'] == 'pending');
     if (exists) {
+      if (attemptHash != null && attemptHash.isNotEmpty) {
+        final existing = list.firstWhere((p) =>
+            p['recipient'] == recipient &&
+            p['amountSats'] == amountSats &&
+            p['status'] == 'pending');
+        final hashes =
+            (existing['attemptHashes'] as List?)?.cast<String>().toList() ??
+                <String>[];
+        if (!hashes.contains(attemptHash)) hashes.add(attemptHash);
+        existing['attemptHashes'] = hashes;
+        existing['idempotencyKey'] = idempotencyKey;
+        existing['feeNetworkReserveSats'] = feeNetworkReserveSats;
+        await _saveQueue(prefs, list);
+      }
       broLog('⏳ [BRIX-QUEUE] Already queued: $amountSats sats → $recipient');
       return;
     }
@@ -907,6 +932,11 @@ class BrixRelayService {
       'retryCount': 0,
       'lastRetry': null,
       'status': 'pending',
+      'attemptHashes': attemptHash == null || attemptHash.isEmpty
+          ? <String>[]
+          : <String>[attemptHash],
+      'idempotencyKey': idempotencyKey,
+      'feeNetworkReserveSats': feeNetworkReserveSats,
     });
 
     await _saveQueue(prefs, list);
@@ -919,6 +949,30 @@ class BrixRelayService {
     return _loadQueue(prefs)
         .where((p) => p['status'] == 'pending' || p['status'] == 'expired')
         .toList();
+  }
+
+  Future<void> markOutgoingPaymentCompleted(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = _loadQueue(prefs);
+    for (final payment in list) {
+      if (payment['id'] == id && payment['status'] == 'pending') {
+        payment['status'] = 'completed';
+      }
+    }
+    await _saveQueue(prefs, list);
+  }
+
+  Future<void> markOutgoingPaymentCompletedByHash(String paymentHash) async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = _loadQueue(prefs);
+    for (final payment in list) {
+      final hashes =
+          (payment['attemptHashes'] as List?)?.cast<String>() ?? const [];
+      if (payment['status'] == 'pending' && hashes.contains(paymentHash)) {
+        payment['status'] = 'completed';
+      }
+    }
+    await _saveQueue(prefs, list);
   }
 
   /// Cancel a queued outgoing payment by id.
@@ -951,7 +1005,6 @@ class BrixRelayService {
 
     try {
       final breezProvider = _context!.read<BreezProvider>();
-      final lnService = LnAddressService();
 
       for (final payment in List.of(list)) {
         if (payment['status'] != 'pending') continue;
@@ -999,6 +1052,8 @@ class BrixRelayService {
               paymentHash: settled,
               amountSats: amountSats,
               feeSats: calculateBrixFee(amountSats),
+              feeNetworkReserveSats:
+                  (payment['feeNetworkReserveSats'] as num?)?.toInt() ?? 0,
             );
             broLog(
                 '✅ [BRIX-QUEUE] Already settled by a prior attempt — NOT paying again: $amountSats sats → $recipient');
@@ -1014,13 +1069,22 @@ class BrixRelayService {
         changed = true;
 
         try {
-          // Try LNURL flow again
-          final invoiceResult = await lnService.getInvoice(
-            lnAddress: recipient,
-            amountSats: amountSats,
+          // Preserve the confirmed total-debit rule when retrying offline sends.
+          final prepared = await breezProvider.prepareBrixManualPayment(
+            destination: recipient,
+            totalSats: amountSats,
             comment: paymentComment,
-            senderPubkey: _pubkey,
           );
+          final invoiceResult = prepared['success'] == true
+              ? {
+                  'success': true,
+                  'invoice': prepared['invoice'],
+                  'prepared': prepared['prepared'],
+                }
+              : {
+                  'success': false,
+                  'error': prepared['error'],
+                };
 
           if (invoiceResult['success'] != true) {
             // Still offline or errored — keep queued
@@ -1057,7 +1121,13 @@ class BrixRelayService {
           }
 
           // Try to pay
-          final payResult = await breezProvider.payInvoice(invoice);
+          final payResult = invoiceResult['prepared'] != null
+              ? await breezProvider.payPreparedBrixPayment(
+                  invoiceResult['prepared'],
+                  idempotencyKey: payment['idempotencyKey']?.toString() ??
+                      'brix-${payment['id']}',
+                )
+              : await breezProvider.payInvoice(invoice);
 
           if (payResult != null &&
               payResult['success'] == true &&
@@ -1072,6 +1142,8 @@ class BrixRelayService {
                 paymentHash: paymentHash,
                 amountSats: amountSats,
                 feeSats: calculateBrixFee(amountSats),
+                feeNetworkReserveSats:
+                    (payment['feeNetworkReserveSats'] as num?)?.toInt() ?? 0,
               );
             }
             broLog(

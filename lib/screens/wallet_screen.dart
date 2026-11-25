@@ -55,14 +55,21 @@ bool isBrixSendDestination(String destination) {
 }
 
 @visibleForTesting
-int maxBrixSendAmount(int availableSats) {
-  if (availableSats <= 1) return 0;
-  var amount = availableSats - 1;
-  while (amount > 0 &&
-      amount + BrixRelayService.calculateBrixFee(amount) > availableSats) {
-    amount--;
-  }
-  return amount;
+int maxBrixSendAmount(int availableSats) =>
+    availableSats < 0 ? 0 : availableSats;
+
+@visibleForTesting
+Map<String, int> brixManualAmounts({
+  required int totalSats,
+  required int networkFeeSats,
+}) {
+  final brixFeeSats = BrixRelayService.calculateBrixFee(totalSats);
+  return {
+    'totalSats': totalSats,
+    'brixFeeSats': brixFeeSats,
+    'networkFeeSats': networkFeeSats,
+    'receiverSats': totalSats - brixFeeSats - networkFeeSats,
+  };
 }
 
 @visibleForTesting
@@ -936,6 +943,8 @@ class _WalletScreenState extends State<WalletScreen> {
     String? errorMessage;
     bool isReaisMode = false;
     double? btcPriceBrl;
+    Map<String, dynamic>? brixPreparedPayment;
+    bool isPreparingBrix = false;
 
     // Get current balance
     final balanceSats =
@@ -1135,6 +1144,7 @@ class _WalletScreenState extends State<WalletScreen> {
                     maxLines: 2,
                     enabled: !isSending,
                     onChanged: (value) {
+                      brixPreparedPayment = null;
                       // Se for Lightning Address, LNURL-pay, phone, email ou username BRIX, mostrar campo de valor
                       final trimmed = value.trim().toLowerCase();
                       final isLnAddress =
@@ -1200,7 +1210,9 @@ class _WalletScreenState extends State<WalletScreen> {
                                     decimal: true)
                                 : TextInputType.number,
                             enabled: !isSending,
-                            onChanged: (_) => setModalState(() {}),
+                            onChanged: (_) => setModalState(() {
+                              brixPreparedPayment = null;
+                            }),
                             decoration: InputDecoration(
                               labelText: isReaisMode
                                   ? (_displayCurrency == 'BRL'
@@ -1302,10 +1314,8 @@ class _WalletScreenState extends State<WalletScreen> {
                                   final dest = invoiceController.text
                                       .trim()
                                       .toLowerCase();
-                                  final isBrixDest = dest.contains('@') &&
-                                      (dest.endsWith('@brix.app') ||
-                                          dest.endsWith('@brostr.app') ||
-                                          dest.endsWith('@brix.brostr.app'));
+                                  final isBrixDest =
+                                      isBrixSendDestination(dest);
                                   int maxSats;
                                   if (isBrixDest) {
                                     maxSats = maxBrixSendAmount(availableSats);
@@ -1316,6 +1326,7 @@ class _WalletScreenState extends State<WalletScreen> {
                                         .clamp(0, availableSats);
                                   }
                                   setModalState(() {
+                                    brixPreparedPayment = null;
                                     if (isReaisMode &&
                                         btcPriceBrl != null &&
                                         btcPriceBrl! > 0) {
@@ -1419,6 +1430,8 @@ class _WalletScreenState extends State<WalletScreen> {
                         destination: invoiceController.text,
                         amountSats: amountSats,
                         bitcoinPrice: btcPriceBrl,
+                        preparedPayment: brixPreparedPayment,
+                        isPreparing: isPreparingBrix,
                       );
                     }),
 
@@ -1586,7 +1599,7 @@ class _WalletScreenState extends State<WalletScreen> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: isSending
+                      onPressed: (isSending || isPreparingBrix)
                           ? null
                           : () async {
                               final destination = invoiceController.text.trim();
@@ -1668,11 +1681,7 @@ class _WalletScreenState extends State<WalletScreen> {
                                   return;
                                 }
 
-                                final requiredSats = amountSats +
-                                    (isBrixSendDestination(destination)
-                                        ? BrixRelayService.calculateBrixFee(
-                                            amountSats)
-                                        : 0);
+                                final requiredSats = amountSats;
                                 if (requiredSats > availableSats) {
                                   if (hasTierActive &&
                                       requiredSats >
@@ -1752,6 +1761,156 @@ class _WalletScreenState extends State<WalletScreen> {
                                       broLog(
                                           '🔍 BRIX resolvido: $destination → $resolvedDest (via ${resolveResult.matchedBy})');
                                     }
+                                  }
+
+                                  if (confirmedBrixDestination) {
+                                    if (brixPreparedPayment == null) {
+                                      setModalState(
+                                          () => isPreparingBrix = true);
+                                      brixPreparedPayment = await breezProvider
+                                          .prepareBrixManualPayment(
+                                        destination: resolvedDest,
+                                        totalSats: amountSats,
+                                        comment: memoText.isNotEmpty
+                                            ? memoText
+                                            : null,
+                                      );
+                                      if (!context.mounted) return;
+                                      setModalState(() {
+                                        isPreparingBrix = false;
+                                        isSending = false;
+                                      });
+                                    }
+                                    final prepared = brixPreparedPayment!;
+                                    if (prepared['success'] != true) {
+                                      final error = prepared['error']
+                                              ?.toString()
+                                              .toLowerCase() ??
+                                          '';
+                                      if (error.contains('offline')) {
+                                        await BrixRelayService()
+                                            .queueOutgoingPayment(
+                                          recipient: resolvedDest,
+                                          amountSats: amountSats,
+                                          originalDest: destination,
+                                          comment: memoText.isNotEmpty
+                                              ? memoText
+                                              : null,
+                                        );
+                                        if (context.mounted) {
+                                          Navigator.pop(context);
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                  '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                              backgroundColor:
+                                                  Color(0xFF4CAF50),
+                                            ),
+                                          );
+                                        }
+                                        _loadWalletInfo();
+                                      } else {
+                                        setModalState(() => errorMessage =
+                                            prepared['error']?.toString() ??
+                                                'Não foi possível calcular as taxas');
+                                      }
+                                      return;
+                                    }
+                                    final confirmed = await _confirmBrixSend(
+                                      prepared,
+                                      btcPriceBrl,
+                                    );
+                                    if (confirmed != true) {
+                                      setModalState(() => isSending = false);
+                                      return;
+                                    }
+                                    setModalState(() => isSending = true);
+                                    final idempotencyKey =
+                                        'brix-${prepared['paymentHash']}';
+                                    await BrixRelayService()
+                                        .queueOutgoingPayment(
+                                      recipient: resolvedDest,
+                                      amountSats: amountSats,
+                                      originalDest: destination,
+                                      comment:
+                                          memoText.isNotEmpty ? memoText : null,
+                                      attemptHash:
+                                          prepared['paymentHash']?.toString(),
+                                      idempotencyKey: idempotencyKey,
+                                      feeNetworkReserveSats:
+                                          (prepared['feeNetworkReserveSats']
+                                                      as num?)
+                                                  ?.toInt() ??
+                                              0,
+                                    );
+                                    final result = await breezProvider
+                                        .payPreparedBrixPayment(
+                                      prepared['prepared'],
+                                      idempotencyKey: idempotencyKey,
+                                    );
+                                    if (result?['errorType'] ==
+                                        'TIMEOUT_PENDING') {
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                                'Pagamento em processamento. Verifique o histórico antes de tentar novamente.'),
+                                            backgroundColor: Colors.orange,
+                                          ),
+                                        );
+                                      }
+                                      _loadWalletInfo();
+                                      return;
+                                    }
+                                    if (isCompletedWalletPayment(result)) {
+                                      final paymentHash = result!['payment']
+                                                  ?['paymentHash']
+                                              ?.toString() ??
+                                          '';
+                                      if (paymentHash.isNotEmpty) {
+                                        await BrixRelayService
+                                            .recordSettledOutgoingFee(
+                                          paymentHash: paymentHash,
+                                          amountSats: amountSats,
+                                          feeSats:
+                                              BrixRelayService.calculateBrixFee(
+                                                  amountSats),
+                                          feeNetworkReserveSats:
+                                              (prepared['feeNetworkReserveSats']
+                                                          as num?)
+                                                      ?.toInt() ??
+                                                  0,
+                                        );
+                                        await BrixRelayService()
+                                            .markOutgoingPaymentCompletedByHash(
+                                                paymentHash);
+                                      }
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          SnackBar(
+                                            content: Text(AppLocalizations.of(
+                                                    context)
+                                                .t('wallet_payment_sent_success')),
+                                            backgroundColor:
+                                                const Color(0xFF4CAF50),
+                                          ),
+                                        );
+                                      }
+                                      _loadWalletInfo();
+                                    } else {
+                                      setModalState(() {
+                                        isSending = false;
+                                        errorMessage = result?['error']
+                                                ?.toString() ??
+                                            'Pagamento não concluído. Verifique o histórico antes de tentar novamente.';
+                                      });
+                                    }
+                                    return;
                                   }
 
                                   // Resolver Lightning Address ou LNURL para invoice BOLT11
@@ -2123,6 +2282,8 @@ class _WalletScreenState extends State<WalletScreen> {
     required String destination,
     required int amountSats,
     required double? bitcoinPrice,
+    Map<String, dynamic>? preparedPayment,
+    bool isPreparing = false,
   }) {
     if (!isBrixSendDestination(destination) || amountSats <= 0) {
       return const SizedBox.shrink();
@@ -2131,6 +2292,11 @@ class _WalletScreenState extends State<WalletScreen> {
     final fiat = bitcoinPrice != null && bitcoinPrice > 0
         ? ' (≈ $_fiatSymbol ${(feeSats * bitcoinPrice / 100000000).toStringAsFixed(2)})'
         : '';
+    final status = isPreparing
+        ? 'Calculando taxa de rede...'
+        : preparedPayment?['success'] == true
+            ? 'Taxas calculadas. Revise na confirmação.'
+            : 'Toque em enviar para calcular a taxa de rede e o valor recebido.';
     return Padding(
       padding: const EdgeInsets.only(top: 12),
       child: Container(
@@ -2142,10 +2308,89 @@ class _WalletScreenState extends State<WalletScreen> {
           border: Border.all(color: Colors.orange.withOpacity(0.3)),
         ),
         child: Text(
+          'Débito total: $amountSats sats\n'
           'Taxa BRIX (0,5%, mínimo 1 sat): $feeSats sat${feeSats == 1 ? '' : 's'}$fiat\n'
-          'Total com a taxa: ${amountSats + feeSats} sats',
+          '$status',
           style: const TextStyle(color: Colors.white70, fontSize: 12),
         ),
+      ),
+    );
+  }
+
+  Future<bool?> _confirmBrixSend(
+    Map<String, dynamic> prepared,
+    double? bitcoinPrice,
+  ) {
+    final totalSats = (prepared['totalSats'] as num).toInt();
+    final brixFeeSats = (prepared['brixFeeSats'] as num).toInt();
+    final networkFeeSats = (prepared['networkFeeSats'] as num).toInt() +
+        ((prepared['feeNetworkReserveSats'] as num?)?.toInt() ?? 0);
+    final receiverSats = (prepared['receiverSats'] as num).toInt();
+    final totalFees = brixFeeSats + networkFeeSats;
+    final feePercent = totalSats > 0 ? totalFees / totalSats * 100 : 0.0;
+    final fiat = bitcoinPrice != null && bitcoinPrice > 0
+        ? ' (≈ $_fiatSymbol ${(totalFees * bitcoinPrice / 100000000).toStringAsFixed(2)})'
+        : '';
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('Confirmar envio BRIX',
+            style: TextStyle(color: Colors.white)),
+        content: Text(
+          'Débito total: $totalSats sats\n'
+          'Destinatário recebe: $receiverSats sats\n'
+          'Taxa: ${feePercent.toStringAsFixed(1)}% · $totalFees sats$fiat\n'
+          '(BRIX: $brixFeeSats · rede: $networkFeeSats)',
+          style: const TextStyle(color: Colors.white70, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: receiverSats > 0
+                ? () => Navigator.pop(dialogContext, true)
+                : null,
+            child: const Text('Confirmar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool?> _confirmInvoiceSend({
+    required int amountSats,
+    required int networkFeeSats,
+    required double? bitcoinPrice,
+  }) {
+    final total = amountSats + networkFeeSats;
+    final fiat = bitcoinPrice != null && bitcoinPrice > 0
+        ? ' (≈ $_fiatSymbol ${(networkFeeSats * bitcoinPrice / 100000000).toStringAsFixed(2)})'
+        : '';
+    return showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A1A),
+        title: const Text('Confirmar pagamento',
+            style: TextStyle(color: Colors.white)),
+        content: Text(
+          'Destinatário recebe: $amountSats sats\n'
+          'Taxa de rede: $networkFeeSats sats$fiat\n'
+          'Débito total: $total sats',
+          style: const TextStyle(color: Colors.white70, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Confirmar'),
+          ),
+        ],
       ),
     );
   }
@@ -2442,6 +2687,9 @@ class _WalletScreenState extends State<WalletScreen> {
     String? errorMessage;
     double? bitcoinPrice;
     int? invoiceAmountSats; // Valor da invoice (se BOLT11 com valor embutido)
+    Map<String, dynamic>? brixPreparedPayment;
+    Map<String, dynamic>? invoicePreparedPayment;
+    bool isPreparingBrix = false;
 
     // Get current balance and available balance
     final balanceSats =
@@ -2682,7 +2930,10 @@ class _WalletScreenState extends State<WalletScreen> {
                     TextField(
                       controller: amountController,
                       keyboardType: TextInputType.number,
-                      onChanged: (_) => setModalState(() {}),
+                      onChanged: (_) => setModalState(() {
+                        brixPreparedPayment = null;
+                        invoicePreparedPayment = null;
+                      }),
                       style: const TextStyle(color: Colors.white, fontSize: 18),
                       decoration: InputDecoration(
                         labelText: AppLocalizations.of(context)
@@ -2715,6 +2966,8 @@ class _WalletScreenState extends State<WalletScreen> {
                       amountSats:
                           int.tryParse(amountController.text.trim()) ?? 0,
                       bitcoinPrice: bitcoinPrice,
+                      preparedPayment: brixPreparedPayment,
+                      isPreparing: isPreparingBrix,
                     ),
 
                   // Erro
@@ -2749,7 +3002,7 @@ class _WalletScreenState extends State<WalletScreen> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: isSending
+                      onPressed: (isSending || isPreparingBrix)
                           ? null
                           : () async {
                               broLog('🔘 Botão de envio pressionado!');
@@ -2770,11 +3023,7 @@ class _WalletScreenState extends State<WalletScreen> {
                                           .t('wallet_invalid_amount'));
                                   return;
                                 }
-                                final requiredSats = amount +
-                                    (isBrixAddress
-                                        ? BrixRelayService.calculateBrixFee(
-                                            amount)
-                                        : 0);
+                                final requiredSats = amount;
                                 if (requiredSats > availableSats) {
                                   setModalState(() => errorMessage =
                                           AppLocalizations.of(context).tp(
@@ -2783,18 +3032,6 @@ class _WalletScreenState extends State<WalletScreen> {
                                       }));
                                   return;
                                 }
-                              }
-
-                              // Validar saldo para invoice BOLT11 com valor
-                              if (invoiceAmountSats != null &&
-                                  invoiceAmountSats! > availableSats) {
-                                setModalState(() => errorMessage =
-                                        AppLocalizations.of(context).tp(
-                                            'wallet_insufficient_needed', {
-                                      'needed': invoiceAmountSats.toString(),
-                                      'available': availableSats.toString()
-                                    }));
-                                return;
                               }
 
                               setModalState(() {
@@ -2814,6 +3051,191 @@ class _WalletScreenState extends State<WalletScreen> {
                                 final breezProvider =
                                     context.read<BreezProvider>();
                                 String finalInvoice = invoice;
+
+                                if (isBrixAddress) {
+                                  final amountSats =
+                                      int.parse(amountController.text.trim());
+                                  if (brixPreparedPayment == null) {
+                                    setModalState(() => isPreparingBrix = true);
+                                    brixPreparedPayment = await breezProvider
+                                        .prepareBrixManualPayment(
+                                      destination: invoice,
+                                      totalSats: amountSats,
+                                    );
+                                    if (!context.mounted) return;
+                                    setModalState(() {
+                                      isPreparingBrix = false;
+                                      isSending = false;
+                                    });
+                                  }
+                                  final prepared = brixPreparedPayment!;
+                                  if (prepared['success'] != true) {
+                                    final error = prepared['error']
+                                            ?.toString()
+                                            .toLowerCase() ??
+                                        '';
+                                    if (error.contains('offline')) {
+                                      await BrixRelayService()
+                                          .queueOutgoingPayment(
+                                        recipient: invoice,
+                                        amountSats: amountSats,
+                                        originalDest: invoice,
+                                      );
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                                '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                            backgroundColor: Color(0xFF4CAF50),
+                                          ),
+                                        );
+                                      }
+                                      _loadWalletInfo();
+                                    } else {
+                                      setModalState(() => errorMessage = prepared[
+                                                  'error']
+                                              ?.toString() ??
+                                          'Não foi possível calcular as taxas');
+                                    }
+                                    return;
+                                  }
+                                  final confirmed = await _confirmBrixSend(
+                                      prepared, bitcoinPrice);
+                                  if (confirmed != true) {
+                                    setModalState(() => isSending = false);
+                                    return;
+                                  }
+                                  setModalState(() => isSending = true);
+                                  final idempotencyKey =
+                                      'brix-${prepared['paymentHash']}';
+                                  await BrixRelayService().queueOutgoingPayment(
+                                    recipient: invoice,
+                                    amountSats: amountSats,
+                                    originalDest: invoice,
+                                    attemptHash:
+                                        prepared['paymentHash']?.toString(),
+                                    idempotencyKey: idempotencyKey,
+                                    feeNetworkReserveSats:
+                                        (prepared['feeNetworkReserveSats']
+                                                    as num?)
+                                                ?.toInt() ??
+                                            0,
+                                  );
+                                  final result = await breezProvider
+                                      .payPreparedBrixPayment(
+                                    prepared['prepared'],
+                                    idempotencyKey: idempotencyKey,
+                                  );
+                                  if (result?['errorType'] ==
+                                      'TIMEOUT_PENDING') {
+                                    if (context.mounted) {
+                                      Navigator.pop(context);
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                              'Pagamento em processamento. Verifique o histórico antes de tentar novamente.'),
+                                          backgroundColor: Colors.orange,
+                                        ),
+                                      );
+                                    }
+                                    _loadWalletInfo();
+                                    return;
+                                  }
+                                  if (isCompletedWalletPayment(result)) {
+                                    final paymentHash = result!['payment']
+                                                ?['paymentHash']
+                                            ?.toString() ??
+                                        '';
+                                    if (paymentHash.isNotEmpty) {
+                                      await BrixRelayService
+                                          .recordSettledOutgoingFee(
+                                        paymentHash: paymentHash,
+                                        amountSats: amountSats,
+                                        feeSats:
+                                            BrixRelayService.calculateBrixFee(
+                                                amountSats),
+                                        feeNetworkReserveSats:
+                                            (prepared['feeNetworkReserveSats']
+                                                        as num?)
+                                                    ?.toInt() ??
+                                                0,
+                                      );
+                                      await BrixRelayService()
+                                          .markOutgoingPaymentCompletedByHash(
+                                              paymentHash);
+                                    }
+                                    if (context.mounted) {
+                                      Navigator.pop(context);
+                                      _loadWalletInfo();
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(AppLocalizations.of(
+                                                  context)
+                                              .t('wallet_payment_sent_success')),
+                                          backgroundColor: Colors.green,
+                                        ),
+                                      );
+                                    }
+                                  } else {
+                                    setModalState(() {
+                                      isSending = false;
+                                      errorMessage = result?['error']
+                                              ?.toString() ??
+                                          'Pagamento não concluído. Verifique o histórico antes de tentar novamente.';
+                                    });
+                                  }
+                                  return;
+                                }
+
+                                if (isBolt11) {
+                                  invoicePreparedPayment ??=
+                                      await breezProvider.prepareInvoicePayment(
+                                    invoice,
+                                    amountSats: invoiceAmountSats == null
+                                        ? int.tryParse(
+                                            amountController.text.trim())
+                                        : null,
+                                  );
+                                  if (!context.mounted) return;
+                                  final prepared = invoicePreparedPayment!;
+                                  if (prepared['success'] != true) {
+                                    setModalState(() {
+                                      isSending = false;
+                                      errorMessage = prepared['error']
+                                              ?.toString() ??
+                                          'Não foi possível calcular a taxa de rede';
+                                    });
+                                    return;
+                                  }
+                                  final amount =
+                                      (prepared['amountSats'] as num).toInt();
+                                  final networkFee =
+                                      (prepared['networkFeeSats'] as num)
+                                          .toInt();
+                                  final required = amount + networkFee;
+                                  if (required > availableSats) {
+                                    setModalState(() {
+                                      isSending = false;
+                                      errorMessage =
+                                          'Saldo insuficiente: $amount sats + $networkFee sats de rede = $required sats necessários.';
+                                    });
+                                    return;
+                                  }
+                                  final confirmed = await _confirmInvoiceSend(
+                                    amountSats: amount,
+                                    networkFeeSats: networkFee,
+                                    bitcoinPrice: bitcoinPrice,
+                                  );
+                                  if (confirmed != true) {
+                                    setModalState(() => isSending = false);
+                                    return;
+                                  }
+                                  setModalState(() => isSending = true);
+                                }
 
                                 // Para Lightning Address ou LNURL, resolver para BOLT11 primeiro
                                 if (isLnAddress || isLnurl) {
@@ -2888,8 +3310,11 @@ class _WalletScreenState extends State<WalletScreen> {
 
                                 // Agora pagar a invoice BOLT11
                                 final result = await breezProvider.payInvoice(
-                                    finalInvoice,
-                                    amountSats: manualAmountSats);
+                                  finalInvoice,
+                                  amountSats: manualAmountSats,
+                                  preparedPayment:
+                                      invoicePreparedPayment?['prepared'],
+                                );
 
                                 broLog('📨 Resultado do pagamento: $result');
 
@@ -3996,6 +4421,10 @@ class _WalletScreenState extends State<WalletScreen> {
           ? netFeeRaw
           : (netFeeRaw is num ? netFeeRaw.toInt() : 0);
       displayAmount += netFee;
+      final brixOutgoingFee = _brixOutgoingFees[paymentHash];
+      if (brixOutgoingFee != null) {
+        displayAmount += (brixOutgoingFee['feeSats'] as num?)?.toInt() ?? 0;
+      }
       if (correlatedOrderId != null) {
         displayAmount += _platformFeeForOrder(correlatedOrderId!,
             baseSats: displayAmount - netFee);
@@ -4302,6 +4731,7 @@ class _WalletScreenState extends State<WalletScreen> {
       detailAmount += netFeeRaw is int
           ? netFeeRaw
           : (netFeeRaw is num ? netFeeRaw.toInt() : 0);
+      if (brixOutgoingFee != null) detailAmount += brixFeeSats;
       if (correlatedOrderId != null) {
         detailAmount +=
             _platformFeeForOrder(correlatedOrderId!, baseSats: baseSats);
@@ -4459,6 +4889,8 @@ class _WalletScreenState extends State<WalletScreen> {
                   _buildDetailRow(
                       AppLocalizations.of(context).t('wallet_description'),
                       description),
+                if (brixOutgoingFee != null)
+                  _buildDetailRow('Destinatário recebeu', '$baseSats sats'),
 
                 // v630: Detalhamento universal de taxas — mostra a taxa REAL de
                 // rede/roteamento (campo `fees` do SDK Spark) em TODA transação,
@@ -4469,8 +4901,9 @@ class _WalletScreenState extends State<WalletScreen> {
                       ? feesRaw
                       : (feesRaw is num ? feesRaw.toInt() : null);
                   final totalBrixFeeSats = (networkFeeSats ?? 0) + brixFeeSats;
-                  final totalFeePercent =
-                      baseSats > 0 ? totalBrixFeeSats / baseSats * 100 : 0.0;
+                  final totalFeePercent = detailAmount > 0
+                      ? totalBrixFeeSats / detailAmount * 100
+                      : 0.0;
                   String feeValue;
                   if (networkFeeSats == null && brixOutgoingFee == null) {
                     feeValue =
