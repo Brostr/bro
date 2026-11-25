@@ -3798,19 +3798,18 @@ class _WalletScreenState extends State<WalletScreen> {
                   final int? networkFeeSats = feesRaw is int
                       ? feesRaw
                       : (feesRaw is num ? feesRaw.toInt() : null);
-                  // v706: rótulo honesto — pagamento de conta paga taxa da
-                  // rede SPARK (não é "saque"; saque on-chain tem rótulo próprio)
-                  final feeLabel = method.contains('withdraw')
-                      ? AppLocalizations.of(context).t('wallet_withdrawal_fee')
-                      : AppLocalizations.of(context).t('wallet_spark_fee');
+                  final totalBrixFeeSats = (networkFeeSats ?? 0) + brixFeeSats;
+                  final totalFeePercent = baseSats > 0
+                      ? totalBrixFeeSats / baseSats * 100
+                      : 0.0;
                   String feeValue;
-                  if (networkFeeSats == null) {
+                  if (networkFeeSats == null && brixOutgoingFee == null) {
                     feeValue = AppLocalizations.of(context).t('wallet_not_available');
                   } else if (_btcPrice > 0) {
-                    final fiat = networkFeeSats / 100000000 * _btcPrice;
-                    feeValue = '$networkFeeSats sats (~$_fiatSymbol ${fiat.toStringAsFixed(2)})';
+                    final fiat = totalBrixFeeSats / 100000000 * _btcPrice;
+                    feeValue = '${totalFeePercent.toStringAsFixed(1)}% · $totalBrixFeeSats sats (~$_fiatSymbol ${fiat.toStringAsFixed(2)})';
                   } else {
-                    feeValue = '$networkFeeSats sats';
+                    feeValue = '${totalFeePercent.toStringAsFixed(1)}% · $totalBrixFeeSats sats';
                   }
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3827,10 +3826,8 @@ class _WalletScreenState extends State<WalletScreen> {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      if (networkFeeSats == null || networkFeeSats > 0)
-                        _buildDetailRow(feeLabel, feeValue),
-                      if (!isReceived && brixOutgoingFee != null && brixFeeSats > 0)
-                        _buildDetailRow('Taxa BRIX (0,5%)', '−$brixFeeSats sat'),
+                      if (totalBrixFeeSats > 0 || (networkFeeSats == null && brixOutgoingFee == null))
+                        _buildDetailRow('taxa', feeValue),
                       // v706: TODAS as taxas condensadas aqui — Bro provedor
                       // (3%), app Bro (2%) e Spark. A nota embaixo virou uma
                       // linha só; o detalhamento é que explica (pedido Carol).

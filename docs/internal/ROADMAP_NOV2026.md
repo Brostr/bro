@@ -5,7 +5,7 @@
 
 Prazo: tudo entregue e aprovado até **30/nov**.
 
-## Estabilização v851 — BRIX e taxas (25/11)
+## Estabilização v852 — BRIX e taxas (25/11)
 
 - R3/expiração automática de aceites permanece **descartado** nesta linha; não reintroduzir com as correções de estabilização ou performance.
 - BRIX: o evento Spark pode persistir o recebimento antes do claim autenticado. O merge por `paymentHash` agora enriquece o mesmo registro com bruto/taxa do servidor, inclusive quando o SDK já contém a transação. Leitura/merge/escrita são serializados para não perder metadados ou pagamentos concorrentes.
