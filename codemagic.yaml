@@ -442,13 +442,7 @@ workflows:
 
     # Build interno somente manual: pushes de correção não consomem minutos
     # macOS nem publicam um TestFlight antes da validação local.
-    # (temporariamente com trigger de push para disparar o build 855 — reverte em seguida)
-    triggering:
-      events:
-        - push
-      branch_patterns:
-        - pattern: 'test/*'
-          include: true
+    triggering: {}
 
     scripts:
       - name: Generate env.json from CI variables
