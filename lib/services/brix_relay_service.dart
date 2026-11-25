@@ -1,6 +1,7 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform, visibleForTesting;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform, visibleForTesting;
 import 'package:flutter/widgets.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -96,7 +97,8 @@ class BrixRelayService {
         }
         if (apns == null) {
           if (_fcmRetryCount % 5 == 0) {
-            broLog('[BRIX-RELAY] iOS: APNS still not ready after 8s (retry $_fcmRetryCount)');
+            broLog(
+                '[BRIX-RELAY] iOS: APNS still not ready after 8s (retry $_fcmRetryCount)');
             PushDiag.log('relay: APNS null retry=$_fcmRetryCount');
           }
           _fcmRetryCount++;
@@ -106,7 +108,8 @@ class BrixRelayService {
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null) {
         _fcmRetryCount++;
-        broLog('[BRIX-RELAY] FCM token is null (retry $_fcmRetryCount) — cannot register');
+        broLog(
+            '[BRIX-RELAY] FCM token is null (retry $_fcmRetryCount) — cannot register');
         PushDiag.log('relay: FCM token NULL retry=$_fcmRetryCount');
         return;
       }
@@ -126,16 +129,19 @@ class BrixRelayService {
           // Auto-claim any web-created BRIX accounts with same email
           final linked = await _brixService.claimWebAccounts(_pubkey!);
           if (linked.isNotEmpty) {
-            broLog('[BRIX-RELAY] Auto-linked web accounts: ${linked.join(", ")}');
+            broLog(
+                '[BRIX-RELAY] Auto-linked web accounts: ${linked.join(", ")}');
           }
         } else if (ok == null) {
           // 404 permanente — sem conta BRIX. Marcar e NÃO tentar de novo.
           _brixNotAUser = true;
           _fcmRetryCount = 0;
-          broLog('[BRIX-RELAY] Sem conta BRIX (404) — desativando retry de FCM BRIX');
+          broLog(
+              '[BRIX-RELAY] Sem conta BRIX (404) — desativando retry de FCM BRIX');
         } else {
           _fcmRetryCount++;
-          broLog('[BRIX-RELAY] BRIX FCM registration failed (attempt $_fcmRetryCount)');
+          broLog(
+              '[BRIX-RELAY] BRIX FCM registration failed (attempt $_fcmRetryCount)');
         }
       }
 
@@ -148,13 +154,16 @@ class BrixRelayService {
           // the ~8s startup window), the provider NEVER got 'Nova ordem'
           // broadcasts — the backend preserves the (absent → false) flag.
           // Now the loop itself enforces provider status.
-          final isProvider = await SecureStorageService.isProviderMode(userPubkey: _pubkey);
+          final isProvider =
+              await SecureStorageService.isProviderMode(userPubkey: _pubkey);
           final ok = isProvider
-              ? await ApiService().registerPushToken(token, providerEnabled: true)
+              ? await ApiService()
+                  .registerPushToken(token, providerEnabled: true)
               : await ApiService().registerPushToken(token);
           if (ok) {
             _backendFcmRegistered = true;
-            broLog('[BRIX-RELAY] FCM token registered successfully (backend, provider=$isProvider)');
+            broLog(
+                '[BRIX-RELAY] FCM token registered successfully (backend, provider=$isProvider)');
             PushDiag.log('relay: backend register OK provider=$isProvider');
             if (isProvider) {
               unawaited(_resyncProviderFilters());
@@ -165,12 +174,14 @@ class BrixRelayService {
           }
         } catch (e) {
           broLog('[BRIX-RELAY] Backend FCM registration error: $e');
-          PushDiag.log('relay: backend register ERR ${e.toString().substring(0, e.toString().length > 60 ? 60 : e.toString().length)}');
+          PushDiag.log(
+              'relay: backend register ERR ${e.toString().substring(0, e.toString().length > 60 ? 60 : e.toString().length)}');
         }
       }
     } catch (e) {
       _fcmRetryCount++;
-      broLog('[BRIX-RELAY] FCM registration error (attempt $_fcmRetryCount): $e');
+      broLog(
+          '[BRIX-RELAY] FCM registration error (attempt $_fcmRetryCount): $e');
     }
   }
 
@@ -181,7 +192,8 @@ class BrixRelayService {
       final registered = await ApiService().diagnosePushToken();
       PushDiag.log('relay: diagnose=${registered ?? "null"}');
       if (registered == false) {
-        broLog('[BRIX-RELAY] Backend says NOT registered — forcing re-registration');
+        broLog(
+            '[BRIX-RELAY] Backend says NOT registered — forcing re-registration');
         _backendFcmRegistered = false;
       }
     } catch (e) {
@@ -198,8 +210,10 @@ class BrixRelayService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString('bro_provider_selected_methods');
-      if (raw == null || raw.isEmpty) return; // nothing saved → backend keeps 'all'
-      final methods = (jsonDecode(raw) as List).map((e) => e.toString()).toList();
+      if (raw == null || raw.isEmpty)
+        return; // nothing saved → backend keeps 'all'
+      final methods =
+          (jsonDecode(raw) as List).map((e) => e.toString()).toList();
       if (methods.isEmpty) return;
       await ApiService().setProviderPaymentMethods(methods);
       final accepted = <String>[];
@@ -208,7 +222,8 @@ class BrixRelayService {
         if (g.ids.every(methods.contains)) accepted.add(g.currency);
       }
       await ApiService().setProviderAcceptedCurrencies(accepted);
-      PushDiag.log('relay: provider filters resynced (methods=${methods.length}, cur=${accepted.length})');
+      PushDiag.log(
+          'relay: provider filters resynced (methods=${methods.length}, cur=${accepted.length})');
     } catch (e) {
       broLog('[BRIX-RELAY] provider filter resync failed: $e');
     }
@@ -219,7 +234,8 @@ class BrixRelayService {
   Future<void> _reassertProviderStatusPeriodic() async {
     try {
       if (_pubkey == null || _pubkey!.isEmpty) return;
-      final isProvider = await SecureStorageService.isProviderMode(userPubkey: _pubkey);
+      final isProvider =
+          await SecureStorageService.isProviderMode(userPubkey: _pubkey);
       if (!isProvider) return;
       final token = await FirebaseMessaging.instance.getToken();
       if (token == null || token.isEmpty) return;
@@ -241,7 +257,8 @@ class BrixRelayService {
     _running = true;
     _fcmRegistered = false; // Reset on start so we always try to register
     _backendFcmRegistered = false;
-    _brixNotAUser = false; // vSEC-fix: re-tentar BRIX — usuário pode ter criado conta
+    _brixNotAUser =
+        false; // vSEC-fix: re-tentar BRIX — usuário pode ter criado conta
     _pollTimer?.cancel();
     // v535: intervalo de 5s (antes 1.5s). 1.5s era excessivo e causava
     // lentidao na UI por fazer 2 chamadas HTTP a cada polling (invoice requests
@@ -258,9 +275,11 @@ class BrixRelayService {
     _context = context;
     _pollTimer?.cancel();
     _running = true;
-    _fcmRegistered = false; // Force re-registration after resume (token may have rotated)
+    _fcmRegistered =
+        false; // Force re-registration after resume (token may have rotated)
     _backendFcmRegistered = false;
-    _brixNotAUser = false; // vSEC-fix: re-tentar BRIX — usuário pode ter criado conta
+    _brixNotAUser =
+        false; // vSEC-fix: re-tentar BRIX — usuário pode ter criado conta
     _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
     _poll();
     _ensureFcmRegistered();
@@ -310,10 +329,10 @@ class BrixRelayService {
   }
 
   Future<void> _pollInner() async {
-
     // Log every 20th poll (~30s) for visibility
     if (_pollCount % 20 == 1) {
-      broLog('[BRIX-RELAY] Poll #$_pollCount (running=$_running, fcmRegistered=$_fcmRegistered, pubkey=${_pubkey?.substring(0, 8) ?? "null"})');
+      broLog(
+          '[BRIX-RELAY] Poll #$_pollCount (running=$_running, fcmRegistered=$_fcmRegistered, pubkey=${_pubkey?.substring(0, 8) ?? "null"})');
     }
 
     // Retry FCM registration every ~30s until successful.
@@ -367,29 +386,34 @@ class BrixRelayService {
       await _brixService.initCredentials();
 
       // Check if user has active BRIX invoice requests (online flow)
-      final requests = await _brixService.getInvoiceRequests(_pubkey!, username: _brixUsername);
+      final requests = await _brixService.getInvoiceRequests(_pubkey!,
+          username: _brixUsername);
 
       final breezProvider = _context!.read<BreezProvider>();
 
       for (final request in requests) {
-        broLog('⚡ [BRIX-RELAY] Generating invoice: ${request.amountSats} sats (request=${request.id})${request.comment != null ? ' memo: ${request.comment}' : ''}');
+        broLog(
+            '⚡ [BRIX-RELAY] Generating invoice: ${request.amountSats} sats (request=${request.id})${request.comment != null ? ' memo: ${request.comment}' : ''}');
 
         // Generate invoice for FULL amount (LNURL wallets verify amount match)
-        final description = request.comment != null && request.comment!.isNotEmpty
-            ? 'BRIX: ${request.comment}'
-            : 'BRIX Payment';
+        final description =
+            request.comment != null && request.comment!.isNotEmpty
+                ? 'BRIX: ${request.comment}'
+                : 'BRIX Payment';
         final invoiceResult = await breezProvider.createInvoice(
           amountSats: request.amountSats,
           description: description,
         );
 
         if (invoiceResult == null) {
-          broLog('❌ [BRIX-RELAY] createInvoice returned null for ${request.amountSats} sats');
+          broLog(
+              '❌ [BRIX-RELAY] createInvoice returned null for ${request.amountSats} sats');
           continue;
         }
 
         if (invoiceResult['success'] != true) {
-          broLog('❌ [BRIX-RELAY] createInvoice FAILED for ${request.amountSats} sats: ${invoiceResult['error']}');
+          broLog(
+              '❌ [BRIX-RELAY] createInvoice FAILED for ${request.amountSats} sats: ${invoiceResult['error']}');
           continue;
         }
 
@@ -397,8 +421,8 @@ class BrixRelayService {
           final bolt11 = invoiceResult['bolt11'] as String? ??
               invoiceResult['invoice'] as String?;
           if (bolt11 != null) {
-            final ok = await _brixService.submitInvoice(
-                request.id, bolt11, _pubkey!);
+            final ok =
+                await _brixService.submitInvoice(request.id, bolt11, _pubkey!);
             broLog(
                 '⚡ [BRIX-RELAY] Invoice ${ok ? "submitted" : "failed"} for ${request.amountSats} sats');
 
@@ -410,7 +434,6 @@ class BrixRelayService {
                 paymentHash: invoiceResult['paymentHash'] as String?,
               );
             }
-
           }
         }
       }
@@ -424,57 +447,59 @@ class BrixRelayService {
         await _loadClaimedPayments(); // v661: garantir que o set veio do disco
         final pendingPayments = await _brixService.getPendingPayments(_pubkey!);
         for (final payment in pendingPayments) {
-        if (_claimedPayments.contains(payment.id)) continue;
-        _claimedPayments.add(payment.id);
-        await _persistClaimedPayments(); // v661: gravar ANTES de criar a invoice
+          if (_claimedPayments.contains(payment.id)) continue;
+          _claimedPayments.add(payment.id);
+          await _persistClaimedPayments(); // v661: gravar ANTES de criar a invoice
 
-        broLog('💰 [BRIX-RELAY] Claiming offline payment: ${payment.amountSats} sats');
+          broLog(
+              '💰 [BRIX-RELAY] Claiming offline payment: ${payment.amountSats} sats');
 
-        final offlineDesc = payment.senderNote != null && payment.senderNote!.isNotEmpty
-            ? 'BRIX: ${payment.senderNote}'
-            : 'BRIX Payment';
-        // v749 (CRIT-03 fase 2): vincular a invoice a este pagamento —
-        // pede o nonce ao servidor e embute na descrição. Se falhar (rede),
-        // segue sem nonce (servidor aceita até CLAIM_NONCE_REQUIRED=1).
-        String claimDesc = offlineDesc;
-        final nonce = await _brixService.getClaimNonce(payment.id, _pubkey!);
-        if (nonce != null && nonce.isNotEmpty) {
-          claimDesc = '$offlineDesc #$nonce';
-        }
-        final invoiceResult = await breezProvider.createInvoice(
-          amountSats: payment.amountSats,
-          description: claimDesc,
-        );
+          final offlineDesc =
+              payment.senderNote != null && payment.senderNote!.isNotEmpty
+                  ? 'BRIX: ${payment.senderNote}'
+                  : 'BRIX Payment';
+          // v749 (CRIT-03 fase 2): vincular a invoice a este pagamento —
+          // pede o nonce ao servidor e embute na descrição. Se falhar (rede),
+          // segue sem nonce (servidor aceita até CLAIM_NONCE_REQUIRED=1).
+          String claimDesc = offlineDesc;
+          final nonce = await _brixService.getClaimNonce(payment.id, _pubkey!);
+          if (nonce != null && nonce.isNotEmpty) {
+            claimDesc = '$offlineDesc #$nonce';
+          }
+          final invoiceResult = await breezProvider.createInvoice(
+            amountSats: payment.amountSats,
+            description: claimDesc,
+          );
 
-        if (invoiceResult != null && invoiceResult['success'] == true) {
-          final bolt11 = invoiceResult['bolt11'] as String? ??
-              invoiceResult['invoice'] as String?;
-          if (bolt11 != null) {
-            final claimed = await _brixService.claimPayment(
-                payment.id, bolt11, _pubkey!);
-            broLog(
-                '💰 [BRIX-RELAY] Claim ${claimed ? "success" : "failed"} for ${payment.amountSats} sats');
-            if (claimed) {
-              persistBrixPayment(
-                amountSats: payment.amountSats,
-                grossAmountSats: payment.displayGross,
-                feeSats: payment.feeSats,
-                description: offlineDesc,
-                paymentHash: invoiceResult['paymentHash'] as String?,
-              );
-            }
-            if (!claimed) {
+          if (invoiceResult != null && invoiceResult['success'] == true) {
+            final bolt11 = invoiceResult['bolt11'] as String? ??
+                invoiceResult['invoice'] as String?;
+            if (bolt11 != null) {
+              final claimed =
+                  await _brixService.claimPayment(payment.id, bolt11, _pubkey!);
+              broLog(
+                  '💰 [BRIX-RELAY] Claim ${claimed ? "success" : "failed"} for ${payment.amountSats} sats');
+              if (claimed) {
+                persistBrixPayment(
+                  amountSats: payment.amountSats,
+                  grossAmountSats: payment.displayGross,
+                  feeSats: payment.feeSats,
+                  description: offlineDesc,
+                  paymentHash: invoiceResult['paymentHash'] as String?,
+                );
+              }
+              if (!claimed) {
+                _claimedPayments.remove(payment.id);
+                await _persistClaimedPayments(); // v661: desfazer no disco também
+              }
+            } else {
               _claimedPayments.remove(payment.id);
-              await _persistClaimedPayments(); // v661: desfazer no disco também
+              await _persistClaimedPayments();
             }
           } else {
             _claimedPayments.remove(payment.id);
             await _persistClaimedPayments();
           }
-        } else {
-          _claimedPayments.remove(payment.id);
-          await _persistClaimedPayments();
-        }
         } // end for (pendingPayments)
       } // end if (!_brixNotAUser)
     } catch (e) {
@@ -506,11 +531,14 @@ class BrixRelayService {
   static Future<Set<String>> getSettledFeePaymentHashes() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      return (prefs.getStringList('brix_settled_fee_payment_hashes') ?? const <String>[]).toSet();
+      return (prefs.getStringList('brix_settled_fee_payment_hashes') ??
+              const <String>[])
+          .toSet();
     } catch (_) {
       return <String>{};
     }
   }
+
   final Set<String> _claimedPayments = {};
   static const _claimedPaymentsKey = 'brix_claimed_payment_ids';
   bool _claimedPaymentsLoaded = false;
@@ -541,11 +569,13 @@ class BrixRelayService {
   }
 
   @visibleForTesting
-  static bool mergeBrixPayment(List<dynamic> payments, Map<String, dynamic> incoming) {
+  static bool mergeBrixPayment(
+      List<dynamic> payments, Map<String, dynamic> incoming) {
     final hash = incoming['paymentHash']?.toString() ?? '';
     final index = hash.isEmpty
         ? -1
-        : payments.indexWhere((p) => p is Map && p['paymentHash']?.toString() == hash);
+        : payments.indexWhere(
+            (p) => p is Map && p['paymentHash']?.toString() == hash);
     if (index == -1) {
       payments.add(incoming);
       return true;
@@ -556,9 +586,11 @@ class BrixRelayService {
     final incomingFee = (incoming['feeSats'] as num?)?.toInt() ?? 0;
     final existingGross = (existing['grossAmountSats'] as num?)?.toInt() ?? 0;
     final incomingGross = (incoming['grossAmountSats'] as num?)?.toInt() ?? 0;
-    if (existingFee > 0 && incomingFee > 0 &&
+    if (existingFee > 0 &&
+        incomingFee > 0 &&
         (existingFee != incomingFee || existingGross != incomingGross)) {
-      broLog('⚠️ [BRIX] Conflicting fee metadata ignored for hash ${hash.substring(0, hash.length > 8 ? 8 : hash.length)}');
+      broLog(
+          '⚠️ [BRIX] Conflicting fee metadata ignored for hash ${hash.substring(0, hash.length > 8 ? 8 : hash.length)}');
       return false;
     }
     if (existingFee > 0 && incomingFee == 0) return false;
@@ -625,7 +657,8 @@ class BrixRelayService {
         final List<dynamic> list = json.decode(raw);
         final payment = <String, dynamic>{
           'amountSats': amountSats,
-          'grossAmountSats': grossAmountSats > 0 ? grossAmountSats : amountSats + feeSats,
+          'grossAmountSats':
+              grossAmountSats > 0 ? grossAmountSats : amountSats + feeSats,
           'feeSats': feeSats,
           'description': description,
           'paymentHash': paymentHash,
@@ -637,8 +670,10 @@ class BrixRelayService {
         };
         final merged = mergeBrixPayment(list, payment);
         if (!merged) return;
-        await _secureStorage.write(key: _brixPaymentsKey, value: json.encode(list));
-        broLog('💾 [BRIX] Persisted local: $amountSats sats (fee=$feeSats), hash=${paymentHash?.substring(0, 8) ?? "N/A"}');
+        await _secureStorage.write(
+            key: _brixPaymentsKey, value: json.encode(list));
+        broLog(
+            '💾 [BRIX] Persisted local: $amountSats sats (fee=$feeSats), hash=${paymentHash?.substring(0, 8) ?? "N/A"}');
       } catch (e) {
         broLog('❌ [BRIX] Failed to persist: $e');
       }
@@ -671,10 +706,12 @@ class BrixRelayService {
     return calculated < 1 ? 1 : calculated;
   }
 
-  static Future<Map<String, Map<String, dynamic>>> getSettledOutgoingFees() async {
+  static Future<Map<String, Map<String, dynamic>>>
+      getSettledOutgoingFees() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final decoded = jsonDecode(prefs.getString(_settledOutgoingFeesKey) ?? '{}');
+      final decoded =
+          jsonDecode(prefs.getString(_settledOutgoingFeesKey) ?? '{}');
       if (decoded is! Map) return <String, Map<String, dynamic>>{};
       return decoded.map((key, value) =>
           MapEntry(key.toString(), Map<String, dynamic>.from(value as Map)));
@@ -683,10 +720,12 @@ class BrixRelayService {
     }
   }
 
-  static Future<Map<String, Map<String, dynamic>>> _getPendingOutgoingFees() async {
+  static Future<Map<String, Map<String, dynamic>>>
+      _getPendingOutgoingFees() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final decoded = jsonDecode(prefs.getString(_pendingOutgoingFeesKey) ?? '{}');
+      final decoded =
+          jsonDecode(prefs.getString(_pendingOutgoingFeesKey) ?? '{}');
       if (decoded is! Map) return <String, Map<String, dynamic>>{};
       return decoded.map((key, value) =>
           MapEntry(key.toString(), Map<String, dynamic>.from(value as Map)));
@@ -706,7 +745,8 @@ class BrixRelayService {
       'feeSats': feeSats,
       'feePaymentHash': feePaymentHash ?? previous?['feePaymentHash'],
     };
-    final saved = await prefs.setString(_pendingOutgoingFeesKey, jsonEncode(pending));
+    final saved =
+        await prefs.setString(_pendingOutgoingFeesKey, jsonEncode(pending));
     if (!saved) throw StateError('Could not persist pending outgoing BRIX fee');
   }
 
@@ -714,7 +754,8 @@ class BrixRelayService {
     final prefs = await SharedPreferences.getInstance();
     final pending = await _getPendingOutgoingFees();
     pending.remove(paymentHash);
-    final saved = await prefs.setString(_pendingOutgoingFeesKey, jsonEncode(pending));
+    final saved =
+        await prefs.setString(_pendingOutgoingFeesKey, jsonEncode(pending));
     if (!saved) throw StateError('Could not remove pending outgoing BRIX fee');
   }
 
@@ -732,15 +773,20 @@ class BrixRelayService {
     required int feeSats,
   }) {
     final operation = _outgoingFeeStorageQueue.then((_) async {
+      final settled = await getSettledOutgoingFees();
+      if (settled.containsKey(paymentHash)) return;
       final pending = await _getPendingOutgoingFees();
-      final previousFeeHash = pending[paymentHash]?['feePaymentHash'] as String?;
+      final previousFeeHash =
+          pending[paymentHash]?['feePaymentHash'] as String?;
       if (previousFeeHash != null && previousFeeHash.isNotEmpty) {
-        final confirmed = await PlatformFeeService.isFeePaymentConfirmed(previousFeeHash);
+        final confirmed =
+            await PlatformFeeService.isFeePaymentConfirmed(previousFeeHash);
         if (!confirmed) {
           broLog('⏳ [BRIX] Taxa anterior ainda não confirmada; não repetir');
           return;
         }
-        await _saveSettledOutgoingFee(paymentHash, amountSats, feeSats, previousFeeHash);
+        await _saveSettledOutgoingFee(
+            paymentHash, amountSats, feeSats, previousFeeHash);
         return;
       }
       await _savePendingOutgoingFee(paymentHash, amountSats, feeSats);
@@ -775,7 +821,8 @@ class BrixRelayService {
             feeSats,
             feePaymentHash: feePaymentHash,
           );
-          broLog('⏳ [BRIX] Taxa de envio pendente de confirmação; não repetir automaticamente');
+          broLog(
+              '⏳ [BRIX] Taxa de envio pendente de confirmação; não repetir automaticamente');
           return;
         }
         await _savePendingOutgoingFee(
@@ -791,8 +838,9 @@ class BrixRelayService {
     _outgoingFeeStorageQueue = operation.then((_) {}, onError: (_, __) {});
     return operation;
   }
-  static Future<void> _saveSettledOutgoingFee(
-      String paymentHash, int amountSats, int feeSats, String? feePaymentHash) async {
+
+  static Future<void> _saveSettledOutgoingFee(String paymentHash,
+      int amountSats, int feeSats, String? feePaymentHash) async {
     final prefs = await SharedPreferences.getInstance();
     final fees = await getSettledOutgoingFees();
     final previousFeeHash = fees[paymentHash]?['feePaymentHash'] as String?;
@@ -801,7 +849,8 @@ class BrixRelayService {
       'feeSats': feeSats,
       'feePaymentHash': feePaymentHash ?? previousFeeHash,
     };
-    final saved = await prefs.setString(_settledOutgoingFeesKey, jsonEncode(fees));
+    final saved =
+        await prefs.setString(_settledOutgoingFeesKey, jsonEncode(fees));
     if (!saved) throw StateError('Could not persist outgoing BRIX fee');
     await _removePendingOutgoingFee(paymentHash);
   }
@@ -935,7 +984,8 @@ class BrixRelayService {
         // twice. We persist every attempted invoice's paymentHash and re-check
         // each one here before paying again.
         final priorHashes =
-            (payment['attemptHashes'] as List?)?.cast<String>() ?? const <String>[];
+            (payment['attemptHashes'] as List?)?.cast<String>() ??
+                const <String>[];
         if (priorHashes.isNotEmpty) {
           final settled = await firstSettledHash(
             priorHashes,
@@ -950,13 +1000,15 @@ class BrixRelayService {
               amountSats: amountSats,
               feeSats: calculateBrixFee(amountSats),
             );
-            broLog('✅ [BRIX-QUEUE] Already settled by a prior attempt — NOT paying again: $amountSats sats → $recipient');
+            broLog(
+                '✅ [BRIX-QUEUE] Already settled by a prior attempt — NOT paying again: $amountSats sats → $recipient');
             onQueuedPaymentCompleted?.call(recipient, amountSats);
             continue;
           }
         }
 
-        broLog('🔄 [BRIX-QUEUE] Retrying: $amountSats sats → $recipient (attempt ${payment['retryCount'] + 1})');
+        broLog(
+            '🔄 [BRIX-QUEUE] Retrying: $amountSats sats → $recipient (attempt ${payment['retryCount'] + 1})');
         payment['lastRetry'] = now.toIso8601String();
         payment['retryCount'] = (payment['retryCount'] as int) + 1;
         changed = true;
@@ -987,9 +1039,10 @@ class BrixRelayService {
                 ? (decoded?['invoice']?['paymentHash'] as String?)
                 : null;
             if (h != null && h.isNotEmpty) {
-              final hashes =
-                  (payment['attemptHashes'] as List?)?.cast<String>().toList() ??
-                      <String>[];
+              final hashes = (payment['attemptHashes'] as List?)
+                      ?.cast<String>()
+                      .toList() ??
+                  <String>[];
               if (!hashes.contains(h)) hashes.add(h);
               // Bound growth (retries are rate-limited + age-capped anyway).
               while (hashes.length > 10) {
@@ -999,16 +1052,21 @@ class BrixRelayService {
               await _saveQueue(prefs, list);
             }
           } catch (e) {
-            broLog('⚠️ [BRIX-QUEUE] Could not decode invoice hash (will still guard via re-check): $e');
+            broLog(
+                '⚠️ [BRIX-QUEUE] Could not decode invoice hash (will still guard via re-check): $e');
           }
 
           // Try to pay
           final payResult = await breezProvider.payInvoice(invoice);
 
-          if (payResult != null && payResult['success'] == true) {
+          if (payResult != null &&
+              payResult['success'] == true &&
+              payResult['payment']?['status']?.toString().toLowerCase() ==
+                  'paymentstatus.completed') {
             payment['status'] = 'completed';
             changed = true;
-            final paymentHash = payResult['payment']?['paymentHash']?.toString() ?? '';
+            final paymentHash =
+                payResult['payment']?['paymentHash']?.toString() ?? '';
             if (paymentHash.isNotEmpty) {
               await recordSettledOutgoingFee(
                 paymentHash: paymentHash,
@@ -1016,7 +1074,8 @@ class BrixRelayService {
                 feeSats: calculateBrixFee(amountSats),
               );
             }
-            broLog('✅ [BRIX-QUEUE] Payment completed: $amountSats sats → $recipient');
+            broLog(
+                '✅ [BRIX-QUEUE] Payment completed: $amountSats sats → $recipient');
             // Notify listeners
             onQueuedPaymentCompleted?.call(recipient, amountSats);
           } else {
@@ -1024,7 +1083,8 @@ class BrixRelayService {
             // settlement re-check at the top of the next cycle prevents a
             // double-pay if a TIMEOUT_PENDING attempt actually completed.
             final et = payResult?['errorType'];
-            broLog('⏳ [BRIX-QUEUE] Pay not confirmed (errorType=$et), keeping queued: $recipient');
+            broLog(
+                '⏳ [BRIX-QUEUE] Pay not confirmed (errorType=$et), keeping queued: $recipient');
           }
         } catch (e) {
           broLog('⚠️ [BRIX-QUEUE] Retry error: $e');
@@ -1053,9 +1113,8 @@ class BrixRelayService {
     }
   }
 
-  Future<void> _saveQueue(SharedPreferences prefs, List<Map<String, dynamic>> list) async {
+  Future<void> _saveQueue(
+      SharedPreferences prefs, List<Map<String, dynamic>> list) async {
     await prefs.setString(_pendingOutgoingKey, jsonEncode(list));
   }
 }
-
-

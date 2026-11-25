@@ -1,3 +1,4 @@
+import 'package:bro_app/screens/wallet_screen.dart';
 import 'package:bro_app/services/brix_relay_service.dart';
 import 'package:bro_app/services/platform_fee_service.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -32,6 +33,30 @@ void main() {
     expect(BrixRelayService.calculateBrixFee(1000), 5);
   });
 
+  test('send preview recognizes BRIX destinations and reserves its fee', () {
+    expect(isBrixSendDestination('carol@brix.brostr.app'), isTrue);
+    expect(isBrixSendDestination('carol'), isTrue);
+    expect(isBrixSendDestination('carol@coinos.io'), isFalse);
+    expect(maxBrixSendAmount(1000), 995);
+    expect(maxBrixSendAmount(1), 0);
+  });
+
+  test('only a completed payment can trigger the outgoing fee', () {
+    expect(
+        isCompletedWalletPayment({
+          'success': true,
+          'payment': {'status': 'PaymentStatus.completed'},
+        }),
+        isTrue);
+    expect(
+        isCompletedWalletPayment({
+          'success': true,
+          'payment': {'status': 'PaymentStatus.pending'},
+        }),
+        isFalse);
+    expect(isCompletedWalletPayment({'success': true}), isFalse);
+  });
+
   test('settled outgoing fee is persisted by exact payment hash', () async {
     await BrixRelayService.recordSettledOutgoingFee(
       paymentHash: 'outgoing-hash',
@@ -47,7 +72,8 @@ void main() {
     });
   });
 
-  test('repeated settlement updates the same hash without duplicate entries', () async {
+  test('repeated settlement updates the same hash without duplicate entries',
+      () async {
     await BrixRelayService.recordSettledOutgoingFee(
       paymentHash: 'same-hash',
       amountSats: 200,
@@ -63,6 +89,36 @@ void main() {
     expect(fees, hasLength(1));
     expect(fees['same-hash']?['feeSats'], 1);
     expect(fees['same-hash']?['feePaymentHash'], 'platform-fee-hash');
+  });
+
+  test('concurrent settlement calls charge at most once', () async {
+    var charges = 0;
+    BrixRelayService.chargeOutgoingFeeOverride = ({
+      required orderId,
+      required totalSats,
+      required feePercent,
+      required onPaid,
+    }) async {
+      charges++;
+      await Future.delayed(const Duration(milliseconds: 20));
+      await onPaid('platform-fee-hash');
+      return true;
+    };
+
+    await Future.wait([
+      BrixRelayService.recordSettledOutgoingFee(
+        paymentHash: 'concurrent-hash',
+        amountSats: 200,
+        feeSats: 1,
+      ),
+      BrixRelayService.recordSettledOutgoingFee(
+        paymentHash: 'concurrent-hash',
+        amountSats: 200,
+        feeSats: 1,
+      ),
+    ]);
+
+    expect(charges, 1);
   });
 
   test('pending fee hash is preserved for restart reconciliation', () async {
@@ -83,7 +139,8 @@ void main() {
     );
 
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString('brix_pending_outgoing_fees'), contains('pending-fee-hash'));
+    expect(prefs.getString('brix_pending_outgoing_fees'),
+        contains('pending-fee-hash'));
     expect(await BrixRelayService.getSettledOutgoingFees(), isEmpty);
   });
 
@@ -94,7 +151,8 @@ void main() {
       required totalSats,
       required feePercent,
       required onPaid,
-    }) async => false;
+    }) async =>
+        false;
 
     await BrixRelayService.recordSettledOutgoingFee(
       paymentHash: 'unconfirmed-hash',
@@ -104,6 +162,7 @@ void main() {
 
     expect(await BrixRelayService.getSettledOutgoingFees(), isEmpty);
     final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString('brix_pending_outgoing_fees'), contains('unconfirmed-hash'));
+    expect(prefs.getString('brix_pending_outgoing_fees'),
+        contains('unconfirmed-hash'));
   });
 }

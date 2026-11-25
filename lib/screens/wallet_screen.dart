@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -36,6 +36,36 @@ bool shouldHideFeePayment({
 }
 
 @visibleForTesting
+bool isCompletedWalletPayment(Map<String, dynamic>? result) {
+  if (result == null || result['success'] != true) return false;
+  final status = result['payment']?['status']?.toString().toLowerCase() ?? '';
+  return status == 'paymentstatus.completed' || status == 'completed';
+}
+
+@visibleForTesting
+bool isBrixSendDestination(String destination) {
+  final value = destination.trim().toLowerCase();
+  if (value.endsWith('@brix.app') ||
+      value.endsWith('@brostr.app') ||
+      value.endsWith('@brix.brostr.app')) {
+    return true;
+  }
+  return RegExp(r'^[a-z0-9_]{3,20}$').hasMatch(value) ||
+      RegExp(r'^\+?\d[\d\s\-()]{7,}$').hasMatch(value);
+}
+
+@visibleForTesting
+int maxBrixSendAmount(int availableSats) {
+  if (availableSats <= 1) return 0;
+  var amount = availableSats - 1;
+  while (amount > 0 &&
+      amount + BrixRelayService.calculateBrixFee(amount) > availableSats) {
+    amount--;
+  }
+  return amount;
+}
+
+@visibleForTesting
 Map<String, dynamic> mergeBrixWalletPayment(
     Map<String, dynamic> sdkPayment, Map<String, dynamic> localPayment) {
   final merged = Map<String, dynamic>.from(sdkPayment);
@@ -69,9 +99,10 @@ class _WalletScreenState extends State<WalletScreen> {
   String _displayCurrency = 'BRL';
   String _lastLanguageCode = 'pt';
   bool _showAllTransactions = false;
-  int _sdkPaymentsCount = 0;  // v499: diagnostic
+  int _sdkPaymentsCount = 0; // v499: diagnostic
   Set<String> _brixFeePaymentHashes = <String>{};
-  Map<String, Map<String, dynamic>> _brixOutgoingFees = <String, Map<String, dynamic>>{};
+  Map<String, Map<String, dynamic>> _brixOutgoingFees =
+      <String, Map<String, dynamic>>{};
 
   /// Total sats queued for outgoing BRIX payments (not yet deducted from wallet).
   /// Excludes expired payments (they were never sent).
@@ -89,7 +120,8 @@ class _WalletScreenState extends State<WalletScreen> {
         _loadWalletInfo();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('✅ Pagamento de $amount sats para $recipient concluído!'),
+            content:
+                Text('✅ Pagamento de $amount sats para $recipient concluído!'),
             backgroundColor: const Color(0xFF4CAF50),
             duration: const Duration(seconds: 4),
           ),
@@ -99,7 +131,8 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   /// v596: símbolo de moeda dependendo do idioma.
-  String get _fiatSymbol => _displayCurrency == 'BRL' ? r'R$' : _displayCurrency;
+  String get _fiatSymbol =>
+      _displayCurrency == 'BRL' ? r'R$' : _displayCurrency;
 
   /// v596: refaz fetch do preço BTC se o idioma mudou.
   Future<void> _refreshLocaleIfNeeded() async {
@@ -108,7 +141,8 @@ class _WalletScreenState extends State<WalletScreen> {
       if (lang == _lastLanguageCode) return;
       _lastLanguageCode = lang;
       _displayCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
-      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
+      final price =
+          await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
       if (mounted && price != null) {
         setState(() => _btcPrice = price);
       }
@@ -123,7 +157,7 @@ class _WalletScreenState extends State<WalletScreen> {
 
     try {
       final breezProvider = context.read<BreezProvider>();
-      
+
       if (!breezProvider.isInitialized) {
         broLog('🔄 Inicializando Breez SDK...');
         final success = await breezProvider.initialize();
@@ -138,7 +172,8 @@ class _WalletScreenState extends State<WalletScreen> {
 
       final balance = await breezProvider.getBalance();
       final payments = await breezProvider.listPayments();
-      _brixFeePaymentHashes = await BrixRelayService.getSettledFeePaymentHashes();
+      _brixFeePaymentHashes =
+          await BrixRelayService.getSettledFeePaymentHashes();
       _brixOutgoingFees = await BrixRelayService.getSettledOutgoingFees();
 
       // v673: forense automático — registrar pagamentos GRANDES (>= 500 mil sats)
@@ -152,31 +187,34 @@ class _WalletScreenState extends State<WalletScreen> {
           if (amtInt >= 500000) {
             final h = p['paymentHash']?.toString() ?? '';
             final pid = p['id']?.toString() ?? '';
-            broLog('🔎 [BigTx] ${p['type'] ?? p['direction']} $amtInt sats status=${p['status']} desc="${p['description']}" hash=${h.substring(0, h.length > 16 ? 16 : h.length)} id=${pid.substring(0, pid.length > 16 ? 16 : pid.length)}');
+            broLog(
+                '🔎 [BigTx] ${p['type'] ?? p['direction']} $amtInt sats status=${p['status']} desc="${p['description']}" hash=${h.substring(0, h.length > 16 ? 16 : h.length)} id=${pid.substring(0, pid.length > 16 ? 16 : pid.length)}');
           }
         } catch (_) {}
       }
-      
+
       // Buscar preço BTC na moeda de exibição (BRL para pt, USD para en/es).
       try {
         final lang = context.read<LocaleProvider>().locale.languageCode;
         _lastLanguageCode = lang;
         _displayCurrency = BitcoinPriceService.displayCurrencyForLanguage(lang);
       } catch (_) {}
-      final price = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
+      final price =
+          await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
       if (price != null) _btcPrice = price;
-      
+
       // NOTA: Ganhos como Bro são recebidos via Lightning (invoice pago pelo usuário)
       // e já aparecem em payments como transações recebidas.
       // NÃO misturar com ProviderBalanceProvider que é apenas TRACKING LOCAL.
-      
+
       // Coletar IDs de ordens pagas com saldo da carteira (para dedup)
       Set<String> walletPaidOrderPrefixes = {};
       try {
         final opRef = context.read<OrderProvider>();
         for (final o in opRef.orders) {
           if (o.paymentHash != null && o.paymentHash!.startsWith('wallet_')) {
-            if (o.id.length >= 8) walletPaidOrderPrefixes.add(o.id.substring(0, 8));
+            if (o.id.length >= 8)
+              walletPaidOrderPrefixes.add(o.id.substring(0, 8));
           }
         }
       } catch (_) {}
@@ -188,15 +226,15 @@ class _WalletScreenState extends State<WalletScreen> {
       // Usar apenas pagamentos Lightning reais, FILTRANDO taxas internas da plataforma
       List<Map<String, dynamic>> allPayments = payments.where((p) {
         final description = p['description']?.toString() ?? '';
-        final isReceived = p['type'] == 'received' || 
-                           p['direction'] == 'incoming' ||
-                           p['type'] == 'Receive';
-        
+        final isReceived = p['type'] == 'received' ||
+            p['direction'] == 'incoming' ||
+            p['type'] == 'Receive';
+
         // v719: esconder consolidações/conversões INTERNAS da Spark — não são
         // transações do usuário e não mexem no saldo. Apareciam como
         // "Recebido +197.950.000 sats" fantasma (email de usuário 06/11).
         if (p['internalConversion'] == true) return false;
-        
+
         // v704: a taxa da plataforma NÃO vira item separado na lista (feedback
         // da Carol: polui o histórico, um item de taxa por ordem). Ela fica
         // CONSOLIDADA no total e no detalhamento da transação da ordem —
@@ -209,17 +247,20 @@ class _WalletScreenState extends State<WalletScreen> {
             platformFeeHashes: PlatformFeeService.feePaymentHashes,
             brixFeeHashes: _brixFeePaymentHashes,
           )) return false;
-          if (_brixOutgoingFees.values.any((fee) =>
-              fee['feePaymentHash']?.toString() == paymentHash)) return false;
+          if (_brixOutgoingFees.values
+              .any((fee) => fee['feePaymentHash']?.toString() == paymentHash))
+            return false;
           final opFee = context.read<OrderProvider>();
-          if (opFee.orders.any((o) => o.metadata?['feePaymentHash'] == paymentHash)) return false;
+          if (opFee.orders
+              .any((o) => o.metadata?['feePaymentHash'] == paymentHash))
+            return false;
         }
         final descLower = description.toLowerCase();
         if (descLower.contains('platform fee') ||
             descLower.contains('bro platform fee')) {
           return false;
         }
-        
+
         // OCULTAR: Lado RECEBIDO do auto-pagamento com saldo da carteira
         // É uma transação interna — só queremos mostrar o lado "enviado" como depósito
         if (isReceived && description == 'Bro Wallet Payment') {
@@ -238,13 +279,14 @@ class _WalletScreenState extends State<WalletScreen> {
         if (isReceived && description == 'Bro Payment') {
           if (paymentHash.isNotEmpty) {
             final opRef2 = context.read<OrderProvider>();
-            final consumed = opRef2.orders.any((o) => o.paymentHash == paymentHash);
+            final consumed =
+                opRef2.orders.any((o) => o.paymentHash == paymentHash);
             if (consumed) return false;
           } else {
             return false; // sem hash não dá pra saber — manter comportamento antigo
           }
         }
-        
+
         // OCULTAR: Auto-pagamentos Lightning de ordens pagas com saldo da carteira
         // Evita duplicata entre synthetic wallet entry e outgoing auto-pay SDK tx
         if (!isReceived && walletPaidOrderPrefixes.isNotEmpty) {
@@ -261,36 +303,36 @@ class _WalletScreenState extends State<WalletScreen> {
             }
           }
         }
-        
+
         return true;
       }).toList();
-      
+
       // REMOVIDO: Não mesclar com ProviderBalanceProvider (era tracking local, não saldo real)
       // Isso evita confusão entre saldo real (Breez) e tracking local
-      
+
       // v257: Incluir pagamentos feitos com saldo da carteira (wallet payments)
       // Esses pagamentos NÃO passam por Lightning, então o SDK não os registra.
       // Identificamos pelo paymentHash começando com 'wallet_'
       try {
         final orderProvider = context.read<OrderProvider>();
-        final walletPaidOrders = orderProvider.orders.where((o) =>
-          o.paymentHash != null &&
-          o.paymentHash!.startsWith('wallet_') &&
-          o.status != 'draft' &&
-          o.status != 'pending'
-        ).toList();
-        
+        final walletPaidOrders = orderProvider.orders
+            .where((o) =>
+                o.paymentHash != null &&
+                o.paymentHash!.startsWith('wallet_') &&
+                o.status != 'draft' &&
+                o.status != 'pending')
+            .toList();
+
         // Verificar se já existe no allPayments (evitar duplicatas)
-        final existingHashes = allPayments
-            .map((p) => p['paymentHash']?.toString() ?? '')
-            .toSet();
-        
+        final existingHashes =
+            allPayments.map((p) => p['paymentHash']?.toString() ?? '').toSet();
+
         for (final order in walletPaidOrders) {
           if (existingHashes.contains(order.paymentHash)) continue;
-          
+
           final satsAmount = (order.btcAmount * 100000000).round();
           final billLabel = order.billType == 'pix' ? 'PIX' : 'Boleto';
-          
+
           allPayments.add({
             'id': order.paymentHash,
             'paymentType': 'Send',
@@ -305,12 +347,13 @@ class _WalletScreenState extends State<WalletScreen> {
             'createdAt': order.createdAt,
             'isWalletPayment': true,
           });
-          broLog('💰 Adicionado wallet payment ao histórico: ${order.id.substring(0, 8)} $satsAmount sats');
+          broLog(
+              '💰 Adicionado wallet payment ao histórico: ${order.id.substring(0, 8)} $satsAmount sats');
         }
       } catch (e) {
         broLog('⚠️ Erro ao adicionar wallet payments: $e');
       }
-      
+
       // v499: Merge locally persisted BRIX payments (SDK may not return old ones)
       try {
         final localBrix = await BrixRelayService.getLocalBrixPayments();
@@ -323,10 +366,11 @@ class _WalletScreenState extends State<WalletScreen> {
           for (final bp in localBrix) {
             final bpHash = bp['paymentHash']?.toString() ?? '';
             if (bpHash.isNotEmpty && existingHashes.contains(bpHash)) {
-              final index = allPayments.indexWhere(
-                  (p) => p['paymentHash']?.toString() == bpHash);
+              final index = allPayments
+                  .indexWhere((p) => p['paymentHash']?.toString() == bpHash);
               if (index != -1) {
-                allPayments[index] = mergeBrixWalletPayment(allPayments[index], bp);
+                allPayments[index] =
+                    mergeBrixWalletPayment(allPayments[index], bp);
               }
               continue;
             }
@@ -335,7 +379,10 @@ class _WalletScreenState extends State<WalletScreen> {
             final bpTs = bp['createdAt']?.toString() ?? '';
             final isDup = allPayments.any((p) =>
                 (p['amountSats'] ?? p['amount']) == bpAmount &&
-                (p['createdAt']?.toString() ?? p['timestamp']?.toString() ?? '') == bpTs &&
+                (p['createdAt']?.toString() ??
+                        p['timestamp']?.toString() ??
+                        '') ==
+                    bpTs &&
                 (p['description']?.toString() ?? '').contains('BRIX'));
             if (isDup) continue;
             allPayments.add(bp);
@@ -361,13 +408,15 @@ class _WalletScreenState extends State<WalletScreen> {
         }
         return 0;
       });
-      
+
       broLog('💰 Saldo: ${balance?['balance']} sats');
-      broLog('📜 Pagamentos: ${allPayments.length} (incluindo ganhos Bro) de ${payments.length} do SDK');
+      broLog(
+          '📜 Pagamentos: ${allPayments.length} (incluindo ganhos Bro) de ${payments.length} do SDK');
       // v494: Log top 5 para diagnosticar pagamentos faltando
       for (int i = 0; i < allPayments.length && i < 5; i++) {
         final pp = allPayments[i];
-        broLog('   📋 #${i+1}: ${pp['type']} ${pp['amountSats']} sats desc="${pp['description']}" status=${pp['status']}');
+        broLog(
+            '   📋 #${i + 1}: ${pp['type']} ${pp['amountSats']} sats desc="${pp['description']}" status=${pp['status']}');
       }
 
       if (mounted) {
@@ -399,7 +448,7 @@ class _WalletScreenState extends State<WalletScreen> {
 
   Future<void> _showDiagnostics() async {
     final breezProvider = context.read<BreezProvider>();
-    
+
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -407,13 +456,13 @@ class _WalletScreenState extends State<WalletScreen> {
         child: CircularProgressIndicator(color: Color(0xFFFF6B6B)),
       ),
     );
-    
+
     try {
       final diagnostics = await breezProvider.getFullDiagnostics();
-      
+
       if (!mounted) return;
       Navigator.of(context).pop(); // Fechar loading
-      
+
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -438,25 +487,36 @@ class _WalletScreenState extends State<WalletScreen> {
                 _diagRow('Seed Words', '${diagnostics['seedWordCount']}'),
                 _diagRow('Primeiras 2', '${diagnostics['seedFirst2Words']}'),
                 const Divider(color: Colors.grey),
-                _diagRow('Storage Dir Existe', '${diagnostics['storageDirExists']}'),
+                _diagRow(
+                    'Storage Dir Existe', '${diagnostics['storageDirExists']}'),
                 const Divider(color: Colors.grey),
-                _diagRow('💰 SALDO', '${diagnostics['balanceSats'] ?? '?'} sats', highlight: true),
-                _diagRow('Total Pagamentos', '${diagnostics['totalPayments'] ?? '?'}'),
+                _diagRow(
+                    '💰 SALDO', '${diagnostics['balanceSats'] ?? '?'} sats',
+                    highlight: true),
+                _diagRow('Total Pagamentos',
+                    '${diagnostics['totalPayments'] ?? '?'}'),
                 if (diagnostics['recentPayments'] != null) ...[
                   const SizedBox(height: 8),
-                  const Text('Últimos pagamentos:', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                  const Text('Últimos pagamentos:',
+                      style: TextStyle(color: Colors.white70, fontSize: 12)),
                   for (var p in (diagnostics['recentPayments'] as List))
                     Text(
                       '  ${p['amount']} sats - ${p['status']}',
-                      style: const TextStyle(color: Colors.white54, fontSize: 11),
+                      style:
+                          const TextStyle(color: Colors.white54, fontSize: 11),
                     ),
                 ],
                 // NOVO: Mostrar todas as seeds encontradas
                 const Divider(color: Colors.orange),
-                _diagRow('Seeds encontradas', '${diagnostics['totalSeedsFound'] ?? 0}'),
+                _diagRow('Seeds encontradas',
+                    '${diagnostics['totalSeedsFound'] ?? 0}'),
                 if (diagnostics['allSeeds'] != null) ...[
                   const SizedBox(height: 8),
-                  const Text('🔐 TODAS AS SEEDS:', style: TextStyle(color: Colors.amber, fontSize: 12, fontWeight: FontWeight.bold)),
+                  const Text('🔐 TODAS AS SEEDS:',
+                      style: TextStyle(
+                          color: Colors.amber,
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold)),
                   for (var entry in (diagnostics['allSeeds'] as Map).entries)
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
@@ -466,14 +526,19 @@ class _WalletScreenState extends State<WalletScreen> {
                           Text(
                             '${entry.key}:',
                             style: TextStyle(
-                              color: entry.key == 'CURRENT_USER' ? Colors.greenAccent : Colors.white70,
+                              color: entry.key == 'CURRENT_USER'
+                                  ? Colors.greenAccent
+                                  : Colors.white70,
                               fontSize: 11,
-                              fontWeight: entry.key == 'CURRENT_USER' ? FontWeight.bold : FontWeight.normal,
+                              fontWeight: entry.key == 'CURRENT_USER'
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
                             ),
                           ),
                           Text(
                             '  ${(entry.value as Map)['first2Words']} (${(entry.value as Map)['wordCount']} palavras)',
-                            style: const TextStyle(color: Colors.white54, fontSize: 10),
+                            style: const TextStyle(
+                                color: Colors.white54, fontSize: 10),
                           ),
                         ],
                       ),
@@ -481,7 +546,8 @@ class _WalletScreenState extends State<WalletScreen> {
                 ],
                 if (diagnostics['error'] != null) ...[
                   const Divider(color: Colors.red),
-                  Text('ERRO: ${diagnostics['error']}', style: const TextStyle(color: Colors.red, fontSize: 12)),
+                  Text('ERRO: ${diagnostics['error']}',
+                      style: const TextStyle(color: Colors.red, fontSize: 12)),
                 ],
               ],
             ),
@@ -489,7 +555,8 @@ class _WalletScreenState extends State<WalletScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('FECHAR', style: TextStyle(color: Color(0xFFFF9800))),
+              child: const Text('FECHAR',
+                  style: TextStyle(color: Color(0xFFFF9800))),
             ),
           ],
         ),
@@ -509,7 +576,10 @@ class _WalletScreenState extends State<WalletScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: TextStyle(color: highlight ? Colors.amber : Colors.white70, fontSize: 12)),
+          Text(label,
+              style: TextStyle(
+                  color: highlight ? Colors.amber : Colors.white70,
+                  fontSize: 12)),
           Text(
             value,
             style: TextStyle(
@@ -536,14 +606,16 @@ class _WalletScreenState extends State<WalletScreen> {
           children: [
             const Icon(Icons.account_balance_wallet, color: Color(0xFFFF9800)),
             const SizedBox(width: 8),
-            Text(AppLocalizations.of(context).t('wallet_title'), style: const TextStyle(fontWeight: FontWeight.bold)),
+            Text(AppLocalizations.of(context).t('wallet_title'),
+                style: const TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
         actions: [
           // Exportar movimentações (pedido do usuário Roberto, out/2026) —
           // CSV gerado localmente, compartilhado pelo sheet nativo.
           IconButton(
-            icon: const Icon(Icons.file_download_outlined, color: Color(0xFFFF9800)),
+            icon: const Icon(Icons.file_download_outlined,
+                color: Color(0xFFFF9800)),
             tooltip: 'Baixar movimentações (CSV)',
             onPressed: _exportMovements,
           ),
@@ -560,17 +632,20 @@ class _WalletScreenState extends State<WalletScreen> {
       if (!mounted) return;
       if (payments.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Sem movimentações para exportar ainda.')),
+          const SnackBar(
+              content: Text('Sem movimentações para exportar ainda.')),
         );
         return;
       }
       final usd = await BitcoinPriceService.getBitcoinPriceIn('USD');
       final f = await ExportService.buildWalletCsv(payments, btcUsd: usd);
-      await ExportService.share(f, 'Bro — movimentações da carteira', context: context);
+      await ExportService.share(f, 'Bro — movimentações da carteira',
+          context: context);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Erro ao exportar: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('Erro ao exportar: $e'), backgroundColor: Colors.red),
       );
     }
   }
@@ -583,7 +658,8 @@ class _WalletScreenState extends State<WalletScreen> {
           children: [
             const CircularProgressIndicator(color: Color(0xFFFF6B6B)),
             const SizedBox(height: 16),
-            Text(AppLocalizations.of(context).t('wallet_loading'), style: const TextStyle(color: Colors.white70)),
+            Text(AppLocalizations.of(context).t('wallet_loading'),
+                style: const TextStyle(color: Colors.white70)),
           ],
         ),
       );
@@ -600,7 +676,10 @@ class _WalletScreenState extends State<WalletScreen> {
               const SizedBox(height: 16),
               Text(
                 AppLocalizations.of(context).t('wallet_load_error'),
-                style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 8),
               Text(
@@ -645,9 +724,10 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   Widget _buildBalanceCard() {
-    final balanceSats = int.tryParse(_balance?['balance']?.toString() ?? '0') ?? 0;
+    final balanceSats =
+        int.tryParse(_balance?['balance']?.toString() ?? '0') ?? 0;
     final hasError = _balance?['error'] != null;
-    
+
     // v257: Deduzir sats travados (wallet payments em andamento)
     final orderProvider = context.read<OrderProvider>();
     final lockedSats = orderProvider.committedSats;
@@ -660,7 +740,7 @@ class _WalletScreenState extends State<WalletScreen> {
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: hasError 
+          colors: hasError
               ? [Colors.grey.shade800, Colors.grey.shade700]
               : [const Color(0xFFFF9800), const Color(0xFFFFB74D)],
           begin: Alignment.topLeft,
@@ -669,7 +749,8 @@ class _WalletScreenState extends State<WalletScreen> {
         borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: (hasError ? Colors.grey : const Color(0xFFFF9800)).withOpacity(0.3),
+            color: (hasError ? Colors.grey : const Color(0xFFFF9800))
+                .withOpacity(0.3),
             blurRadius: 20,
             offset: const Offset(0, 10),
           ),
@@ -715,7 +796,8 @@ class _WalletScreenState extends State<WalletScreen> {
                 fontSize: 13,
               ),
             ),
-            if (_btcPrice > 0) ...[              const SizedBox(height: 2),
+            if (_btcPrice > 0) ...[
+              const SizedBox(height: 2),
               Text(
                 '≈ $_fiatSymbol ${(availableBtc * _btcPrice).toStringAsFixed(2)}',
                 style: const TextStyle(
@@ -727,7 +809,8 @@ class _WalletScreenState extends State<WalletScreen> {
             if (hasLocked) ...[
               const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: Colors.white.withOpacity(0.15),
                   borderRadius: BorderRadius.circular(8),
@@ -739,7 +822,8 @@ class _WalletScreenState extends State<WalletScreen> {
                     const SizedBox(width: 4),
                     Text(
                       '${_formatSats(lockedSats)} ${AppLocalizations.of(context).t('wallet_locked_in_orders')}',
-                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12),
                     ),
                   ],
                 ),
@@ -748,7 +832,8 @@ class _WalletScreenState extends State<WalletScreen> {
             if (_queuedSats > 0) ...[
               const SizedBox(height: 6),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: Colors.amber.withOpacity(0.2),
                   borderRadius: BorderRadius.circular(8),
@@ -851,31 +936,32 @@ class _WalletScreenState extends State<WalletScreen> {
     String? errorMessage;
     bool isReaisMode = false;
     double? btcPriceBrl;
-    
+
     // Get current balance
-    final balanceSats = int.tryParse(_balance?['balance']?.toString() ?? '0') ?? 0;
-    
+    final balanceSats =
+        int.tryParse(_balance?['balance']?.toString() ?? '0') ?? 0;
+
     // Get committed sats (orders in progress)
     final orderProvider = context.read<OrderProvider>();
     final committedSats = orderProvider.committedSats;
-    
+
     // Get tier locked sats (if any)
     final collateralService = LocalCollateralService();
     final collateral = await collateralService.getCollateral();
     final tierLockedSats = collateral?.lockedSats ?? 0;
     final tierName = collateral?.tierName;
-    
+
     // Total locked = orders + tier
     final totalLockedSats = committedSats + tierLockedSats;
     final availableSats = (balanceSats - totalLockedSats).clamp(0, balanceSats);
     final hasLockedFunds = totalLockedSats > 0;
     final hasTierActive = tierLockedSats > 0;
-    
+
     // Fetch BTC price for fiat conversion (BRL ou USD conforme idioma).
     btcPriceBrl = await BitcoinPriceService.getBitcoinPriceIn(_displayCurrency);
-    
+
     if (!mounted) return;
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -898,350 +984,191 @@ class _WalletScreenState extends State<WalletScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                // Header
-                Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFE53935).withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
+                  // Header
+                  Row(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFE53935).withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Icon(Icons.arrow_upward,
+                            color: Color(0xFFE53935)),
                       ),
-                      child: const Icon(Icons.arrow_upward, color: Color(0xFFE53935)),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            AppLocalizations.of(context).t('wallet_send_bitcoin'),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          if (hasLockedFunds) ...[
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
                             Text(
-                              AppLocalizations.of(context).tp('wallet_available_sats', {'available': availableSats.toString()}),
-                              style: TextStyle(
-                                color: availableSats > 0 ? Colors.green : Colors.orange,
-                                fontSize: 13,
+                              AppLocalizations.of(context)
+                                  .t('wallet_send_bitcoin'),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
-                            Text(
-                              AppLocalizations.of(context).tp('wallet_in_orders_sats', {'committed': committedSats.toString()}),
-                              style: const TextStyle(
-                                color: Colors.orange,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ] else ...[
-                            Text(
-                              AppLocalizations.of(context).tp('wallet_balance_sats', {'balance': balanceSats.toString()}),
-                              style: TextStyle(
-                                color: balanceSats > 0 ? Colors.green : Colors.grey,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white54),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                  ],
-                ),
-                
-                // Aviso de fundos bloqueados
-                if (hasLockedFunds) ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.orange.withOpacity(0.3)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            const Icon(Icons.lock, color: Colors.orange, size: 18),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                AppLocalizations.of(context).tp('wallet_sats_locked', {'total': totalLockedSats.toString()}),
-                                style: const TextStyle(color: Colors.orange, fontSize: 12, fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (hasTierActive) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            AppLocalizations.of(context).tp('wallet_sats_locked_tier', {'amount': tierLockedSats.toString(), 'tier': tierName ?? ''}),
-                            style: const TextStyle(color: Colors.orange, fontSize: 11),
-                          ),
-                        ],
-                        if (committedSats > 0) ...[
-                          const SizedBox(height: 2),
-                          Text(
-                            AppLocalizations.of(context).tp('wallet_sats_in_open_orders', {'amount': committedSats.toString()}),
-                            style: const TextStyle(color: Colors.orange, fontSize: 11),
-                          ),
-                        ],
-                        if (hasTierActive) ...[
-                          const SizedBox(height: 6),
-                          Text(
-                            AppLocalizations.of(context).t('wallet_withdraw_all_warning'),
-                            style: TextStyle(color: Colors.red.shade300, fontSize: 11, fontWeight: FontWeight.bold),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-                
-                const SizedBox(height: 20),
-                
-                // Campo de destino (Invoice, LNURL, ou Lightning Address)
-                TextField(
-                  controller: invoiceController,
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
-                  maxLines: 2,
-                  enabled: !isSending,
-                  onChanged: (value) {
-                    // Se for Lightning Address, LNURL-pay, phone, email ou username BRIX, mostrar campo de valor
-                    final trimmed = value.trim().toLowerCase();
-                    final isLnAddress = trimmed.contains('@') && trimmed.contains('.');
-                    final isLnurl = trimmed.startsWith('lnurl');
-                    final isPhone = RegExp(r'^\+?\d[\d\s\-()]{7,}$').hasMatch(trimmed);
-                    final isBrixUser = RegExp(r'^[a-z0-9_]{3,20}$').hasMatch(trimmed) && !trimmed.startsWith('lnbc') && !trimmed.startsWith('lntb');
-                    final needsAmount = isLnAddress || isLnurl || isPhone || isBrixUser;
-                    
-                    if (needsAmount != showAmountField) {
-                      setModalState(() {
-                        showAmountField = needsAmount;
-                        errorMessage = null;
-                      });
-                    }
-                  },
-                  decoration: InputDecoration(
-                    labelText: AppLocalizations.of(context).t('wallet_destination_label'),
-                    labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
-                    hintText: AppLocalizations.of(context).t('wallet_hint_brix'),
-                    hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
-                    helperText: AppLocalizations.of(context).t('wallet_helper_brix'),
-                    helperStyle: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 11),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFF333333)),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFF333333)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFFE53935)),
-                    ),
-                  ),
-                ),
-                
-                // Campo de valor (mostrado para Lightning Address e LNURL)
-                if (showAmountField) ...[
-                  const SizedBox(height: 16),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: amountController,
-                          style: const TextStyle(color: Colors.white, fontSize: 18),
-                          keyboardType: isReaisMode
-                              ? const TextInputType.numberWithOptions(decimal: true)
-                              : TextInputType.number,
-                          enabled: !isSending,
-                          onChanged: (_) => setModalState(() {}),
-                          decoration: InputDecoration(
-                            labelText: isReaisMode ? (_displayCurrency == 'BRL' ? 'Valor em Reais' : 'Amount in $_displayCurrency') : AppLocalizations.of(context).t('wallet_amount_label'),
-                            labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
-                            hintText: isReaisMode ? 'Ex: 10.00' : 'Ex: 1000',
-                            hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
-                            prefixIcon: Icon(
-                              isReaisMode ? Icons.attach_money : Icons.bolt,
-                              color: isReaisMode ? Colors.green : Colors.orange,
-                            ),
-                            suffixText: isReaisMode ? _fiatSymbol : 'sats',
-                            suffixStyle: TextStyle(color: isReaisMode ? Colors.green : Colors.orange),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: const BorderSide(color: Color(0xFF333333)),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: const BorderSide(color: Color(0xFF333333)),
-                            ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: BorderSide(color: isReaisMode ? Colors.green : const Color(0xFFFF9800)),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      GestureDetector(
-                        onTap: isSending ? null : () {
-                          setModalState(() {
-                            isReaisMode = !isReaisMode;
-                            amountController.clear();
-                          });
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-                          decoration: BoxDecoration(
-                            color: (isReaisMode ? Colors.green : Colors.orange).withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: (isReaisMode ? Colors.green : Colors.orange).withOpacity(0.5),
-                            ),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.swap_horiz,
-                                color: isReaisMode ? Colors.green : Colors.orange,
-                                size: 16,
-                              ),
-                              const SizedBox(width: 4),
+                            if (hasLockedFunds) ...[
                               Text(
-                                isReaisMode ? _fiatSymbol : 'SAT',
+                                AppLocalizations.of(context).tp(
+                                    'wallet_available_sats',
+                                    {'available': availableSats.toString()}),
                                 style: TextStyle(
-                                  color: isReaisMode ? Colors.green : Colors.orange,
+                                  color: availableSats > 0
+                                      ? Colors.green
+                                      : Colors.orange,
+                                  fontSize: 13,
                                   fontWeight: FontWeight.bold,
-                                  fontSize: 14,
+                                ),
+                              ),
+                              Text(
+                                AppLocalizations.of(context).tp(
+                                    'wallet_in_orders_sats',
+                                    {'committed': committedSats.toString()}),
+                                style: const TextStyle(
+                                  color: Colors.orange,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ] else ...[
+                              Text(
+                                AppLocalizations.of(context).tp(
+                                    'wallet_balance_sats',
+                                    {'balance': balanceSats.toString()}),
+                                style: TextStyle(
+                                  color: balanceSats > 0
+                                      ? Colors.green
+                                      : Colors.grey,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white54),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+
+                  // Aviso de fundos bloqueados
+                  if (hasLockedFunds) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border:
+                            Border.all(color: Colors.orange.withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(Icons.lock,
+                                  color: Colors.orange, size: 18),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  AppLocalizations.of(context).tp(
+                                      'wallet_sats_locked',
+                                      {'total': totalLockedSats.toString()}),
+                                  style: const TextStyle(
+                                      color: Colors.orange,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold),
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      // MAX: preenche o valor maximo enviavel descontando taxa
-                      // estimada (fee 0 para BRIX, ~1% para LN externo).
-                      GestureDetector(
-                        onTap: (isSending || availableSats <= 0) ? null : () {
-                          final dest = invoiceController.text.trim().toLowerCase();
-                          final isBrixDest = dest.contains('@') &&
-                              (dest.endsWith('@brix.app') ||
-                                  dest.endsWith('@brostr.app') ||
-                                  dest.endsWith('@brix.brostr.app'));
-                          int maxSats;
-                          if (isBrixDest) {
-                            maxSats = (availableSats - 1).clamp(0, availableSats);
-                          } else {
-                            final feeBuffer = (availableSats * 0.01).ceil();
-                            maxSats = (availableSats - feeBuffer - 1).clamp(0, availableSats);
-                          }
-                          setModalState(() {
-                            if (isReaisMode && btcPriceBrl != null && btcPriceBrl! > 0) {
-                              final brl = maxSats * btcPriceBrl! / 100000000;
-                              amountController.text = brl.toStringAsFixed(2);
-                            } else {
-                              amountController.text = maxSats.toString();
-                            }
-                          });
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-                          decoration: BoxDecoration(
-                            color: Colors.deepPurple.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(
-                              color: Colors.deepPurple.withOpacity(0.5),
+                          if (hasTierActive) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              AppLocalizations.of(context).tp(
+                                  'wallet_sats_locked_tier', {
+                                'amount': tierLockedSats.toString(),
+                                'tier': tierName ?? ''
+                              }),
+                              style: const TextStyle(
+                                  color: Colors.orange, fontSize: 11),
                             ),
-                          ),
-                          child: const Text(
-                            'MAX',
-                            style: TextStyle(
-                              color: Colors.deepPurple,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13,
+                          ],
+                          if (committedSats > 0) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              AppLocalizations.of(context).tp(
+                                  'wallet_sats_in_open_orders',
+                                  {'amount': committedSats.toString()}),
+                              style: const TextStyle(
+                                  color: Colors.orange, fontSize: 11),
                             ),
-                          ),
-                        ),
+                          ],
+                          if (hasTierActive) ...[
+                            const SizedBox(height: 6),
+                            Text(
+                              AppLocalizations.of(context)
+                                  .t('wallet_withdraw_all_warning'),
+                              style: TextStyle(
+                                  color: Colors.red.shade300,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ],
                       ),
-                    ],
-                  ),
-                  // Conversion preview
-                  if (amountController.text.trim().isNotEmpty && btcPriceBrl != null)
-                    Builder(builder: (_) {
-                      Widget? preview;
-                      if (isReaisMode) {
-                        final brl = double.tryParse(amountController.text.trim().replaceAll(',', '.'));
-                        if (brl != null && brl > 0) {
-                          final sats = (brl * 100000000 / btcPriceBrl!).round();
-                          preview = Text(
-                            '≈ $sats sats  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
-                            style: const TextStyle(color: Colors.white54, fontSize: 12),
-                          );
-                        }
-                      } else {
-                        final sats = int.tryParse(amountController.text.trim());
-                        if (sats != null && sats > 0) {
-                          final brl = sats * btcPriceBrl! / 100000000;
-                          preview = Text(
-                            '≈ $_fiatSymbol ${brl.toStringAsFixed(2)}  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
-                            style: const TextStyle(color: Colors.white54, fontSize: 12),
-                          );
-                        }
-                      }
-                      if (preview == null) return const SizedBox.shrink();
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.05),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.swap_vert, color: Colors.white38, size: 16),
-                              const SizedBox(width: 6),
-                              Expanded(child: preview),
-                            ],
-                          ),
-                        ),
-                      );
-                    }),
-                ],
+                    ),
+                  ],
 
-                // Campo de mensagem/memo (para Lightning Address e BRIX)
-                if (showAmountField) ...[
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 20),
+
+                  // Campo de destino (Invoice, LNURL, ou Lightning Address)
                   TextField(
-                    controller: memoController,
+                    controller: invoiceController,
                     style: const TextStyle(color: Colors.white, fontSize: 14),
-                    maxLength: 140,
                     maxLines: 2,
                     enabled: !isSending,
+                    onChanged: (value) {
+                      // Se for Lightning Address, LNURL-pay, phone, email ou username BRIX, mostrar campo de valor
+                      final trimmed = value.trim().toLowerCase();
+                      final isLnAddress =
+                          trimmed.contains('@') && trimmed.contains('.');
+                      final isLnurl = trimmed.startsWith('lnurl');
+                      final isPhone =
+                          RegExp(r'^\+?\d[\d\s\-()]{7,}$').hasMatch(trimmed);
+                      final isBrixUser =
+                          RegExp(r'^[a-z0-9_]{3,20}$').hasMatch(trimmed) &&
+                              !trimmed.startsWith('lnbc') &&
+                              !trimmed.startsWith('lntb');
+                      final needsAmount =
+                          isLnAddress || isLnurl || isPhone || isBrixUser;
+
+                      if (needsAmount != showAmountField) {
+                        setModalState(() {
+                          showAmountField = needsAmount;
+                          errorMessage = null;
+                        });
+                      }
+                    },
                     decoration: InputDecoration(
-                      labelText: 'Mensagem (opcional)',
-                      labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
-                      hintText: 'Ex: Pagamento do jantar',
-                      hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
-                      prefixIcon: Icon(Icons.message_outlined, color: Colors.white.withOpacity(0.5)),
-                      counterStyle: TextStyle(color: Colors.white.withOpacity(0.4)),
+                      labelText: AppLocalizations.of(context)
+                          .t('wallet_destination_label'),
+                      labelStyle:
+                          TextStyle(color: Colors.white.withOpacity(0.6)),
+                      hintText:
+                          AppLocalizations.of(context).t('wallet_hint_brix'),
+                      hintStyle:
+                          TextStyle(color: Colors.white.withOpacity(0.3)),
+                      helperText:
+                          AppLocalizations.of(context).t('wallet_helper_brix'),
+                      helperStyle: TextStyle(
+                          color: Colors.white.withOpacity(0.4), fontSize: 11),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: const BorderSide(color: Color(0xFF333333)),
@@ -1252,493 +1179,937 @@ class _WalletScreenState extends State<WalletScreen> {
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Color(0xFFFF9800)),
+                        borderSide: const BorderSide(color: Color(0xFFE53935)),
                       ),
                     ),
                   ),
-                ],
-                
-                // Mensagem de erro
-                if (errorMessage != null) ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.red.withOpacity(0.3)),
-                    ),
-                    child: Row(
+
+                  // Campo de valor (mostrado para Lightning Address e LNURL)
+                  if (showAmountField) ...[
+                    const SizedBox(height: 16),
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(Icons.error_outline, color: Colors.red, size: 20),
-                        const SizedBox(width: 8),
                         Expanded(
-                          child: Text(
-                            errorMessage!,
-                            style: const TextStyle(color: Colors.red, fontSize: 13),
+                          child: TextField(
+                            controller: amountController,
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 18),
+                            keyboardType: isReaisMode
+                                ? const TextInputType.numberWithOptions(
+                                    decimal: true)
+                                : TextInputType.number,
+                            enabled: !isSending,
+                            onChanged: (_) => setModalState(() {}),
+                            decoration: InputDecoration(
+                              labelText: isReaisMode
+                                  ? (_displayCurrency == 'BRL'
+                                      ? 'Valor em Reais'
+                                      : 'Amount in $_displayCurrency')
+                                  : AppLocalizations.of(context)
+                                      .t('wallet_amount_label'),
+                              labelStyle: TextStyle(
+                                  color: Colors.white.withOpacity(0.6)),
+                              hintText: isReaisMode ? 'Ex: 10.00' : 'Ex: 1000',
+                              hintStyle: TextStyle(
+                                  color: Colors.white.withOpacity(0.3)),
+                              prefixIcon: Icon(
+                                isReaisMode ? Icons.attach_money : Icons.bolt,
+                                color:
+                                    isReaisMode ? Colors.green : Colors.orange,
+                              ),
+                              suffixText: isReaisMode ? _fiatSymbol : 'sats',
+                              suffixStyle: TextStyle(
+                                  color: isReaisMode
+                                      ? Colors.green
+                                      : Colors.orange),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    const BorderSide(color: Color(0xFF333333)),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide:
+                                    const BorderSide(color: Color(0xFF333333)),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                borderSide: BorderSide(
+                                    color: isReaisMode
+                                        ? Colors.green
+                                        : const Color(0xFFFF9800)),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: isSending
+                              ? null
+                              : () {
+                                  setModalState(() {
+                                    isReaisMode = !isReaisMode;
+                                    amountController.clear();
+                                  });
+                                },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 16),
+                            decoration: BoxDecoration(
+                              color:
+                                  (isReaisMode ? Colors.green : Colors.orange)
+                                      .withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color:
+                                    (isReaisMode ? Colors.green : Colors.orange)
+                                        .withOpacity(0.5),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.swap_horiz,
+                                  color: isReaisMode
+                                      ? Colors.green
+                                      : Colors.orange,
+                                  size: 16,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  isReaisMode ? _fiatSymbol : 'SAT',
+                                  style: TextStyle(
+                                    color: isReaisMode
+                                        ? Colors.green
+                                        : Colors.orange,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        // MAX: preenche o valor maximo enviavel descontando taxa
+                        // estimada (fee 0 para BRIX, ~1% para LN externo).
+                        GestureDetector(
+                          onTap: (isSending || availableSats <= 0)
+                              ? null
+                              : () {
+                                  final dest = invoiceController.text
+                                      .trim()
+                                      .toLowerCase();
+                                  final isBrixDest = dest.contains('@') &&
+                                      (dest.endsWith('@brix.app') ||
+                                          dest.endsWith('@brostr.app') ||
+                                          dest.endsWith('@brix.brostr.app'));
+                                  int maxSats;
+                                  if (isBrixDest) {
+                                    maxSats = maxBrixSendAmount(availableSats);
+                                  } else {
+                                    final feeBuffer =
+                                        (availableSats * 0.01).ceil();
+                                    maxSats = (availableSats - feeBuffer - 1)
+                                        .clamp(0, availableSats);
+                                  }
+                                  setModalState(() {
+                                    if (isReaisMode &&
+                                        btcPriceBrl != null &&
+                                        btcPriceBrl! > 0) {
+                                      final brl =
+                                          maxSats * btcPriceBrl! / 100000000;
+                                      amountController.text =
+                                          brl.toStringAsFixed(2);
+                                    } else {
+                                      amountController.text =
+                                          maxSats.toString();
+                                    }
+                                  });
+                                },
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 16),
+                            decoration: BoxDecoration(
+                              color: Colors.deepPurple.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: Colors.deepPurple.withOpacity(0.5),
+                              ),
+                            ),
+                            child: const Text(
+                              'MAX',
+                              style: TextStyle(
+                                color: Colors.deepPurple,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
                           ),
                         ),
                       ],
                     ),
-                  ),
-                ],
-                
-                const SizedBox(height: 12),
-                
-                // Botão Colar
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: isSending ? null : () async {
-                      final data = await Clipboard.getData('text/plain');
-                      if (data?.text != null) {
-                        invoiceController.text = data!.text!.trim();
-                        
-                        // Verificar se precisa mostrar campo de valor
-                        final trimmed = data.text!.trim().toLowerCase();
-                        final isLnAddr = trimmed.contains('@') && trimmed.contains('.');
-                        final isLnurl = trimmed.startsWith('lnurl');
-                        final isPhone = RegExp(r'^\+?\d[\d\s\-()]{7,}$').hasMatch(trimmed);
-                        final isBrixUser = RegExp(r'^[a-z0-9_]{3,20}$').hasMatch(trimmed) && !trimmed.startsWith('lnbc') && !trimmed.startsWith('lntb');
-                        final needsAmount = isLnAddr || isLnurl || isPhone || isBrixUser;
-                        
-                        setModalState(() {
-                          showAmountField = needsAmount;
-                          errorMessage = null;
-                        });
-                        
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text(needsAmount 
-                                ? AppLocalizations.of(context).t('wallet_pasted_enter_amount')
-                                : AppLocalizations.of(context).t('wallet_pasted')),
-                              duration: const Duration(seconds: 1),
-                            ),
-                          );
-                        }
-                      }
-                    },
-                    icon: const Icon(Icons.paste),
-                    label: Text(AppLocalizations.of(context).t('wallet_paste_clipboard')),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: const Color(0xFFFF9800),
-                      side: const BorderSide(color: Color(0xFFFF9800)),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                
-                // Botão Scanear QR
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: isSending ? null : () async {
-                      Navigator.pop(context); // Fechar modal atual
-                      final scannedInvoice = await _showQRScanner();
-                      if (scannedInvoice != null && scannedInvoice.isNotEmpty) {
-                        // Reabrir o dialog com a invoice escaneada
-                        _showSendDialogWithInvoice(scannedInvoice);
-                      }
-                    },
-                    icon: const Icon(Icons.qr_code_scanner),
-                    label: Text(AppLocalizations.of(context).t('wallet_scan_qr')),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.green,
-                      side: const BorderSide(color: Colors.green),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                
-                // Botão Enviar
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: isSending ? null : () async {
-                      final destination = invoiceController.text.trim();
-                      if (destination.isEmpty) {
-                        setModalState(() => errorMessage = AppLocalizations.of(context).t('wallet_enter_destination'));
-                        return;
-                      }
-                      
-                      final lowerDest = destination.toLowerCase();
-                      
-                      // Verificar se é endereço Bitcoin (não suportado)
-                      if (_isBitcoinAddress(destination)) {
-                        setModalState(() => errorMessage = AppLocalizations.of(context).t('wallet_onchain_not_available'));
-                        return;
-                      }
-                      
-                      // Verificar se é Lightning Address ou LNURL (precisa de valor)
-                      final isLnAddress = destination.contains('@') && destination.contains('.');
-                      final isLnurl = lowerDest.startsWith('lnurl');
-                      final isPhone = RegExp(r'^\+?\d[\d\s\-()]{7,}$').hasMatch(destination.trim());
-                      final isBrixUser = RegExp(r'^[a-z0-9_]{3,20}$').hasMatch(lowerDest) && !lowerDest.startsWith('lnbc') && !lowerDest.startsWith('lntb');
-                      // Detect BRIX Lightning Addresses
-                      final isBrixAddress = isLnAddress && (lowerDest.endsWith('@brix.app') || lowerDest.endsWith('@brostr.app') || lowerDest.endsWith('@brix.brostr.app'));
-                      // Detect emails that could be BRIX contacts (not already a BRIX domain)
-                      final isEmailForBrix = isLnAddress && !isBrixAddress && lowerDest.contains('@');
-                      final needsBrixResolve = isPhone || isBrixUser || isBrixAddress || isEmailForBrix;
-                      final needsAmountInput = isLnAddress || isLnurl || needsBrixResolve;
-                      
-                      // Atualizar UI se necessário
-                      if (needsAmountInput != showAmountField) {
-                        setModalState(() {
-                          showAmountField = needsAmountInput;
-                          errorMessage = needsAmountInput ? AppLocalizations.of(context).t('wallet_enter_amount_sats') : null;
-                        });
-                        return;
-                      }
-                      
-                      // Se for Lightning Address, LNURL, phone ou BRIX username, precisamos de um valor
-                      if (needsAmountInput) {
-                        final amountText = amountController.text.trim();
-                        int? amountSats;
-                        if (isReaisMode && btcPriceBrl != null) {
-                          final brl = double.tryParse(amountText.replaceAll(',', '.'));
+                    // Conversion preview
+                    if (amountController.text.trim().isNotEmpty &&
+                        btcPriceBrl != null)
+                      Builder(builder: (_) {
+                        Widget? preview;
+                        if (isReaisMode) {
+                          final brl = double.tryParse(amountController.text
+                              .trim()
+                              .replaceAll(',', '.'));
                           if (brl != null && brl > 0) {
-                            amountSats = (brl * 100000000 / btcPriceBrl!).round();
+                            final sats =
+                                (brl * 100000000 / btcPriceBrl!).round();
+                            preview = Text(
+                              '≈ $sats sats  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
+                              style: const TextStyle(
+                                  color: Colors.white54, fontSize: 12),
+                            );
                           }
                         } else {
-                          amountSats = int.tryParse(amountText);
-                        }
-                        
-                        if (amountSats == null || amountSats <= 0) {
-                          setModalState(() => errorMessage = AppLocalizations.of(context).t('wallet_enter_valid_amount'));
-                          return;
-                        }
-                        
-                        if (amountSats > availableSats) {
-                          if (hasTierActive && amountSats > balanceSats - tierLockedSats) {
-                            setModalState(() => errorMessage = AppLocalizations.of(context).tp('wallet_tier_locked_error', {'amount': tierLockedSats.toString(), 'tier': tierName ?? ''}));
-                          } else if (hasLockedFunds) {
-                            setModalState(() => errorMessage = AppLocalizations.of(context).tp('wallet_insufficient_balance_locked', {'available': availableSats.toString(), 'locked': totalLockedSats.toString()}));
-                          } else {
-                            setModalState(() => errorMessage = AppLocalizations.of(context).tp('wallet_insufficient_balance', {'balance': balanceSats.toString()}));
+                          final sats =
+                              int.tryParse(amountController.text.trim());
+                          if (sats != null && sats > 0) {
+                            final brl = sats * btcPriceBrl! / 100000000;
+                            preview = Text(
+                              '≈ $_fiatSymbol ${brl.toStringAsFixed(2)}  •  1 BTC = $_fiatSymbol ${btcPriceBrl!.toStringAsFixed(0)}',
+                              style: const TextStyle(
+                                  color: Colors.white54, fontSize: 12),
+                            );
                           }
-                          return;
                         }
-                        
-                        setModalState(() {
-                          isSending = true;
-                          errorMessage = null;
-                        });
-                        
-                        broLog('💸 Enviando $amountSats sats para $destination...');
+                        if (preview == null) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 8),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.swap_vert,
+                                    color: Colors.white38, size: 16),
+                                const SizedBox(width: 6),
+                                Expanded(child: preview),
+                              ],
+                            ),
+                          ),
+                        );
+                      }),
+                  ],
 
-                        final memoText = memoController.text.trim();
-                        try {
-                          final breezProvider = context.read<BreezProvider>();
-                          final lnAddressService = LnAddressService();
-                          
-                          // Se for phone, username BRIX, email ou BRIX address, resolver primeiro via BRIX
-                          var resolvedDest = destination;
-                          var confirmedBrixDestination = isBrixAddress;
-                          if (needsBrixResolve) {
-                            final brixService = BrixService();
-                            // For BRIX addresses (user@brix.app), extract username for resolve
-                            var resolveQuery = destination;
-                            if (isBrixAddress) {
-                              resolveQuery = destination.split('@').first;
-                            }
-                            final resolveResult = await brixService.resolve(resolveQuery);
-                            if (!resolveResult.found || resolveResult.brixAddress == null) {
-                              // If it's an email, don't error — it might be a standard Lightning Address
-                              if (!isEmailForBrix) {
+                  if (showAmountField)
+                    Builder(builder: (_) {
+                      final text = amountController.text.trim();
+                      final amountSats = isReaisMode &&
+                              btcPriceBrl != null &&
+                              btcPriceBrl! > 0
+                          ? ((double.tryParse(text.replaceAll(',', '.')) ?? 0) *
+                                  100000000 /
+                                  btcPriceBrl!)
+                              .round()
+                          : int.tryParse(text) ?? 0;
+                      return _brixFeePreview(
+                        destination: invoiceController.text,
+                        amountSats: amountSats,
+                        bitcoinPrice: btcPriceBrl,
+                      );
+                    }),
+
+                  // Campo de mensagem/memo (para Lightning Address e BRIX)
+                  if (showAmountField) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: memoController,
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      maxLength: 140,
+                      maxLines: 2,
+                      enabled: !isSending,
+                      decoration: InputDecoration(
+                        labelText: 'Mensagem (opcional)',
+                        labelStyle:
+                            TextStyle(color: Colors.white.withOpacity(0.6)),
+                        hintText: 'Ex: Pagamento do jantar',
+                        hintStyle:
+                            TextStyle(color: Colors.white.withOpacity(0.3)),
+                        prefixIcon: Icon(Icons.message_outlined,
+                            color: Colors.white.withOpacity(0.5)),
+                        counterStyle:
+                            TextStyle(color: Colors.white.withOpacity(0.4)),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF333333)),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF333333)),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide:
+                              const BorderSide(color: Color(0xFFFF9800)),
+                        ),
+                      ),
+                    ),
+                  ],
+
+                  // Mensagem de erro
+                  if (errorMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.red.withOpacity(0.3)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.error_outline,
+                              color: Colors.red, size: 20),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              errorMessage!,
+                              style: const TextStyle(
+                                  color: Colors.red, fontSize: 13),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 12),
+
+                  // Botão Colar
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: isSending
+                          ? null
+                          : () async {
+                              final data =
+                                  await Clipboard.getData('text/plain');
+                              if (data?.text != null) {
+                                invoiceController.text = data!.text!.trim();
+
+                                // Verificar se precisa mostrar campo de valor
+                                final trimmed = data.text!.trim().toLowerCase();
+                                final isLnAddr = trimmed.contains('@') &&
+                                    trimmed.contains('.');
+                                final isLnurl = trimmed.startsWith('lnurl');
+                                final isPhone = RegExp(r'^\+?\d[\d\s\-()]{7,}$')
+                                    .hasMatch(trimmed);
+                                final isBrixUser = RegExp(r'^[a-z0-9_]{3,20}$')
+                                        .hasMatch(trimmed) &&
+                                    !trimmed.startsWith('lnbc') &&
+                                    !trimmed.startsWith('lntb');
+                                final needsAmount = isLnAddr ||
+                                    isLnurl ||
+                                    isPhone ||
+                                    isBrixUser;
+
                                 setModalState(() {
-                                  isSending = false;
-                                  errorMessage = resolveResult.error ?? 'Nenhum BRIX encontrado para "$destination"';
+                                  showAmountField = needsAmount;
+                                  errorMessage = null;
                                 });
-                                broLog('🔍 BRIX resolve failed for "$destination": ${resolveResult.error ?? "not found"}');
+
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(needsAmount
+                                          ? AppLocalizations.of(context)
+                                              .t('wallet_pasted_enter_amount')
+                                          : AppLocalizations.of(context)
+                                              .t('wallet_pasted')),
+                                      duration: const Duration(seconds: 1),
+                                    ),
+                                  );
+                                }
+                              }
+                            },
+                      icon: const Icon(Icons.paste),
+                      label: Text(AppLocalizations.of(context)
+                          .t('wallet_paste_clipboard')),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFFF9800),
+                        side: const BorderSide(color: Color(0xFFFF9800)),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Botão Scanear QR
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: isSending
+                          ? null
+                          : () async {
+                              Navigator.pop(context); // Fechar modal atual
+                              final scannedInvoice = await _showQRScanner();
+                              if (scannedInvoice != null &&
+                                  scannedInvoice.isNotEmpty) {
+                                // Reabrir o dialog com a invoice escaneada
+                                _showSendDialogWithInvoice(scannedInvoice);
+                              }
+                            },
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: Text(
+                          AppLocalizations.of(context).t('wallet_scan_qr')),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.green,
+                        side: const BorderSide(color: Colors.green),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Botão Enviar
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: isSending
+                          ? null
+                          : () async {
+                              final destination = invoiceController.text.trim();
+                              if (destination.isEmpty) {
+                                setModalState(() => errorMessage =
+                                    AppLocalizations.of(context)
+                                        .t('wallet_enter_destination'));
                                 return;
                               }
-                              // Fall through to standard LNURL resolution for non-BRIX emails
-                              broLog('🔍 Email não encontrado no BRIX, tentando como Lightning Address: $destination');
-                            } else {
-                              resolvedDest = resolveResult.brixAddress!;
-                              confirmedBrixDestination = true;
-                              broLog('🔍 BRIX resolvido: $destination → $resolvedDest (via ${resolveResult.matchedBy})');
-                            }
-                          }
-                          
-                          // Resolver Lightning Address ou LNURL para invoice BOLT11
-                          final senderPubkey = await StorageService().getNostrPublicKey();
-                          final invoiceResult = await lnAddressService.getInvoice(
-                            lnAddress: resolvedDest,
-                            amountSats: amountSats,
-                            comment: memoText.isNotEmpty ? memoText : null,
-                            senderPubkey: senderPubkey,
-                          );
-                          
-                          if (invoiceResult['success'] != true) {
-                            final errMsg = invoiceResult['error'] ?? '';
-                            if (errMsg == 'BRIX_RECIPIENT_OFFLINE' && needsBrixResolve) {
-                              // Queue for auto-retry when recipient comes online
-                              await BrixRelayService().queueOutgoingPayment(
-                                recipient: resolvedDest,
-                                amountSats: amountSats,
-                                originalDest: destination,
-                                comment: memoText.isNotEmpty ? memoText : null,
-                              );
-                              if (context.mounted) {
-                                Navigator.pop(context);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
-                                    backgroundColor: Color(0xFF4CAF50),
-                                    duration: Duration(seconds: 4),
-                                  ),
-                                );
-                              }
-                              _loadWalletInfo();
-                            } else {
-                              setModalState(() {
-                                isSending = false;
-                                errorMessage = errMsg.isNotEmpty ? errMsg : AppLocalizations.of(context).t('wallet_resolve_failed');
-                              });
-                            }
-                            return;
-                          }
-                          
-                          final invoice = invoiceResult['invoice'] as String;
-                          broLog('📝 Invoice obtida: ${invoice.substring(0, 50)}...');
-                          
-                          // Pagar a invoice
-                          final result = await breezProvider.payInvoice(invoice);
-                          
-                          if (result != null && result['success'] == true) {
-                            final paymentHash = result['payment']?['paymentHash']?.toString() ?? '';
-                            if (confirmedBrixDestination && paymentHash.isNotEmpty) {
-                              await BrixRelayService.recordSettledOutgoingFee(
-                                paymentHash: paymentHash,
-                                amountSats: amountSats,
-                                feeSats: BrixRelayService.calculateBrixFee(amountSats),
-                              );
-                            }
-                            if (context.mounted) {
-                              Navigator.pop(context);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(AppLocalizations.of(context).t('wallet_payment_sent_success')),
-                                  backgroundColor: const Color(0xFF4CAF50),
-                                ),
-                              );
-                            }
-                            _loadWalletInfo();
-                          } else {
-                            final errStr = result?['error']?.toString() ?? '';
-                            // If payInvoice fails with invalidInput on a BRIX dest,
-                            // the invoice is likely from LNbits (offline). Queue for retry.
-                            if (needsBrixResolve && errStr.contains('invalid')) {
-                              await BrixRelayService().queueOutgoingPayment(
-                                recipient: resolvedDest,
-                                amountSats: amountSats,
-                                originalDest: destination,
-                                comment: memoText.isNotEmpty ? memoText : null,
-                              );
-                              if (context.mounted) {
-                                Navigator.pop(context);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
-                                    backgroundColor: Color(0xFF4CAF50),
-                                    duration: Duration(seconds: 4),
-                                  ),
-                                );
-                              }
-                              _loadWalletInfo();
-                            } else {
-                              setModalState(() {
-                                isSending = false;
-                                errorMessage = errStr.isNotEmpty ? errStr : AppLocalizations.of(context).t('wallet_send_payment_failed');
-                              });
-                            }
-                          }
-                        } catch (e) {
-                          broLog('❌ Erro ao enviar: $e');
-                          final isTimeout = e.toString().contains('TimeoutException') || e.toString().contains('timeout');
-                          final canQueue = needsBrixResolve && amountSats != null && amountSats! > 0;
 
-                          if (isTimeout && canQueue) {
-                            // Timeout on BRIX → queue and show as success
-                            await BrixRelayService().queueOutgoingPayment(
-                              recipient: destination,
-                              amountSats: amountSats!,
-                              originalDest: destination,
-                              comment: memoText.isNotEmpty ? memoText : null,
-                            );
-                            if (context.mounted) {
-                              Navigator.pop(context);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
-                                  backgroundColor: Color(0xFF4CAF50),
-                                  duration: Duration(seconds: 4),
-                                ),
-                              );
-                            }
-                            _loadWalletInfo();
-                          } else {
-                            setModalState(() {
-                              isSending = false;
-                              errorMessage = isTimeout
-                                  ? '⚡ O destinatário não está com o app aberto neste momento.\n\nPeça para ele abrir o Bro App e tente novamente.'
-                                  : 'Erro: $e';
-                            });
-                          }
-                        }
-                        return;
-                      }
-                      
-                      // Verificar se é Lightning invoice válida
-                      if (!lowerDest.startsWith('lnbc') && 
-                          !lowerDest.startsWith('lntb') &&
-                          !lowerDest.startsWith('lnurl') &&
-                          !isLnAddress &&
-                          !isPhone &&
-                          !isBrixUser) {
-                        setModalState(() => errorMessage = AppLocalizations.of(context).t('wallet_invalid_format'));
-                        return;
-                      }
-                      
-                      setModalState(() {
-                        isSending = true;
-                        errorMessage = null;
-                      });
-                      broLog('💸 Enviando pagamento...');
-                      
-                      try {
-                        final breezProvider = context.read<BreezProvider>();
-                        final result = await breezProvider.payInvoice(destination);
-                        
-                        broLog('📦 Resultado pagamento: $result');
-                        
-                        if (result != null && result['success'] == true) {
-                          if (context.mounted) {
-                            Navigator.pop(context);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(AppLocalizations.of(context).t('wallet_payment_sent_success')),
-                                backgroundColor: const Color(0xFF4CAF50),
-                              ),
-                            );
-                          }
-                          _loadWalletInfo(); // Atualizar saldo
-                        } else {
-                          // Erro específico de saldo insuficiente
-                          final errorType = result?['errorType'];
-                          final errorMsg = result?['error'] ?? AppLocalizations.of(context).t('wallet_send_payment_failed');
-                          
-                          setModalState(() => isSending = false);
-                          
-                          if (context.mounted) {
-                            if (errorType == 'INSUFFICIENT_FUNDS') {
-                              // Mostrar dialog específico para saldo insuficiente
-                              showDialog(
-                                context: context,
-                                builder: (ctx) => AlertDialog(
-                                  backgroundColor: const Color(0xFF1A1A1A),
-                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                                  title: Row(
-                                    children: [
-                                      const Icon(Icons.account_balance_wallet, color: Colors.orange, size: 28),
-                                      const SizedBox(width: 12),
-                                      Text(AppLocalizations.of(context).t('wallet_insufficient_balance_title'), style: const TextStyle(color: Colors.white)),
-                                    ],
-                                  ),
-                                  content: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        errorMsg,
-                                        style: const TextStyle(color: Colors.white70),
-                                      ),
-                                      const SizedBox(height: 16),
-                                      Container(
-                                        padding: const EdgeInsets.all(12),
-                                        decoration: BoxDecoration(
-                                          color: Colors.orange.withOpacity(0.1),
-                                          borderRadius: BorderRadius.circular(8),
-                                          border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                              final lowerDest = destination.toLowerCase();
+
+                              // Verificar se é endereço Bitcoin (não suportado)
+                              if (_isBitcoinAddress(destination)) {
+                                setModalState(() => errorMessage =
+                                    AppLocalizations.of(context)
+                                        .t('wallet_onchain_not_available'));
+                                return;
+                              }
+
+                              // Verificar se é Lightning Address ou LNURL (precisa de valor)
+                              final isLnAddress = destination.contains('@') &&
+                                  destination.contains('.');
+                              final isLnurl = lowerDest.startsWith('lnurl');
+                              final isPhone = RegExp(r'^\+?\d[\d\s\-()]{7,}$')
+                                  .hasMatch(destination.trim());
+                              final isBrixUser = RegExp(r'^[a-z0-9_]{3,20}$')
+                                      .hasMatch(lowerDest) &&
+                                  !lowerDest.startsWith('lnbc') &&
+                                  !lowerDest.startsWith('lntb');
+                              // Detect BRIX Lightning Addresses
+                              final isBrixAddress = isLnAddress &&
+                                  (lowerDest.endsWith('@brix.app') ||
+                                      lowerDest.endsWith('@brostr.app') ||
+                                      lowerDest.endsWith('@brix.brostr.app'));
+                              // Detect emails that could be BRIX contacts (not already a BRIX domain)
+                              final isEmailForBrix = isLnAddress &&
+                                  !isBrixAddress &&
+                                  lowerDest.contains('@');
+                              final needsBrixResolve = isPhone ||
+                                  isBrixUser ||
+                                  isBrixAddress ||
+                                  isEmailForBrix;
+                              final needsAmountInput =
+                                  isLnAddress || isLnurl || needsBrixResolve;
+
+                              // Atualizar UI se necessário
+                              if (needsAmountInput != showAmountField) {
+                                setModalState(() {
+                                  showAmountField = needsAmountInput;
+                                  errorMessage = needsAmountInput
+                                      ? AppLocalizations.of(context)
+                                          .t('wallet_enter_amount_sats')
+                                      : null;
+                                });
+                                return;
+                              }
+
+                              // Se for Lightning Address, LNURL, phone ou BRIX username, precisamos de um valor
+                              if (needsAmountInput) {
+                                final amountText = amountController.text.trim();
+                                int? amountSats;
+                                if (isReaisMode && btcPriceBrl != null) {
+                                  final brl = double.tryParse(
+                                      amountText.replaceAll(',', '.'));
+                                  if (brl != null && brl > 0) {
+                                    amountSats =
+                                        (brl * 100000000 / btcPriceBrl!)
+                                            .round();
+                                  }
+                                } else {
+                                  amountSats = int.tryParse(amountText);
+                                }
+
+                                if (amountSats == null || amountSats <= 0) {
+                                  setModalState(() => errorMessage =
+                                      AppLocalizations.of(context)
+                                          .t('wallet_enter_valid_amount'));
+                                  return;
+                                }
+
+                                final requiredSats = amountSats +
+                                    (isBrixSendDestination(destination)
+                                        ? BrixRelayService.calculateBrixFee(
+                                            amountSats)
+                                        : 0);
+                                if (requiredSats > availableSats) {
+                                  if (hasTierActive &&
+                                      requiredSats >
+                                          balanceSats - tierLockedSats) {
+                                    setModalState(() => errorMessage =
+                                            AppLocalizations.of(context).tp(
+                                                'wallet_tier_locked_error', {
+                                          'amount': tierLockedSats.toString(),
+                                          'tier': tierName ?? ''
+                                        }));
+                                  } else if (hasLockedFunds) {
+                                    setModalState(() => errorMessage =
+                                            AppLocalizations.of(context).tp(
+                                                'wallet_insufficient_balance_locked',
+                                                {
+                                              'available':
+                                                  availableSats.toString(),
+                                              'locked':
+                                                  totalLockedSats.toString()
+                                            }));
+                                  } else {
+                                    setModalState(() => errorMessage =
+                                            AppLocalizations.of(context).tp(
+                                                'wallet_insufficient_balance', {
+                                          'balance': balanceSats.toString()
+                                        }));
+                                  }
+                                  return;
+                                }
+
+                                setModalState(() {
+                                  isSending = true;
+                                  errorMessage = null;
+                                });
+
+                                broLog(
+                                    '💸 Enviando $amountSats sats para $destination...');
+
+                                final memoText = memoController.text.trim();
+                                try {
+                                  final breezProvider =
+                                      context.read<BreezProvider>();
+                                  final lnAddressService = LnAddressService();
+
+                                  // Se for phone, username BRIX, email ou BRIX address, resolver primeiro via BRIX
+                                  var resolvedDest = destination;
+                                  var confirmedBrixDestination = isBrixAddress;
+                                  if (needsBrixResolve) {
+                                    final brixService = BrixService();
+                                    // For BRIX addresses (user@brix.app), extract username for resolve
+                                    var resolveQuery = destination;
+                                    if (isBrixAddress) {
+                                      resolveQuery =
+                                          destination.split('@').first;
+                                    }
+                                    final resolveResult =
+                                        await brixService.resolve(resolveQuery);
+                                    if (!resolveResult.found ||
+                                        resolveResult.brixAddress == null) {
+                                      // If it's an email, don't error — it might be a standard Lightning Address
+                                      if (!isEmailForBrix) {
+                                        setModalState(() {
+                                          isSending = false;
+                                          errorMessage = resolveResult.error ??
+                                              'Nenhum BRIX encontrado para "$destination"';
+                                        });
+                                        broLog(
+                                            '🔍 BRIX resolve failed for "$destination": ${resolveResult.error ?? "not found"}');
+                                        return;
+                                      }
+                                      // Fall through to standard LNURL resolution for non-BRIX emails
+                                      broLog(
+                                          '🔍 Email não encontrado no BRIX, tentando como Lightning Address: $destination');
+                                    } else {
+                                      resolvedDest = resolveResult.brixAddress!;
+                                      confirmedBrixDestination = true;
+                                      broLog(
+                                          '🔍 BRIX resolvido: $destination → $resolvedDest (via ${resolveResult.matchedBy})');
+                                    }
+                                  }
+
+                                  // Resolver Lightning Address ou LNURL para invoice BOLT11
+                                  final senderPubkey = await StorageService()
+                                      .getNostrPublicKey();
+                                  final invoiceResult =
+                                      await lnAddressService.getInvoice(
+                                    lnAddress: resolvedDest,
+                                    amountSats: amountSats,
+                                    comment:
+                                        memoText.isNotEmpty ? memoText : null,
+                                    senderPubkey: senderPubkey,
+                                  );
+
+                                  if (invoiceResult['success'] != true) {
+                                    final errMsg = invoiceResult['error'] ?? '';
+                                    if (errMsg == 'BRIX_RECIPIENT_OFFLINE' &&
+                                        needsBrixResolve) {
+                                      // Queue for auto-retry when recipient comes online
+                                      await BrixRelayService()
+                                          .queueOutgoingPayment(
+                                        recipient: resolvedDest,
+                                        amountSats: amountSats,
+                                        originalDest: destination,
+                                        comment: memoText.isNotEmpty
+                                            ? memoText
+                                            : null,
+                                      );
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                                '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                            backgroundColor: Color(0xFF4CAF50),
+                                            duration: Duration(seconds: 4),
+                                          ),
+                                        );
+                                      }
+                                      _loadWalletInfo();
+                                    } else {
+                                      setModalState(() {
+                                        isSending = false;
+                                        errorMessage = errMsg.isNotEmpty
+                                            ? errMsg
+                                            : AppLocalizations.of(context)
+                                                .t('wallet_resolve_failed');
+                                      });
+                                    }
+                                    return;
+                                  }
+
+                                  final invoice =
+                                      invoiceResult['invoice'] as String;
+                                  broLog(
+                                      '📝 Invoice obtida: ${invoice.substring(0, 50)}...');
+
+                                  // Pagar a invoice
+                                  final result =
+                                      await breezProvider.payInvoice(invoice);
+
+                                  if (isCompletedWalletPayment(result)) {
+                                    final paymentHash = result!['payment']
+                                                ?['paymentHash']
+                                            ?.toString() ??
+                                        '';
+                                    if (confirmedBrixDestination &&
+                                        paymentHash.isNotEmpty) {
+                                      await BrixRelayService
+                                          .recordSettledOutgoingFee(
+                                        paymentHash: paymentHash,
+                                        amountSats: amountSats,
+                                        feeSats:
+                                            BrixRelayService.calculateBrixFee(
+                                                amountSats),
+                                      );
+                                    }
+                                    if (context.mounted) {
+                                      Navigator.pop(context);
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(AppLocalizations.of(
+                                                  context)
+                                              .t('wallet_payment_sent_success')),
+                                          backgroundColor:
+                                              const Color(0xFF4CAF50),
                                         ),
-                                        child: Row(
-                                          children: [
-                                            const Icon(Icons.info_outline, color: Colors.orange, size: 20),
-                                            const SizedBox(width: 8),
-                                            Expanded(
-                                              child: Text(
-                                                AppLocalizations.of(context).t('wallet_deposit_more_sats'),
-                                                style: TextStyle(color: Colors.orange.shade200, fontSize: 13),
+                                      );
+                                    }
+                                    _loadWalletInfo();
+                                  } else {
+                                    final errStr =
+                                        result?['error']?.toString() ?? '';
+                                    // If payInvoice fails with invalidInput on a BRIX dest,
+                                    // the invoice is likely from LNbits (offline). Queue for retry.
+                                    if (needsBrixResolve &&
+                                        errStr.contains('invalid')) {
+                                      await BrixRelayService()
+                                          .queueOutgoingPayment(
+                                        recipient: resolvedDest,
+                                        amountSats: amountSats,
+                                        originalDest: destination,
+                                        comment: memoText.isNotEmpty
+                                            ? memoText
+                                            : null,
+                                      );
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                                '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                            backgroundColor: Color(0xFF4CAF50),
+                                            duration: Duration(seconds: 4),
+                                          ),
+                                        );
+                                      }
+                                      _loadWalletInfo();
+                                    } else {
+                                      setModalState(() {
+                                        isSending = false;
+                                        errorMessage = errStr.isNotEmpty
+                                            ? errStr
+                                            : AppLocalizations.of(context).t(
+                                                'wallet_send_payment_failed');
+                                      });
+                                    }
+                                  }
+                                } catch (e) {
+                                  broLog('❌ Erro ao enviar: $e');
+                                  final isTimeout = e
+                                          .toString()
+                                          .contains('TimeoutException') ||
+                                      e.toString().contains('timeout');
+                                  final canQueue = needsBrixResolve &&
+                                      amountSats != null &&
+                                      amountSats! > 0;
+
+                                  if (isTimeout && canQueue) {
+                                    // Timeout on BRIX → queue and show as success
+                                    await BrixRelayService()
+                                        .queueOutgoingPayment(
+                                      recipient: destination,
+                                      amountSats: amountSats!,
+                                      originalDest: destination,
+                                      comment:
+                                          memoText.isNotEmpty ? memoText : null,
+                                    );
+                                    if (context.mounted) {
+                                      Navigator.pop(context);
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                          content: Text(
+                                              '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                          backgroundColor: Color(0xFF4CAF50),
+                                          duration: Duration(seconds: 4),
+                                        ),
+                                      );
+                                    }
+                                    _loadWalletInfo();
+                                  } else {
+                                    setModalState(() {
+                                      isSending = false;
+                                      errorMessage = isTimeout
+                                          ? '⚡ O destinatário não está com o app aberto neste momento.\n\nPeça para ele abrir o Bro App e tente novamente.'
+                                          : 'Erro: $e';
+                                    });
+                                  }
+                                }
+                                return;
+                              }
+
+                              // Verificar se é Lightning invoice válida
+                              if (!lowerDest.startsWith('lnbc') &&
+                                  !lowerDest.startsWith('lntb') &&
+                                  !lowerDest.startsWith('lnurl') &&
+                                  !isLnAddress &&
+                                  !isPhone &&
+                                  !isBrixUser) {
+                                setModalState(() => errorMessage =
+                                    AppLocalizations.of(context)
+                                        .t('wallet_invalid_format'));
+                                return;
+                              }
+
+                              setModalState(() {
+                                isSending = true;
+                                errorMessage = null;
+                              });
+                              broLog('💸 Enviando pagamento...');
+
+                              try {
+                                final breezProvider =
+                                    context.read<BreezProvider>();
+                                final result =
+                                    await breezProvider.payInvoice(destination);
+
+                                broLog('📦 Resultado pagamento: $result');
+
+                                if (result != null &&
+                                    result['success'] == true) {
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text(
+                                            AppLocalizations.of(context).t(
+                                                'wallet_payment_sent_success')),
+                                        backgroundColor:
+                                            const Color(0xFF4CAF50),
+                                      ),
+                                    );
+                                  }
+                                  _loadWalletInfo(); // Atualizar saldo
+                                } else {
+                                  // Erro específico de saldo insuficiente
+                                  final errorType = result?['errorType'];
+                                  final errorMsg = result?['error'] ??
+                                      AppLocalizations.of(context)
+                                          .t('wallet_send_payment_failed');
+
+                                  setModalState(() => isSending = false);
+
+                                  if (context.mounted) {
+                                    if (errorType == 'INSUFFICIENT_FUNDS') {
+                                      // Mostrar dialog específico para saldo insuficiente
+                                      showDialog(
+                                        context: context,
+                                        builder: (ctx) => AlertDialog(
+                                          backgroundColor:
+                                              const Color(0xFF1A1A1A),
+                                          shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(16)),
+                                          title: Row(
+                                            children: [
+                                              const Icon(
+                                                  Icons.account_balance_wallet,
+                                                  color: Colors.orange,
+                                                  size: 28),
+                                              const SizedBox(width: 12),
+                                              Text(
+                                                  AppLocalizations.of(context).t(
+                                                      'wallet_insufficient_balance_title'),
+                                                  style: const TextStyle(
+                                                      color: Colors.white)),
+                                            ],
+                                          ),
+                                          content: Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                errorMsg,
+                                                style: const TextStyle(
+                                                    color: Colors.white70),
                                               ),
+                                              const SizedBox(height: 16),
+                                              Container(
+                                                padding:
+                                                    const EdgeInsets.all(12),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.orange
+                                                      .withOpacity(0.1),
+                                                  borderRadius:
+                                                      BorderRadius.circular(8),
+                                                  border: Border.all(
+                                                      color: Colors.orange
+                                                          .withOpacity(0.3)),
+                                                ),
+                                                child: Row(
+                                                  children: [
+                                                    const Icon(
+                                                        Icons.info_outline,
+                                                        color: Colors.orange,
+                                                        size: 20),
+                                                    const SizedBox(width: 8),
+                                                    Expanded(
+                                                      child: Text(
+                                                        AppLocalizations.of(
+                                                                context)
+                                                            .t('wallet_deposit_more_sats'),
+                                                        style: TextStyle(
+                                                            color: Colors.orange
+                                                                .shade200,
+                                                            fontSize: 13),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.pop(ctx),
+                                              child: const Text('OK',
+                                                  style: TextStyle(
+                                                      color: Colors.orange)),
                                             ),
                                           ],
                                         ),
-                                      ),
-                                    ],
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () => Navigator.pop(ctx),
-                                      child: const Text('OK', style: TextStyle(color: Colors.orange)),
+                                      );
+                                    } else {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        SnackBar(
+                                          content: Text(errorMsg),
+                                          backgroundColor: Colors.red,
+                                          duration: const Duration(seconds: 4),
+                                        ),
+                                      );
+                                    }
+                                  }
+                                }
+                              } catch (e) {
+                                broLog('❌ Erro ao enviar: $e');
+                                setModalState(() => isSending = false);
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('Erro: $e'),
+                                      backgroundColor: Colors.red,
                                     ),
-                                  ],
-                                ),
-                              );
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(errorMsg),
-                                  backgroundColor: Colors.red,
-                                  duration: const Duration(seconds: 4),
-                                ),
-                              );
-                            }
-                          }
-                        }
-                      } catch (e) {
-                        broLog('❌ Erro ao enviar: $e');
-                        setModalState(() => isSending = false);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(
-                              content: Text('Erro: $e'),
-                              backgroundColor: Colors.red,
-                            ),
-                          );
-                        }
-                      }
-                    },
-                    icon: isSending
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.send),
-                    label: Text(isSending ? AppLocalizations.of(context).t('wallet_sending') : AppLocalizations.of(context).t('wallet_send_payment')),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFFE53935),
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                                  );
+                                }
+                              }
+                            },
+                      icon: isSending
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.send),
+                      label: Text(isSending
+                          ? AppLocalizations.of(context).t('wallet_sending')
+                          : AppLocalizations.of(context)
+                              .t('wallet_send_payment')),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFE53935),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
                     ),
                   ),
-                ),
                 ],
               ),
             ),
@@ -1748,38 +2119,75 @@ class _WalletScreenState extends State<WalletScreen> {
     );
   }
 
+  Widget _brixFeePreview({
+    required String destination,
+    required int amountSats,
+    required double? bitcoinPrice,
+  }) {
+    if (!isBrixSendDestination(destination) || amountSats <= 0) {
+      return const SizedBox.shrink();
+    }
+    final feeSats = BrixRelayService.calculateBrixFee(amountSats);
+    final fiat = bitcoinPrice != null && bitcoinPrice > 0
+        ? ' (≈ $_fiatSymbol ${(feeSats * bitcoinPrice / 100000000).toStringAsFixed(2)})'
+        : '';
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Colors.orange.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.orange.withOpacity(0.3)),
+        ),
+        child: Text(
+          'Taxa BRIX (0,5%, mínimo 1 sat): $feeSats sat${feeSats == 1 ? '' : 's'}$fiat\n'
+          'Total com a taxa: ${amountSats + feeSats} sats',
+          style: const TextStyle(color: Colors.white70, fontSize: 12),
+        ),
+      ),
+    );
+  }
+
   // Verifica se é um endereço Bitcoin válido (NÃO Lightning Address)
   bool _isBitcoinAddress(String code) {
     final lowerCode = code.toLowerCase().trim();
-    
+
     // ⚡ Lightning Address: contém @ e . (ex: user@wallet.com)
     // NÃO é endereço Bitcoin on-chain!
     if (lowerCode.contains('@') && lowerCode.contains('.')) {
       return false;
     }
-    
+
     // LNURL também NÃO é on-chain
     if (lowerCode.startsWith('lnurl')) {
       return false;
     }
-    
+
     // Lightning Invoice também NÃO é on-chain
-    if (lowerCode.startsWith('lnbc') || lowerCode.startsWith('lntb') || lowerCode.startsWith('lnbcrt')) {
+    if (lowerCode.startsWith('lnbc') ||
+        lowerCode.startsWith('lntb') ||
+        lowerCode.startsWith('lnbcrt')) {
       return false;
     }
-    
+
     // Bitcoin mainnet/testnet addresses (on-chain)
     // bc1 = Bech32 SegWit mainnet
     if (lowerCode.startsWith('bc1')) return true;
-    // tb1 = Bech32 SegWit testnet  
+    // tb1 = Bech32 SegWit testnet
     if (lowerCode.startsWith('tb1')) return true;
     // 1xxx = Legacy P2PKH (26-35 chars, só números e letras)
-    if (lowerCode.startsWith('1') && lowerCode.length >= 26 && lowerCode.length <= 35) return true;
+    if (lowerCode.startsWith('1') &&
+        lowerCode.length >= 26 &&
+        lowerCode.length <= 35) return true;
     // 3xxx = P2SH (26-35 chars)
-    if (lowerCode.startsWith('3') && lowerCode.length >= 26 && lowerCode.length <= 35) return true;
+    if (lowerCode.startsWith('3') &&
+        lowerCode.length >= 26 &&
+        lowerCode.length <= 35) return true;
     // bitcoin: URI
     if (lowerCode.startsWith('bitcoin:')) return true;
-    
+
     return false;
   }
 
@@ -1819,7 +2227,7 @@ class _WalletScreenState extends State<WalletScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      address.length > 30 
+                      address.length > 30
                           ? '${address.substring(0, 15)}...${address.substring(address.length - 12)}'
                           : address,
                       style: const TextStyle(
@@ -1842,12 +2250,15 @@ class _WalletScreenState extends State<WalletScreen> {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.info_outline, color: Colors.orange, size: 20),
+                  const Icon(Icons.info_outline,
+                      color: Colors.orange, size: 20),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      AppLocalizations.of(context).t('wallet_onchain_not_supported'),
-                      style: const TextStyle(color: Colors.white70, fontSize: 13),
+                      AppLocalizations.of(context)
+                          .t('wallet_onchain_not_supported'),
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 13),
                     ),
                   ),
                 ],
@@ -1858,7 +2269,8 @@ class _WalletScreenState extends State<WalletScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child: Text(AppLocalizations.of(ctx).t('wallet_understood'), style: const TextStyle(color: Colors.orange)),
+            child: Text(AppLocalizations.of(ctx).t('wallet_understood'),
+                style: const TextStyle(color: Colors.orange)),
           ),
         ],
       ),
@@ -1868,7 +2280,7 @@ class _WalletScreenState extends State<WalletScreen> {
   // ==================== QR SCANNER ====================
   Future<String?> _showQRScanner() async {
     String? scannedCode;
-    
+
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1891,14 +2303,16 @@ class _WalletScreenState extends State<WalletScreen> {
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.qr_code_scanner, color: Colors.green, size: 28),
+                    const Icon(Icons.qr_code_scanner,
+                        color: Colors.green, size: 28),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            AppLocalizations.of(context).t('wallet_scan_qr_title'),
+                            AppLocalizations.of(context)
+                                .t('wallet_scan_qr_title'),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 18,
@@ -1906,7 +2320,8 @@ class _WalletScreenState extends State<WalletScreen> {
                             ),
                           ),
                           Text(
-                            AppLocalizations.of(context).t('wallet_scan_qr_subtitle'),
+                            AppLocalizations.of(context)
+                                .t('wallet_scan_qr_subtitle'),
                             style: const TextStyle(
                               color: Colors.white54,
                               fontSize: 12,
@@ -1922,7 +2337,7 @@ class _WalletScreenState extends State<WalletScreen> {
                   ],
                 ),
               ),
-              
+
               // Scanner
               Expanded(
                 child: MobileScanner(
@@ -1932,30 +2347,32 @@ class _WalletScreenState extends State<WalletScreen> {
                       final code = barcode.rawValue;
                       if (code != null) {
                         final lowerCode = code.toLowerCase();
-                        
+
                         // Lightning Invoice
-                        if (lowerCode.startsWith('lnbc') || 
+                        if (lowerCode.startsWith('lnbc') ||
                             lowerCode.startsWith('lntb') ||
                             lowerCode.startsWith('lightning:')) {
-                          scannedCode = lowerCode.startsWith('lightning:') 
-                              ? code.substring(10) 
+                          scannedCode = lowerCode.startsWith('lightning:')
+                              ? code.substring(10)
                               : code;
                           Navigator.pop(context);
                           break;
                         }
-                        
+
                         // LNURL (withdraw, pay, etc)
                         if (lowerCode.startsWith('lnurl')) {
                           scannedCode = code;
                           Navigator.pop(context);
                           break;
                         }
-                        
+
                         // Endereço Bitcoin
                         if (_isBitcoinAddress(code)) {
                           // Remover prefixo bitcoin: se existir
-                          scannedCode = lowerCode.startsWith('bitcoin:') 
-                              ? code.substring(8).split('?')[0]  // Remover parâmetros URI
+                          scannedCode = lowerCode.startsWith('bitcoin:')
+                              ? code
+                                  .substring(8)
+                                  .split('?')[0] // Remover parâmetros URI
                               : code;
                           Navigator.pop(context);
                           break;
@@ -1965,17 +2382,19 @@ class _WalletScreenState extends State<WalletScreen> {
                   },
                 ),
               ),
-              
+
               // Instruções
               Container(
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
                 color: const Color(0xFF1A1A1A),
                 child: Column(
                   children: [
-                    const Icon(Icons.lightbulb_outline, color: Colors.amber, size: 24),
+                    const Icon(Icons.lightbulb_outline,
+                        color: Colors.amber, size: 24),
                     const SizedBox(height: 8),
                     Text(
-                      AppLocalizations.of(context).t('wallet_supported_formats'),
+                      AppLocalizations.of(context)
+                          .t('wallet_supported_formats'),
                       style: const TextStyle(
                         color: Colors.white54,
                         fontSize: 12,
@@ -1990,41 +2409,48 @@ class _WalletScreenState extends State<WalletScreen> {
         ),
       ),
     );
-    
+
     return scannedCode;
   }
 
   // ==================== ENVIAR COM INVOICE PRÉ-PREENCHIDA ====================
   void _showSendDialogWithInvoice(String invoice) {
-    broLog('📤 Abrindo dialog de envio com invoice: ${invoice.substring(0, 50)}...');
-    
+    broLog(
+        '📤 Abrindo dialog de envio com invoice: ${invoice.substring(0, 50)}...');
+
     // Verificar se é endereço Bitcoin (não suportado)
     if (_isBitcoinAddress(invoice)) {
       _showBitcoinAddressNotSupportedDialog(invoice);
       return;
     }
-    
+
     // Verificar se é Lightning Address ou LNURL (precisa de valor manual)
     final lowerInvoice = invoice.toLowerCase();
     final isLnAddress = invoice.contains('@') && invoice.contains('.');
     final isLnurl = lowerInvoice.startsWith('lnurl');
-    final isBolt11 = lowerInvoice.startsWith('lnbc') || lowerInvoice.startsWith('lntb');
+    final isBolt11 =
+        lowerInvoice.startsWith('lnbc') || lowerInvoice.startsWith('lntb');
     // Detect BRIX addresses for queue-on-offline handling
-    final isBrixAddress = isLnAddress && (lowerInvoice.endsWith('@brix.app') || lowerInvoice.endsWith('@brostr.app') || lowerInvoice.endsWith('@brix.brostr.app'));
-    
+    final isBrixAddress = isLnAddress &&
+        (lowerInvoice.endsWith('@brix.app') ||
+            lowerInvoice.endsWith('@brostr.app') ||
+            lowerInvoice.endsWith('@brix.brostr.app'));
+
     final invoiceController = TextEditingController(text: invoice);
     final amountController = TextEditingController();
     bool isSending = false;
     String? errorMessage;
+    double? bitcoinPrice;
     int? invoiceAmountSats; // Valor da invoice (se BOLT11 com valor embutido)
-    
+
     // Get current balance and available balance
-    final balanceSats = int.tryParse(_balance?['balance']?.toString() ?? '0') ?? 0;
+    final balanceSats =
+        int.tryParse(_balance?['balance']?.toString() ?? '0') ?? 0;
     final orderProvider = context.read<OrderProvider>();
     final committedSats = orderProvider.committedSats;
     final availableSats = (balanceSats - committedSats).clamp(0, balanceSats);
     final hasLockedFunds = committedSats > 0;
-    
+
     // Tentar decodificar o valor da invoice BOLT11
     if (isBolt11) {
       // Formato BOLT11: lnbc<amount><multiplier>1<bech32_data>
@@ -2038,7 +2464,7 @@ class _WalletScreenState extends State<WalletScreen> {
           final amountStr = match.group(1)!;
           final unit = match.group(2)!;
           var amount = int.parse(amountStr);
-          
+
           // Converter para sats baseado na unidade
           switch (unit) {
             case 'm': // milli-bitcoin (0.001 BTC)
@@ -2062,10 +2488,14 @@ class _WalletScreenState extends State<WalletScreen> {
         broLog('⚠️ Não foi possível decodificar valor da invoice: $e');
       }
     }
-    
+
     // Precisa pedir valor ao usuário se for LN Address/LNURL OU BOLT11 sem valor embutido
-    final needsAmountInput = isLnAddress || isLnurl || (isBolt11 && invoiceAmountSats == null);
-    
+    final needsAmountInput =
+        isLnAddress || isLnurl || (isBolt11 && invoiceAmountSats == null);
+    BitcoinPriceService.getBitcoinPriceIn(_displayCurrency).then((price) {
+      bitcoinPrice = price;
+    });
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -2078,446 +2508,551 @@ class _WalletScreenState extends State<WalletScreen> {
           minimum: const EdgeInsets.only(bottom: 24),
           child: SingleChildScrollView(
             child: Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(context).viewInsets.bottom + 24,
-              left: 20,
-              right: 20,
-              top: 20,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Header
-                Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.green.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: const Icon(Icons.check_circle, color: Colors.green),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            AppLocalizations.of(context).t('wallet_invoice_scanned'),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 20,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          if (hasLockedFunds) ...[
-                            Text(
-                              AppLocalizations.of(context).tp('wallet_available_sats', {'available': availableSats.toString()}),
-                              style: TextStyle(
-                                color: availableSats > 0 ? Colors.green : Colors.orange,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ] else ...[
-                            Text(
-                              AppLocalizations.of(context).tp('wallet_balance_sats', {'balance': balanceSats.toString()}),
-                              style: TextStyle(
-                                color: balanceSats > 0 ? Colors.green : Colors.grey,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white54),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                  ],
-                ),
-                
-                // Aviso de fundos bloqueados
-                if (hasLockedFunds) ...[
-                  const SizedBox(height: 12),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Colors.orange.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.orange.withOpacity(0.3)),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.lock, color: Colors.orange, size: 18),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            AppLocalizations.of(context).tp('wallet_sats_in_open_orders_simple', {'amount': committedSats.toString()}),
-                            style: const TextStyle(color: Colors.orange, fontSize: 12),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-                
-                const SizedBox(height: 20),
-                
-                // Invoice preview
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2A2A2A),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.green.withOpacity(0.3)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+                left: 20,
+                right: 20,
+                top: 20,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Header
+                  Row(
                     children: [
-                      Row(
-                        children: [
-                          const Icon(Icons.bolt, color: Colors.amber, size: 16),
-                          const SizedBox(width: 6),
-                          Text(
-                            isLnAddress ? 'Lightning Address' : 
-                            isLnurl ? 'LNURL' : 'Lightning Invoice',
-                            style: const TextStyle(
-                              color: Colors.amber,
-                              fontSize: 12,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const Spacer(),
-                          if (invoiceAmountSats != null) ...[
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: Colors.green.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(8),
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: Colors.green.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child:
+                            const Icon(Icons.check_circle, color: Colors.green),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              AppLocalizations.of(context)
+                                  .t('wallet_invoice_scanned'),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
                               ),
-                              child: Text(
-                                '$invoiceAmountSats sats',
-                                style: const TextStyle(
-                                  color: Colors.green,
+                            ),
+                            if (hasLockedFunds) ...[
+                              Text(
+                                AppLocalizations.of(context).tp(
+                                    'wallet_available_sats',
+                                    {'available': availableSats.toString()}),
+                                style: TextStyle(
+                                  color: availableSats > 0
+                                      ? Colors.green
+                                      : Colors.orange,
                                   fontSize: 12,
-                                  fontWeight: FontWeight.bold,
                                 ),
                               ),
-                            ),
+                            ] else ...[
+                              Text(
+                                AppLocalizations.of(context).tp(
+                                    'wallet_balance_sats',
+                                    {'balance': balanceSats.toString()}),
+                                style: TextStyle(
+                                  color: balanceSats > 0
+                                      ? Colors.green
+                                      : Colors.grey,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ],
                           ],
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        invoice.length > 60 
-                            ? '${invoice.substring(0, 30)}...${invoice.substring(invoice.length - 25)}'
-                            : invoice,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 11,
-                          fontFamily: 'monospace',
                         ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white54),
+                        onPressed: () => Navigator.pop(context),
                       ),
                     ],
                   ),
-                ),
-                
-                // Campo de valor (para LNURL ou Lightning Address)
-                if (needsAmountInput) ...[
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: amountController,
-                    keyboardType: TextInputType.number,
-                    style: const TextStyle(color: Colors.white, fontSize: 18),
-                    decoration: InputDecoration(
-                      labelText: AppLocalizations.of(context).t('wallet_amount_sats_required'),
-                      labelStyle: const TextStyle(color: Colors.white54),
-                      hintText: 'Ex: 1000',
-                      hintStyle: const TextStyle(color: Colors.white24),
-                      filled: true,
-                      fillColor: const Color(0xFF2A2A2A),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide.none,
+
+                  // Aviso de fundos bloqueados
+                  if (hasLockedFunds) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border:
+                            Border.all(color: Colors.orange.withOpacity(0.3)),
                       ),
-                      prefixIcon: const Icon(Icons.bolt, color: Colors.amber),
-                      suffixText: 'sats',
-                      suffixStyle: const TextStyle(color: Colors.white54),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.lock,
+                              color: Colors.orange, size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              AppLocalizations.of(context).tp(
+                                  'wallet_sats_in_open_orders_simple',
+                                  {'amount': committedSats.toString()}),
+                              style: const TextStyle(
+                                  color: Colors.orange, fontSize: 12),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    AppLocalizations.of(context).t('wallet_address_requires_amount'),
-                    style: const TextStyle(color: Colors.amber, fontSize: 11),
-                  ),
-                ],
-                
-                // Erro
-                if (errorMessage != null) ...[
-                  const SizedBox(height: 12),
+                  ],
+
+                  const SizedBox(height: 20),
+
+                  // Invoice preview
                   Container(
-                    padding: const EdgeInsets.all(10),
+                    padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.red.withOpacity(0.3)),
+                      color: const Color(0xFF2A2A2A),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.green.withOpacity(0.3)),
                     ),
-                    child: Row(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(Icons.error, color: Colors.red, size: 18),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            errorMessage!,
-                            style: const TextStyle(color: Colors.red, fontSize: 12),
+                        Row(
+                          children: [
+                            const Icon(Icons.bolt,
+                                color: Colors.amber, size: 16),
+                            const SizedBox(width: 6),
+                            Text(
+                              isLnAddress
+                                  ? 'Lightning Address'
+                                  : isLnurl
+                                      ? 'LNURL'
+                                      : 'Lightning Invoice',
+                              style: const TextStyle(
+                                color: Colors.amber,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const Spacer(),
+                            if (invoiceAmountSats != null) ...[
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: Colors.green.withOpacity(0.2),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  '$invoiceAmountSats sats',
+                                  style: const TextStyle(
+                                    color: Colors.green,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          invoice.length > 60
+                              ? '${invoice.substring(0, 30)}...${invoice.substring(invoice.length - 25)}'
+                              : invoice,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 11,
+                            fontFamily: 'monospace',
                           ),
                         ),
                       ],
                     ),
                   ),
-                ],
-                
-                const SizedBox(height: 20),
-                
-                // Botão Enviar
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: isSending ? null : () async {
-                      broLog('🔘 Botão de envio pressionado!');
-                      
-                      // Validar valor se necessário
-                      if (needsAmountInput) {
-                        final amountStr = amountController.text.trim();
-                        if (amountStr.isEmpty) {
-                          setModalState(() => errorMessage = AppLocalizations.of(context).t('wallet_please_enter_amount'));
-                          return;
-                        }
-                        final amount = int.tryParse(amountStr);
-                        if (amount == null || amount <= 0) {
-                          setModalState(() => errorMessage = AppLocalizations.of(context).t('wallet_invalid_amount'));
-                          return;
-                        }
-                        if (amount > availableSats) {
-                          setModalState(() => errorMessage = AppLocalizations.of(context).tp('wallet_insufficient_available', {'available': availableSats.toString()}));
-                          return;
-                        }
-                      }
-                      
-                      // Validar saldo para invoice BOLT11 com valor
-                      if (invoiceAmountSats != null && invoiceAmountSats! > availableSats) {
-                        setModalState(() => errorMessage = AppLocalizations.of(context).tp('wallet_insufficient_needed', {'needed': invoiceAmountSats.toString(), 'available': availableSats.toString()}));
-                        return;
-                      }
-                      
-                      setModalState(() {
-                        isSending = true;
-                        errorMessage = null;
-                      });
-                      
-                      broLog('💸 Enviando pagamento...');
-                      broLog('   Input original: ${invoice.length > 50 ? invoice.substring(0, 50) : invoice}...');
-                      if (needsAmountInput) {
-                        broLog('   Valor: ${amountController.text} sats');
-                      }
-                      
-                      try {
-                        final breezProvider = context.read<BreezProvider>();
-                        String finalInvoice = invoice;
-                        
-                        // Para Lightning Address ou LNURL, resolver para BOLT11 primeiro
-                        if (isLnAddress || isLnurl) {
-                          broLog('🔄 Resolvendo Lightning Address/LNURL...');
-                          setModalState(() => errorMessage = null);
-                          
-                          final amountSats = int.parse(amountController.text.trim());
-                          final lnService = LnAddressService();
-                          
-                          // Usar getInvoice que funciona tanto para LN Address quanto LNURL
-                          final senderPk = await StorageService().getNostrPublicKey();
-                          final resolveResult = await lnService.getInvoice(
-                            lnAddress: invoice,
-                            amountSats: amountSats,
-                            senderPubkey: senderPk,
-                          );
-                          
-                          if (resolveResult['success'] != true) {
-                            final errMsg = resolveResult['error'] ?? '';
-                            // BRIX address + recipient offline → queue for retry
-                            if (errMsg == 'BRIX_RECIPIENT_OFFLINE' && isBrixAddress) {
-                              await BrixRelayService().queueOutgoingPayment(
-                                recipient: invoice,
-                                amountSats: amountSats,
-                                originalDest: invoice,
-                              );
-                              if (context.mounted) {
-                                Navigator.pop(context);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
-                                    backgroundColor: Color(0xFF4CAF50),
-                                    duration: Duration(seconds: 4),
-                                  ),
-                                );
-                              }
-                              _loadWalletInfo();
-                              return;
-                            }
-                            setModalState(() {
-                              isSending = false;
-                              errorMessage = errMsg.isNotEmpty ? errMsg : AppLocalizations.of(context).t('wallet_resolve_failed');
-                            });
-                            return;
-                          }
-                          
-                          finalInvoice = resolveResult['invoice'] as String;
-                          broLog('✅ Resolvido para invoice BOLT11: ${finalInvoice.substring(0, 50)}...');
-                        }
-                        
-                        // Para BOLT11 sem valor embutido, passar o valor digitado pelo usuário
-                        int? manualAmountSats;
-                        if (isBolt11 && invoiceAmountSats == null) {
-                          manualAmountSats = int.tryParse(amountController.text.trim());
-                          broLog('💰 BOLT11 open-amount: enviando $manualAmountSats sats');
-                        }
-                        
-                        // Agora pagar a invoice BOLT11
-                        final result = await breezProvider.payInvoice(finalInvoice, amountSats: manualAmountSats);
-                        
-                        broLog('📨 Resultado do pagamento: $result');
-                        
-                        if (result != null && result['success'] == true) {
-                          broLog('✅ Pagamento bem sucedido!');
-                          if (isBrixAddress) {
-                            final paymentHash = result['payment']?['paymentHash']?.toString() ?? '';
-                            final amountSats = int.tryParse(amountController.text.trim()) ?? 0;
-                            if (paymentHash.isNotEmpty && amountSats > 0) {
-                              await BrixRelayService.recordSettledOutgoingFee(
-                                paymentHash: paymentHash,
-                                amountSats: amountSats,
-                                feeSats: BrixRelayService.calculateBrixFee(amountSats),
-                              );
-                            }
-                          }
-                          if (context.mounted) {
-                            Navigator.pop(context);
-                            _loadWalletInfo();
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Row(
-                                  children: [
-                                    const Icon(Icons.check_circle, color: Colors.white),
-                                    const SizedBox(width: 8),
-                                    Text(AppLocalizations.of(context).t('wallet_payment_sent_success')),
-                                  ],
-                                ),
-                                backgroundColor: Colors.green,
-                                duration: const Duration(seconds: 3),
-                              ),
-                            );
-                          }
-                        } else {
-                          final errStr = result?['error']?.toString() ?? '';
-                          // If payInvoice fails with invalidInput on a BRIX dest, queue for retry
-                          if (isBrixAddress && errStr.contains('invalid')) {
-                            final amountSats = int.tryParse(amountController.text.trim()) ?? 0;
-                            if (amountSats > 0) {
-                              await BrixRelayService().queueOutgoingPayment(
-                                recipient: invoice,
-                                amountSats: amountSats,
-                                originalDest: invoice,
-                              );
-                              if (context.mounted) {
-                                Navigator.pop(context);
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text('✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
-                                    backgroundColor: Color(0xFF4CAF50),
-                                    duration: Duration(seconds: 4),
-                                  ),
-                                );
-                              }
-                              _loadWalletInfo();
-                              return;
-                            }
-                          }
-                          broLog('❌ Pagamento falhou: ${result?['error']}');
-                          setModalState(() {
-                            isSending = false;
-                            errorMessage = errStr.isNotEmpty ? errStr : AppLocalizations.of(context).t('wallet_send_payment_failed');
-                          });
-                        }
-                      } catch (e, stack) {
-                        broLog('❌ Exceção ao enviar: $e');
-                        broLog('   Stack: $stack');
-                        final isTimeout = e.toString().contains('TimeoutException') || e.toString().contains('timeout');
-                        final amountSats = int.tryParse(amountController.text.trim()) ?? 0;
-                        if (isTimeout && isBrixAddress && amountSats > 0) {
-                          await BrixRelayService().queueOutgoingPayment(
-                            recipient: invoice,
-                            amountSats: amountSats,
-                            originalDest: invoice,
-                          );
-                          if (context.mounted) {
-                            Navigator.pop(context);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
-                                backgroundColor: Color(0xFF4CAF50),
-                                duration: Duration(seconds: 4),
-                              ),
-                            );
-                          }
-                          _loadWalletInfo();
-                        } else {
-                          setModalState(() {
-                            isSending = false;
-                            errorMessage = 'Erro: $e';
-                          });
-                        }
-                      }
-                    },
-                    icon: isSending
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
+
+                  // Campo de valor (para LNURL ou Lightning Address)
+                  if (needsAmountInput) ...[
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: amountController,
+                      keyboardType: TextInputType.number,
+                      onChanged: (_) => setModalState(() {}),
+                      style: const TextStyle(color: Colors.white, fontSize: 18),
+                      decoration: InputDecoration(
+                        labelText: AppLocalizations.of(context)
+                            .t('wallet_amount_sats_required'),
+                        labelStyle: const TextStyle(color: Colors.white54),
+                        hintText: 'Ex: 1000',
+                        hintStyle: const TextStyle(color: Colors.white24),
+                        filled: true,
+                        fillColor: const Color(0xFF2A2A2A),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none,
+                        ),
+                        prefixIcon: const Icon(Icons.bolt, color: Colors.amber),
+                        suffixText: 'sats',
+                        suffixStyle: const TextStyle(color: Colors.white54),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      AppLocalizations.of(context)
+                          .t('wallet_address_requires_amount'),
+                      style: const TextStyle(color: Colors.amber, fontSize: 11),
+                    ),
+                  ],
+
+                  if (isBrixAddress)
+                    _brixFeePreview(
+                      destination: invoice,
+                      amountSats:
+                          int.tryParse(amountController.text.trim()) ?? 0,
+                      bitcoinPrice: bitcoinPrice,
+                    ),
+
+                  // Erro
+                  if (errorMessage != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.red.withOpacity(0.3)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.error, color: Colors.red, size: 18),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              errorMessage!,
+                              style: const TextStyle(
+                                  color: Colors.red, fontSize: 12),
                             ),
-                          )
-                        : const Icon(Icons.send),
-                    label: Text(isSending ? AppLocalizations.of(context).t('wallet_sending') : AppLocalizations.of(context).t('wallet_confirm_and_send')),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+
+                  const SizedBox(height: 20),
+
+                  // Botão Enviar
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: isSending
+                          ? null
+                          : () async {
+                              broLog('🔘 Botão de envio pressionado!');
+
+                              // Validar valor se necessário
+                              if (needsAmountInput) {
+                                final amountStr = amountController.text.trim();
+                                if (amountStr.isEmpty) {
+                                  setModalState(() => errorMessage =
+                                      AppLocalizations.of(context)
+                                          .t('wallet_please_enter_amount'));
+                                  return;
+                                }
+                                final amount = int.tryParse(amountStr);
+                                if (amount == null || amount <= 0) {
+                                  setModalState(() => errorMessage =
+                                      AppLocalizations.of(context)
+                                          .t('wallet_invalid_amount'));
+                                  return;
+                                }
+                                final requiredSats = amount +
+                                    (isBrixAddress
+                                        ? BrixRelayService.calculateBrixFee(
+                                            amount)
+                                        : 0);
+                                if (requiredSats > availableSats) {
+                                  setModalState(() => errorMessage =
+                                          AppLocalizations.of(context).tp(
+                                              'wallet_insufficient_available', {
+                                        'available': availableSats.toString()
+                                      }));
+                                  return;
+                                }
+                              }
+
+                              // Validar saldo para invoice BOLT11 com valor
+                              if (invoiceAmountSats != null &&
+                                  invoiceAmountSats! > availableSats) {
+                                setModalState(() => errorMessage =
+                                        AppLocalizations.of(context).tp(
+                                            'wallet_insufficient_needed', {
+                                      'needed': invoiceAmountSats.toString(),
+                                      'available': availableSats.toString()
+                                    }));
+                                return;
+                              }
+
+                              setModalState(() {
+                                isSending = true;
+                                errorMessage = null;
+                              });
+
+                              broLog('💸 Enviando pagamento...');
+                              broLog(
+                                  '   Input original: ${invoice.length > 50 ? invoice.substring(0, 50) : invoice}...');
+                              if (needsAmountInput) {
+                                broLog(
+                                    '   Valor: ${amountController.text} sats');
+                              }
+
+                              try {
+                                final breezProvider =
+                                    context.read<BreezProvider>();
+                                String finalInvoice = invoice;
+
+                                // Para Lightning Address ou LNURL, resolver para BOLT11 primeiro
+                                if (isLnAddress || isLnurl) {
+                                  broLog(
+                                      '🔄 Resolvendo Lightning Address/LNURL...');
+                                  setModalState(() => errorMessage = null);
+
+                                  final amountSats =
+                                      int.parse(amountController.text.trim());
+                                  final lnService = LnAddressService();
+
+                                  // Usar getInvoice que funciona tanto para LN Address quanto LNURL
+                                  final senderPk = await StorageService()
+                                      .getNostrPublicKey();
+                                  final resolveResult =
+                                      await lnService.getInvoice(
+                                    lnAddress: invoice,
+                                    amountSats: amountSats,
+                                    senderPubkey: senderPk,
+                                  );
+
+                                  if (resolveResult['success'] != true) {
+                                    final errMsg = resolveResult['error'] ?? '';
+                                    // BRIX address + recipient offline → queue for retry
+                                    if (errMsg == 'BRIX_RECIPIENT_OFFLINE' &&
+                                        isBrixAddress) {
+                                      await BrixRelayService()
+                                          .queueOutgoingPayment(
+                                        recipient: invoice,
+                                        amountSats: amountSats,
+                                        originalDest: invoice,
+                                      );
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                                '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                            backgroundColor: Color(0xFF4CAF50),
+                                            duration: Duration(seconds: 4),
+                                          ),
+                                        );
+                                      }
+                                      _loadWalletInfo();
+                                      return;
+                                    }
+                                    setModalState(() {
+                                      isSending = false;
+                                      errorMessage = errMsg.isNotEmpty
+                                          ? errMsg
+                                          : AppLocalizations.of(context)
+                                              .t('wallet_resolve_failed');
+                                    });
+                                    return;
+                                  }
+
+                                  finalInvoice =
+                                      resolveResult['invoice'] as String;
+                                  broLog(
+                                      '✅ Resolvido para invoice BOLT11: ${finalInvoice.substring(0, 50)}...');
+                                }
+
+                                // Para BOLT11 sem valor embutido, passar o valor digitado pelo usuário
+                                int? manualAmountSats;
+                                if (isBolt11 && invoiceAmountSats == null) {
+                                  manualAmountSats = int.tryParse(
+                                      amountController.text.trim());
+                                  broLog(
+                                      '💰 BOLT11 open-amount: enviando $manualAmountSats sats');
+                                }
+
+                                // Agora pagar a invoice BOLT11
+                                final result = await breezProvider.payInvoice(
+                                    finalInvoice,
+                                    amountSats: manualAmountSats);
+
+                                broLog('📨 Resultado do pagamento: $result');
+
+                                if (isCompletedWalletPayment(result)) {
+                                  broLog('✅ Pagamento bem sucedido!');
+                                  if (isBrixAddress) {
+                                    final paymentHash = result!['payment']
+                                                ?['paymentHash']
+                                            ?.toString() ??
+                                        '';
+                                    final amountSats = int.tryParse(
+                                            amountController.text.trim()) ??
+                                        0;
+                                    if (paymentHash.isNotEmpty &&
+                                        amountSats > 0) {
+                                      await BrixRelayService
+                                          .recordSettledOutgoingFee(
+                                        paymentHash: paymentHash,
+                                        amountSats: amountSats,
+                                        feeSats:
+                                            BrixRelayService.calculateBrixFee(
+                                                amountSats),
+                                      );
+                                    }
+                                  }
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                    _loadWalletInfo();
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Row(
+                                          children: [
+                                            const Icon(Icons.check_circle,
+                                                color: Colors.white),
+                                            const SizedBox(width: 8),
+                                            Text(AppLocalizations.of(context).t(
+                                                'wallet_payment_sent_success')),
+                                          ],
+                                        ),
+                                        backgroundColor: Colors.green,
+                                        duration: const Duration(seconds: 3),
+                                      ),
+                                    );
+                                  }
+                                } else {
+                                  final errStr =
+                                      result?['error']?.toString() ?? '';
+                                  // If payInvoice fails with invalidInput on a BRIX dest, queue for retry
+                                  if (isBrixAddress &&
+                                      errStr.contains('invalid')) {
+                                    final amountSats = int.tryParse(
+                                            amountController.text.trim()) ??
+                                        0;
+                                    if (amountSats > 0) {
+                                      await BrixRelayService()
+                                          .queueOutgoingPayment(
+                                        recipient: invoice,
+                                        amountSats: amountSats,
+                                        originalDest: invoice,
+                                      );
+                                      if (context.mounted) {
+                                        Navigator.pop(context);
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
+                                          const SnackBar(
+                                            content: Text(
+                                                '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                            backgroundColor: Color(0xFF4CAF50),
+                                            duration: Duration(seconds: 4),
+                                          ),
+                                        );
+                                      }
+                                      _loadWalletInfo();
+                                      return;
+                                    }
+                                  }
+                                  broLog(
+                                      '❌ Pagamento falhou: ${result?['error']}');
+                                  setModalState(() {
+                                    isSending = false;
+                                    errorMessage = errStr.isNotEmpty
+                                        ? errStr
+                                        : AppLocalizations.of(context)
+                                            .t('wallet_send_payment_failed');
+                                  });
+                                }
+                              } catch (e, stack) {
+                                broLog('❌ Exceção ao enviar: $e');
+                                broLog('   Stack: $stack');
+                                final isTimeout =
+                                    e.toString().contains('TimeoutException') ||
+                                        e.toString().contains('timeout');
+                                final amountSats = int.tryParse(
+                                        amountController.text.trim()) ??
+                                    0;
+                                if (isTimeout &&
+                                    isBrixAddress &&
+                                    amountSats > 0) {
+                                  await BrixRelayService().queueOutgoingPayment(
+                                    recipient: invoice,
+                                    amountSats: amountSats,
+                                    originalDest: invoice,
+                                  );
+                                  if (context.mounted) {
+                                    Navigator.pop(context);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                            '✅ Pagamento agendado! Será enviado automaticamente quando o destinatário abrir o app.'),
+                                        backgroundColor: Color(0xFF4CAF50),
+                                        duration: Duration(seconds: 4),
+                                      ),
+                                    );
+                                  }
+                                  _loadWalletInfo();
+                                } else {
+                                  setModalState(() {
+                                    isSending = false;
+                                    errorMessage = 'Erro: $e';
+                                  });
+                                }
+                              }
+                            },
+                      icon: isSending
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.send),
+                      label: Text(isSending
+                          ? AppLocalizations.of(context).t('wallet_sending')
+                          : AppLocalizations.of(context)
+                              .t('wallet_confirm_and_send')),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                
-                // Botão Cancelar
-                SizedBox(
-                  width: double.infinity,
-                  child: TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: Text(
-                      AppLocalizations.of(context).t('cancel'),
-                      style: const TextStyle(color: Colors.white54),
+                  const SizedBox(height: 12),
+
+                  // Botão Cancelar
+                  SizedBox(
+                    width: double.infinity,
+                    child: TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: Text(
+                        AppLocalizations.of(context).t('cancel'),
+                        style: const TextStyle(color: Colors.white54),
+                      ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
           ),
         ),
       ),
@@ -2533,7 +3068,7 @@ class _WalletScreenState extends State<WalletScreen> {
     // v562: 3 modos -> 'sats' | 'brl' | 'any' (qualquer valor)
     String inputMode = 'sats';
     final btcPrice = _btcPrice; // capturado uma vez ao abrir o modal
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -2564,12 +3099,14 @@ class _WalletScreenState extends State<WalletScreen> {
                         color: const Color(0xFF4CAF50).withOpacity(0.2),
                         borderRadius: BorderRadius.circular(20),
                       ),
-                      child: const Icon(Icons.arrow_downward, color: Color(0xFF4CAF50)),
+                      child: const Icon(Icons.arrow_downward,
+                          color: Color(0xFF4CAF50)),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        AppLocalizations.of(context).t('wallet_receive_bitcoin'),
+                        AppLocalizations.of(context)
+                            .t('wallet_receive_bitcoin'),
                         style: const TextStyle(
                           color: Colors.white,
                           fontSize: 20,
@@ -2584,7 +3121,7 @@ class _WalletScreenState extends State<WalletScreen> {
                   ],
                 ),
                 const SizedBox(height: 20),
-                
+
                 if (generatedInvoice == null) ...[
                   // v562: Toggle de modo (sats / BRL / qualquer valor)
                   Row(
@@ -2593,12 +3130,14 @@ class _WalletScreenState extends State<WalletScreen> {
                         child: _ReceiveModeChip(
                           label: 'sats',
                           selected: inputMode == 'sats',
-                          onTap: isGenerating ? null : () {
-                            setModalState(() {
-                              inputMode = 'sats';
-                              errorMsg = null;
-                            });
-                          },
+                          onTap: isGenerating
+                              ? null
+                              : () {
+                                  setModalState(() {
+                                    inputMode = 'sats';
+                                    errorMsg = null;
+                                  });
+                                },
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -2606,12 +3145,14 @@ class _WalletScreenState extends State<WalletScreen> {
                         child: _ReceiveModeChip(
                           label: _fiatSymbol,
                           selected: inputMode == 'brl',
-                          onTap: (isGenerating || btcPrice <= 0) ? null : () {
-                            setModalState(() {
-                              inputMode = 'brl';
-                              errorMsg = null;
-                            });
-                          },
+                          onTap: (isGenerating || btcPrice <= 0)
+                              ? null
+                              : () {
+                                  setModalState(() {
+                                    inputMode = 'brl';
+                                    errorMsg = null;
+                                  });
+                                },
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -2619,12 +3160,14 @@ class _WalletScreenState extends State<WalletScreen> {
                         child: _ReceiveModeChip(
                           label: 'Qualquer valor',
                           selected: inputMode == 'any',
-                          onTap: isGenerating ? null : () {
-                            setModalState(() {
-                              inputMode = 'any';
-                              errorMsg = null;
-                            });
-                          },
+                          onTap: isGenerating
+                              ? null
+                              : () {
+                                  setModalState(() {
+                                    inputMode = 'any';
+                                    errorMsg = null;
+                                  });
+                                },
                         ),
                       ),
                     ],
@@ -2635,26 +3178,34 @@ class _WalletScreenState extends State<WalletScreen> {
                   if (inputMode != 'any')
                     TextField(
                       controller: amountController,
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
                       enabled: !isGenerating,
                       style: const TextStyle(color: Colors.white),
                       onChanged: (_) => setModalState(() {}),
                       decoration: InputDecoration(
                         labelText: inputMode == 'brl'
-                            ? (_displayCurrency == 'BRL' ? 'Valor em reais' : 'Amount in $_displayCurrency')
-                            : AppLocalizations.of(context).t('wallet_quantity_sats'),
-                        labelStyle: TextStyle(color: Colors.white.withOpacity(0.6)),
+                            ? (_displayCurrency == 'BRL'
+                                ? 'Valor em reais'
+                                : 'Amount in $_displayCurrency')
+                            : AppLocalizations.of(context)
+                                .t('wallet_quantity_sats'),
+                        labelStyle:
+                            TextStyle(color: Colors.white.withOpacity(0.6)),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(color: Color(0xFF333333)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF333333)),
                         ),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(color: Color(0xFF333333)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF333333)),
                         ),
                         focusedBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(color: Color(0xFF4CAF50)),
+                          borderSide:
+                              const BorderSide(color: Color(0xFF4CAF50)),
                         ),
                         prefixText: inputMode == 'brl' ? '$_fiatSymbol ' : null,
                         prefixStyle: const TextStyle(color: Colors.white54),
@@ -2664,26 +3215,35 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
 
                   // Conversao live (BRL <-> sats)
-                  if (inputMode == 'brl' && btcPrice > 0 && amountController.text.trim().isNotEmpty) ...[
+                  if (inputMode == 'brl' &&
+                      btcPrice > 0 &&
+                      amountController.text.trim().isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Builder(builder: (_) {
-                      final brl = double.tryParse(amountController.text.trim().replaceAll(',', '.'));
-                      if (brl == null || brl <= 0) return const SizedBox.shrink();
+                      final brl = double.tryParse(
+                          amountController.text.trim().replaceAll(',', '.'));
+                      if (brl == null || brl <= 0)
+                        return const SizedBox.shrink();
                       final sats = (brl * 100000000 / btcPrice).round();
                       return Text(
                         '\u2248 $sats sats  \u2022  1 BTC = $_fiatSymbol ${btcPrice.toStringAsFixed(0)}',
-                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 12),
                       );
                     }),
-                  ] else if (inputMode == 'sats' && btcPrice > 0 && amountController.text.trim().isNotEmpty) ...[
+                  ] else if (inputMode == 'sats' &&
+                      btcPrice > 0 &&
+                      amountController.text.trim().isNotEmpty) ...[
                     const SizedBox(height: 8),
                     Builder(builder: (_) {
                       final sats = int.tryParse(amountController.text.trim());
-                      if (sats == null || sats <= 0) return const SizedBox.shrink();
+                      if (sats == null || sats <= 0)
+                        return const SizedBox.shrink();
                       final brl = sats * btcPrice / 100000000;
                       return Text(
                         '\u2248 $_fiatSymbol ${brl.toStringAsFixed(2)}',
-                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 12),
                       );
                     }),
                   ] else if (inputMode == 'any') ...[
@@ -2705,96 +3265,120 @@ class _WalletScreenState extends State<WalletScreen> {
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.error_outline, color: Colors.red, size: 20),
+                          const Icon(Icons.error_outline,
+                              color: Colors.red, size: 20),
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               errorMsg!,
-                              style: const TextStyle(color: Colors.red, fontSize: 13),
+                              style: const TextStyle(
+                                  color: Colors.red, fontSize: 13),
                             ),
                           ),
                         ],
                       ),
                     ),
                   ],
-                  
+
                   const SizedBox(height: 16),
-                  
+
                   // Botão Gerar Invoice
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: isGenerating ? null : () async {
-                        // v562: resolver amountSats conforme modo
-                        int? amountSats;
-                        if (inputMode == 'any') {
-                          amountSats = null;
-                        } else if (inputMode == 'brl') {
-                          if (btcPrice <= 0) {
-                            setModalState(() => errorMsg = 'Pre\u00e7o do Bitcoin indispon\u00edvel. Tente novamente.');
-                            return;
-                          }
-                          final brl = double.tryParse(amountController.text.trim().replaceAll(',', '.'));
-                          if (brl == null || brl <= 0) {
-                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_enter_valid_value'));
-                            return;
-                          }
-                          amountSats = (brl * 100000000 / btcPrice).round();
-                          if (amountSats < 100) {
-                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_minimum_100_sats'));
-                            return;
-                          }
-                        } else {
-                          // sats
-                          final amount = int.tryParse(amountController.text.trim());
-                          if (amount == null || amount <= 0) {
-                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_enter_valid_value'));
-                            return;
-                          }
-                          if (amount < 100) {
-                            setModalState(() => errorMsg = AppLocalizations.of(context).t('wallet_minimum_100_sats'));
-                            return;
-                          }
-                          amountSats = amount;
-                        }
+                      onPressed: isGenerating
+                          ? null
+                          : () async {
+                              // v562: resolver amountSats conforme modo
+                              int? amountSats;
+                              if (inputMode == 'any') {
+                                amountSats = null;
+                              } else if (inputMode == 'brl') {
+                                if (btcPrice <= 0) {
+                                  setModalState(() => errorMsg =
+                                      'Pre\u00e7o do Bitcoin indispon\u00edvel. Tente novamente.');
+                                  return;
+                                }
+                                final brl = double.tryParse(amountController
+                                    .text
+                                    .trim()
+                                    .replaceAll(',', '.'));
+                                if (brl == null || brl <= 0) {
+                                  setModalState(() => errorMsg =
+                                      AppLocalizations.of(context)
+                                          .t('wallet_enter_valid_value'));
+                                  return;
+                                }
+                                amountSats =
+                                    (brl * 100000000 / btcPrice).round();
+                                if (amountSats < 100) {
+                                  setModalState(() => errorMsg =
+                                      AppLocalizations.of(context)
+                                          .t('wallet_minimum_100_sats'));
+                                  return;
+                                }
+                              } else {
+                                // sats
+                                final amount =
+                                    int.tryParse(amountController.text.trim());
+                                if (amount == null || amount <= 0) {
+                                  setModalState(() => errorMsg =
+                                      AppLocalizations.of(context)
+                                          .t('wallet_enter_valid_value'));
+                                  return;
+                                }
+                                if (amount < 100) {
+                                  setModalState(() => errorMsg =
+                                      AppLocalizations.of(context)
+                                          .t('wallet_minimum_100_sats'));
+                                  return;
+                                }
+                                amountSats = amount;
+                              }
 
-                        setModalState(() {
-                          isGenerating = true;
-                          errorMsg = null;
-                        });
+                              setModalState(() {
+                                isGenerating = true;
+                                errorMsg = null;
+                              });
 
-                        broLog('\ud83c\udfaf Gerando invoice (modo=$inputMode, sats=${amountSats ?? "qualquer"})...');
+                              broLog(
+                                  '\ud83c\udfaf Gerando invoice (modo=$inputMode, sats=${amountSats ?? "qualquer"})...');
 
-                        try {
-                          final lightningProvider = context.read<LightningProvider>();
-                          final desc = amountSats != null
-                              ? 'Receber $amountSats sats - Bro App'
-                              : 'Receber qualquer valor - Bro App';
-                          final result = await lightningProvider.createInvoice(
-                            amountSats: amountSats,
-                            description: desc,
-                          );
-                          
-                          broLog('📦 Resultado createInvoice: $result');
-                          
-                          if (result != null && result['bolt11'] != null) {
-                            final bolt11 = result['bolt11'] as String;
-                            broLog('✅ Invoice: ${bolt11.substring(0, 50)}...');
-                            setModalState(() {
-                              generatedInvoice = bolt11;
-                              isGenerating = false;
-                            });
-                          } else {
-                            throw Exception(result?['error'] ?? 'Falha ao gerar invoice');
-                          }
-                        } catch (e) {
-                          broLog('❌ Erro ao gerar invoice: $e');
-                          setModalState(() {
-                            isGenerating = false;
-                            errorMsg = e.toString();
-                          });
-                        }
-                      },
+                              try {
+                                final lightningProvider =
+                                    context.read<LightningProvider>();
+                                final desc = amountSats != null
+                                    ? 'Receber $amountSats sats - Bro App'
+                                    : 'Receber qualquer valor - Bro App';
+                                final result =
+                                    await lightningProvider.createInvoice(
+                                  amountSats: amountSats,
+                                  description: desc,
+                                );
+
+                                broLog('📦 Resultado createInvoice: $result');
+
+                                if (result != null &&
+                                    result['bolt11'] != null) {
+                                  final bolt11 = result['bolt11'] as String;
+                                  broLog(
+                                      '✅ Invoice: ${bolt11.substring(0, 50)}...');
+                                  setModalState(() {
+                                    generatedInvoice = bolt11;
+                                    isGenerating = false;
+                                  });
+                                } else {
+                                  throw Exception(result?['error'] ??
+                                      'Falha ao gerar invoice');
+                                }
+                              } catch (e) {
+                                broLog('❌ Erro ao gerar invoice: $e');
+                                setModalState(() {
+                                  isGenerating = false;
+                                  errorMsg = e.toString();
+                                });
+                              }
+                            },
                       icon: isGenerating
                           ? const SizedBox(
                               width: 20,
@@ -2805,7 +3389,10 @@ class _WalletScreenState extends State<WalletScreen> {
                               ),
                             )
                           : const Icon(Icons.qr_code),
-                      label: Text(isGenerating ? AppLocalizations.of(context).t('wallet_generating') : AppLocalizations.of(context).t('wallet_generate_invoice')),
+                      label: Text(isGenerating
+                          ? AppLocalizations.of(context).t('wallet_generating')
+                          : AppLocalizations.of(context)
+                              .t('wallet_generate_invoice')),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF4CAF50),
                         foregroundColor: Colors.white,
@@ -2842,7 +3429,7 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  
+
                   // Invoice text (truncada)
                   Container(
                     padding: const EdgeInsets.all(12),
@@ -2863,12 +3450,15 @@ class _WalletScreenState extends State<WalletScreen> {
                           ),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.copy, color: Color(0xFF4CAF50)),
+                          icon:
+                              const Icon(Icons.copy, color: Color(0xFF4CAF50)),
                           onPressed: () {
-                            Clipboard.setData(ClipboardData(text: generatedInvoice!));
+                            Clipboard.setData(
+                                ClipboardData(text: generatedInvoice!));
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
-                                content: Text(AppLocalizations.of(context).t('wallet_invoice_copied')),
+                                content: Text(AppLocalizations.of(context)
+                                    .t('wallet_invoice_copied')),
                                 backgroundColor: const Color(0xFF4CAF50),
                               ),
                             );
@@ -2878,7 +3468,7 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  
+
                   // Botão nova invoice
                   SizedBox(
                     width: double.infinity,
@@ -2890,7 +3480,8 @@ class _WalletScreenState extends State<WalletScreen> {
                         });
                       },
                       icon: const Icon(Icons.refresh),
-                      label: Text(AppLocalizations.of(context).t('wallet_generate_new_invoice')),
+                      label: Text(AppLocalizations.of(context)
+                          .t('wallet_generate_new_invoice')),
                     ),
                   ),
                 ],
@@ -2932,7 +3523,8 @@ class _WalletScreenState extends State<WalletScreen> {
             ),
             child: Column(
               children: [
-                Icon(Icons.history, color: Colors.white.withOpacity(0.3), size: 48),
+                Icon(Icons.history,
+                    color: Colors.white.withOpacity(0.3), size: 48),
                 const SizedBox(height: 12),
                 Text(
                   AppLocalizations.of(context).t('wallet_no_transactions'),
@@ -2943,34 +3535,37 @@ class _WalletScreenState extends State<WalletScreen> {
           )
         else
           ...(_pendingOutgoing.map((p) => _buildPendingOutgoingItem(p))),
-          ...(_showAllTransactions ? _payments : _payments.take(15)).map((payment) => _buildPaymentItem(payment)),
-          if (!_showAllTransactions && _payments.length > 15)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: () => setState(() => _showAllTransactions = true),
-                  icon: const Icon(Icons.expand_more, size: 18),
-                  label: Text('Mostrar todas (${_payments.length})'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFFFF9800),
-                    side: const BorderSide(color: Color(0xFF444444)),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
+        ...(_showAllTransactions ? _payments : _payments.take(15))
+            .map((payment) => _buildPaymentItem(payment)),
+        if (!_showAllTransactions && _payments.length > 15)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () => setState(() => _showAllTransactions = true),
+                icon: const Icon(Icons.expand_more, size: 18),
+                label: Text('Mostrar todas (${_payments.length})'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFFFF9800),
+                  side: const BorderSide(color: Color(0xFF444444)),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
                   ),
                 ),
               ),
             ),
+          ),
       ],
     );
   }
 
   Widget _buildPendingOutgoingItem(Map<String, dynamic> pending) {
     final amount = (pending['amountSats'] as int?) ?? 0;
-    final recipient = pending['originalDest']?.toString() ?? pending['recipient']?.toString() ?? '?';
+    final recipient = pending['originalDest']?.toString() ??
+        pending['recipient']?.toString() ??
+        '?';
     final created = DateTime.tryParse(pending['createdAt'] ?? '');
     final retryCount = (pending['retryCount'] as int?) ?? 0;
     final isExpired = pending['status'] == 'expired';
@@ -2992,10 +3587,13 @@ class _WalletScreenState extends State<WalletScreen> {
       ),
       onDismissed: (_) {
         BrixRelayService().cancelOutgoingPayment(pending['id'].toString());
-        setState(() => _pendingOutgoing.removeWhere((p) => p['id'] == pending['id']));
+        setState(() =>
+            _pendingOutgoing.removeWhere((p) => p['id'] == pending['id']));
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(isExpired ? 'Envio expirado removido' : 'Pagamento pendente cancelado'),
+            content: Text(isExpired
+                ? 'Envio expirado removido'
+                : 'Pagamento pendente cancelado'),
             backgroundColor: const Color(0xFFFF6B6B),
           ),
         );
@@ -3044,7 +3642,8 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                     overflow: TextOverflow.ellipsis,
                   ),
-                  if (pending['comment'] != null && (pending['comment'] as String).isNotEmpty)
+                  if (pending['comment'] != null &&
+                      (pending['comment'] as String).isNotEmpty)
                     Text(
                       '💬 ${pending['comment']}',
                       style: TextStyle(
@@ -3062,7 +3661,9 @@ class _WalletScreenState extends State<WalletScreen> {
                             ? 'Aguardando destinatário (tentativa $retryCount)'
                             : 'Aguardando destinatário ficar online',
                     style: TextStyle(
-                      color: isExpired ? Colors.red.shade300.withOpacity(0.9) : Colors.amber.withOpacity(0.8),
+                      color: isExpired
+                          ? Colors.red.shade300.withOpacity(0.9)
+                          : Colors.amber.withOpacity(0.8),
                       fontSize: 10,
                     ),
                   ),
@@ -3134,20 +3735,20 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   Widget _buildPaymentItem(Map<String, dynamic> payment) {
-    final isReceived = payment['type'] == 'received' || 
-                       payment['direction'] == 'incoming' ||
-                       payment['type'] == 'Receive';
+    final isReceived = payment['type'] == 'received' ||
+        payment['direction'] == 'incoming' ||
+        payment['type'] == 'Receive';
     final isBroEarning = payment['isBroEarning'] == true;
     final amount = payment['amountSats'] ?? payment['amount'] ?? 0;
     final status = payment['status']?.toString() ?? '';
     final date = payment['createdAt'] ?? payment['timestamp'];
     final description = payment['description']?.toString() ?? '';
-    
+
     // Obter OrderProvider para correlações
     final orderProvider = context.read<OrderProvider>();
     final currentPubkey = orderProvider.currentUserPubkey;
     final paymentHash = payment['paymentHash']?.toString() ?? '';
-    
+
     // CORREÇÃO: Correlacionar por paymentHash (exato) em vez de heurística por valor
     // Cada ordem salva o paymentHash no momento do pagamento
     bool isBroOrderPayment = false;
@@ -3169,7 +3770,8 @@ class _WalletScreenState extends State<WalletScreen> {
     if (paymentHash.isNotEmpty) {
       for (final order in orderProvider.orders) {
         if (order.paymentHash == paymentHash) {
-          if (order.providerId == currentPubkey && order.userPubkey != currentPubkey) {
+          if (order.providerId == currentPubkey &&
+              order.userPubkey != currentPubkey) {
             // Eu sou o provedor — é ganho como Bro
             isBroOrderPayment = true;
           }
@@ -3178,12 +3780,13 @@ class _WalletScreenState extends State<WalletScreen> {
         }
       }
     }
-    
+
     // 2. Fallback: Correlação por descrição
     // Suporta múltiplos formatos: "Bro - Ordem XXXXXXXX" e "Bro XXXXXXXX"
     // v557: skip se já marcamos como Bro earning no early-detect (evita
     // setar correlatedOrderId que causaria render como "Depósito para ordem")
-    if (!isBroOrderPayment && correlatedOrderId == null && 
+    if (!isBroOrderPayment &&
+        correlatedOrderId == null &&
         !description.contains('Garantia') &&
         !description.contains('Platform Fee')) {
       String? orderIdFromDesc;
@@ -3193,16 +3796,18 @@ class _WalletScreenState extends State<WalletScreen> {
         // Formato: "Bro {orderId}" (usado ao criar invoice)
         orderIdFromDesc = description.substring(4).trim();
       }
-      
+
       if (orderIdFromDesc != null && orderIdFromDesc.isNotEmpty) {
         final order = orderProvider.orders.cast<Order?>().firstWhere(
-          (o) => o!.id.startsWith(orderIdFromDesc!) || 
-                 orderIdFromDesc!.startsWith(o.id.substring(0, 8)) ||
-                 o.id == orderIdFromDesc,
-          orElse: () => null,
-        );
+              (o) =>
+                  o!.id.startsWith(orderIdFromDesc!) ||
+                  orderIdFromDesc!.startsWith(o.id.substring(0, 8)) ||
+                  o.id == orderIdFromDesc,
+              orElse: () => null,
+            );
         if (order != null) {
-          isBroOrderPayment = order.providerId == currentPubkey && order.userPubkey != currentPubkey;
+          isBroOrderPayment = order.providerId == currentPubkey &&
+              order.userPubkey != currentPubkey;
           if (!isBroOrderPayment) {
             correlatedOrderId = order.id;
           }
@@ -3213,47 +3818,59 @@ class _WalletScreenState extends State<WalletScreen> {
         }
       }
     }
-    
+
     // 3. Fallback final: Se a descrição contém padrões conhecidos do Bro mas não correlacionou,
     // ainda marcar como pagamento Bro (heurística da v1.0.107 que sempre funcionou)
-    if (!isBroOrderPayment && correlatedOrderId == null && isReceived &&
+    if (!isBroOrderPayment &&
+        correlatedOrderId == null &&
+        isReceived &&
         !description.contains('Garantia')) {
       // v711: 'Bro Payment' sozinho é o AUTO-DEPÓSITO do usuário (invoice da
       // própria carteira pra iniciar ordem) — NÃO é ganho como Bro (caso
       // real 05/11: depósito de 55.692 sats da Carol caiu como "Ganho").
-      if (description.contains('Bro - Ordem') || 
+      if (description.contains('Bro - Ordem') ||
           description.contains('Bro Ordem') ||
           (description.startsWith('Bro ') && description.length >= 12)) {
         isBroOrderPayment = true;
       }
     }
-    
+
     // v246: Detectar transações do Marketplace pela descrição do invoice
     final isMarketplace = description.contains('Bro Marketplace');
     String marketplaceProduct = '';
     if (isMarketplace) {
-      marketplaceProduct = description.replaceFirst('Bro Marketplace: ', '').replaceFirst('Bro Marketplace:', '').trim();
+      marketplaceProduct = description
+          .replaceFirst('Bro Marketplace: ', '')
+          .replaceFirst('Bro Marketplace:', '')
+          .trim();
       if (marketplaceProduct.isEmpty) marketplaceProduct = 'Produto';
     }
-    
+
     // Determinar o label e cor baseado no tipo
     String label;
     Color iconColor;
     IconData icon;
-    
+
     if (isMarketplace) {
       // v246: Transação do Marketplace
       if (isReceived) {
-        label = AppLocalizations.of(context).tp('wallet_marketplace_sale', {'product': marketplaceProduct});
+        label = AppLocalizations.of(context)
+            .tp('wallet_marketplace_sale', {'product': marketplaceProduct});
         iconColor = Colors.green;
         icon = Icons.storefront;
       } else {
-        label = AppLocalizations.of(context).tp('wallet_marketplace_purchase', {'product': marketplaceProduct});
+        label = AppLocalizations.of(context)
+            .tp('wallet_marketplace_purchase', {'product': marketplaceProduct});
         iconColor = Colors.orange;
         icon = Icons.shopping_cart;
       }
-    } else if (description == 'BRIX Payment' || description.toLowerCase().contains('brix payment') || description.startsWith('BRIX: ') ||
-               (!isReceived && (description.toLowerCase().contains('@brostr.app') || description.toLowerCase().contains('@brix.app')))) {
+    } else if (description == 'BRIX Payment' ||
+        description.toLowerCase().contains('brix payment') ||
+        description.startsWith('BRIX: ') ||
+        description.toLowerCase().contains('@brix.brostr.app') ||
+        (!isReceived &&
+            (description.toLowerCase().contains('@brostr.app') ||
+                description.toLowerCase().contains('@brix.app')))) {
       if (isReceived) {
         label = '⚡ brix recebido';
         iconColor = Colors.green;
@@ -3275,22 +3892,26 @@ class _WalletScreenState extends State<WalletScreen> {
       }
       final oid = correlatedOrderId ?? orderIdFromDesc;
       label = oid != null && oid.length >= 8
-          ? AppLocalizations.of(context).tp('wallet_bro_earning_order', {'orderId': oid.substring(0, 8)})
+          ? AppLocalizations.of(context)
+              .tp('wallet_bro_earning_order', {'orderId': oid.substring(0, 8)})
           : AppLocalizations.of(context).t('wallet_bro_earning');
       iconColor = Colors.green;
       icon = Icons.volunteer_activism;
     } else if (isReceived) {
       // Se temos uma ordem correlacionada para este depósito
       if (correlatedOrderId != null) {
-        label = AppLocalizations.of(context).tp('wallet_deposit_for_order_id', {'orderId': correlatedOrderId.substring(0, 8)});
+        label = AppLocalizations.of(context).tp('wallet_deposit_for_order_id',
+            {'orderId': correlatedOrderId.substring(0, 8)});
         iconColor = Colors.amber;
         icon = Icons.receipt_long;
-      } else if (description.contains('Depósito Bro') || description.contains('Deposito Bro')) {
+      } else if (description.contains('Depósito Bro') ||
+          description.contains('Deposito Bro')) {
         // Depósito manual na carteira
         label = '📥 $description';
         iconColor = Colors.blue;
         icon = Icons.account_balance_wallet;
-      } else if (description.contains('Receber') && description.contains('sats')) {
+      } else if (description.contains('Receber') &&
+          description.contains('sats')) {
         // Recebimento manual via invoice
         label = '📥 $description';
         iconColor = Colors.green;
@@ -3307,7 +3928,8 @@ class _WalletScreenState extends State<WalletScreen> {
       }
     } else {
       // Depósito/renovação de garantia (tier) — nunca "Enviado" genérico
-      final isGuarantee = description.startsWith('Bro Garantia') || description.contains('Garantia Bro');
+      final isGuarantee = description.startsWith('Bro Garantia') ||
+          description.contains('Garantia Bro');
       // Verificar se é pagamento com saldo da carteira ou depósito Lightning
       final isWalletPayment = payment['isWalletPayment'] == true;
       if (isGuarantee) {
@@ -3327,23 +3949,28 @@ class _WalletScreenState extends State<WalletScreen> {
       } else if (isWalletPayment) {
         // v449: Unificado com bill payment — mesma label independente do método
         label = correlatedOrderId != null
-            ? AppLocalizations.of(context).tp('wallet_bill_payment_order', {'orderId': correlatedOrderId!.substring(0, 8)})
+            ? AppLocalizations.of(context).tp('wallet_bill_payment_order',
+                {'orderId': correlatedOrderId!.substring(0, 8)})
             : AppLocalizations.of(context).t('wallet_bill_payment');
         iconColor = Colors.red;
         icon = Icons.arrow_upward;
-      } else if (description == 'Bro Wallet Payment' || description == 'Bro Payment') {
+      } else if (description == 'Bro Wallet Payment' ||
+          description == 'Bro Payment') {
         // Já correlacionado por paymentHash acima
         if (correlatedOrderId != null) {
-          label = AppLocalizations.of(context).tp('wallet_deposit_for_order_id', {'orderId': correlatedOrderId.substring(0, 8)});
+          label = AppLocalizations.of(context).tp('wallet_deposit_for_order_id',
+              {'orderId': correlatedOrderId.substring(0, 8)});
         } else {
           label = AppLocalizations.of(context).t('wallet_deposit_for_order');
         }
         iconColor = Colors.amber;
         icon = Icons.receipt_long;
-      } else if (description.contains('Ordem') || description.contains('conta')) {
+      } else if (description.contains('Ordem') ||
+          description.contains('conta')) {
         // Pagamento de conta — v706: com nº da ordem quando correlacionada
         label = correlatedOrderId != null
-            ? AppLocalizations.of(context).tp('wallet_bill_payment_order', {'orderId': correlatedOrderId!.substring(0, 8)})
+            ? AppLocalizations.of(context).tp('wallet_bill_payment_order',
+                {'orderId': correlatedOrderId!.substring(0, 8)})
             : AppLocalizations.of(context).t('wallet_bill_payment');
         iconColor = Colors.red;
         icon = Icons.arrow_upward;
@@ -3353,7 +3980,7 @@ class _WalletScreenState extends State<WalletScreen> {
         icon = Icons.arrow_upward;
       }
     }
-    
+
     // Usar estilo destacado para ganhos Bro e marketplace
     final showBroStyle = isBroEarning || isBroOrderPayment;
     final showMarketplaceStyle = isMarketplace;
@@ -3365,15 +3992,19 @@ class _WalletScreenState extends State<WalletScreen> {
     int displayAmount = (amount is int) ? amount : (amount as num).toInt();
     if (!isReceived) {
       final netFeeRaw = payment['fees'];
-      final netFee = netFeeRaw is int ? netFeeRaw : (netFeeRaw is num ? netFeeRaw.toInt() : 0);
+      final netFee = netFeeRaw is int
+          ? netFeeRaw
+          : (netFeeRaw is num ? netFeeRaw.toInt() : 0);
       displayAmount += netFee;
       if (correlatedOrderId != null) {
-        displayAmount += _platformFeeForOrder(correlatedOrderId!, baseSats: displayAmount - netFee);
+        displayAmount += _platformFeeForOrder(correlatedOrderId!,
+            baseSats: displayAmount - netFee);
       }
     }
     // Ganho como Bro: incluir taxa de 3% do provedor no valor exibido
     if (isBroEarning || isBroOrderPayment) {
-      final providerFeeRaw = (displayAmount * AppConfig.providerFeePercent).round();
+      final providerFeeRaw =
+          (displayAmount * AppConfig.providerFeePercent).round();
       displayAmount = displayAmount + (providerFeeRaw < 1 ? 1 : providerFeeRaw);
     }
 
@@ -3383,9 +4014,18 @@ class _WalletScreenState extends State<WalletScreen> {
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: showBroStyle ? const Color(0xFF1A2A1A) : showMarketplaceStyle ? const Color(0xFF1A1A2A) : const Color(0xFF1A1A1A),
+          color: showBroStyle
+              ? const Color(0xFF1A2A1A)
+              : showMarketplaceStyle
+                  ? const Color(0xFF1A1A2A)
+                  : const Color(0xFF1A1A1A),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: showBroStyle ? Colors.green.withOpacity(0.3) : showMarketplaceStyle ? Colors.orange.withOpacity(0.3) : const Color(0xFF333333)),
+          border: Border.all(
+              color: showBroStyle
+                  ? Colors.green.withOpacity(0.3)
+                  : showMarketplaceStyle
+                      ? Colors.orange.withOpacity(0.3)
+                      : const Color(0xFF333333)),
         ),
         child: Row(
           children: [
@@ -3415,7 +4055,8 @@ class _WalletScreenState extends State<WalletScreen> {
                       fontSize: 14,
                     ),
                   ),
-                  if (description.startsWith('BRIX: ') && description.length > 6)
+                  if (description.startsWith('BRIX: ') &&
+                      description.length > 6)
                     Text(
                       '💬 ${description.substring(6)}',
                       style: TextStyle(
@@ -3434,7 +4075,9 @@ class _WalletScreenState extends State<WalletScreen> {
                         fontSize: 11,
                       ),
                     ),
-                  if (status.isNotEmpty && status != 'Complete' && !status.contains('completed'))
+                  if (status.isNotEmpty &&
+                      status != 'Complete' &&
+                      !status.contains('completed'))
                     Text(
                       status.replaceAll('PaymentStatus.', ''),
                       style: TextStyle(
@@ -3478,9 +4121,9 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   void _showTransactionDetails(Map<String, dynamic> payment) {
-    final isReceived = payment['type'] == 'received' || 
-                       payment['direction'] == 'incoming' ||
-                       payment['type'] == 'Receive';
+    final isReceived = payment['type'] == 'received' ||
+        payment['direction'] == 'incoming' ||
+        payment['type'] == 'Receive';
     final isBroEarning = payment['isBroEarning'] == true;
     final amount = payment['amountSats'] ?? payment['amount'] ?? 0;
     final status = payment['status']?.toString() ?? '';
@@ -3494,47 +4137,52 @@ class _WalletScreenState extends State<WalletScreen> {
     final method = payment['method']?.toString() ?? '';
     final isBrixPayment = payment['isBrix'] == true ||
         description == 'BRIX Payment' ||
-        description.startsWith('BRIX: ');
+        description.startsWith('BRIX: ') ||
+        description.toLowerCase().contains('@brix.brostr.app');
     final brixOutgoingFee = _brixOutgoingFees[paymentHash];
     final brixFeeSats = (brixOutgoingFee?['feeSats'] as num?)?.toInt() ?? 0;
-    
+
     // v411: Extract BRIX memo from description (format: "BRIX: <memo>")
     String? brixMemo;
     if (description.startsWith('BRIX: ') && description != 'BRIX: ') {
       brixMemo = description.substring(6).trim();
     }
-    
+
     // Correlacionar com ordem se possível
     final orderProvider = context.read<OrderProvider>();
     final currentPubkey = orderProvider.currentUserPubkey;
     String? correlatedOrderId;
     Order? correlatedOrder;
-    
+
     // Verificar se é depósito para uma ordem que eu criei
-    if (isReceived && (description.contains('Bro Payment') || description.contains('Bro - Ordem'))) {
+    if (isReceived &&
+        (description.contains('Bro Payment') ||
+            description.contains('Bro - Ordem'))) {
       String? orderIdFromDesc;
       if (description.contains('Bro - Ordem ')) {
         orderIdFromDesc = description.split('Bro - Ordem ').last.trim();
       }
-      
+
       if (orderIdFromDesc != null && orderIdFromDesc.isNotEmpty) {
         try {
           correlatedOrder = orderProvider.orders.firstWhere(
-            (o) => o.id.startsWith(orderIdFromDesc!) || orderIdFromDesc!.startsWith(o.id.substring(0, 8)),
+            (o) =>
+                o.id.startsWith(orderIdFromDesc!) ||
+                orderIdFromDesc!.startsWith(o.id.substring(0, 8)),
           );
           correlatedOrderId = correlatedOrder.id;
         } catch (_) {}
       }
-      
+
       // Se não encontrou pelo ID, tentar correlação por valor
       if (correlatedOrderId == null) {
         final myOrders = orderProvider.myCreatedOrders;
         final paymentDate = date is DateTime ? date : DateTime.now();
-        
+
         for (final order in myOrders) {
           final orderSats = (order.btcAmount * 100000000).round();
           final tolerance = (orderSats * 0.05).round();
-          
+
           if ((amount - orderSats).abs() <= tolerance) {
             final orderDate = order.createdAt;
             final diff = paymentDate.difference(orderDate).abs();
@@ -3547,7 +4195,7 @@ class _WalletScreenState extends State<WalletScreen> {
         }
       }
     }
-    
+
     // v406: Correlacionar pagamentos ENVIADOS com ordens que eu criei (modo usuário)
     // Quando o usuário cria uma ordem, ele ENVIA sats para o escrow
     if (!isReceived && correlatedOrder == null) {
@@ -3560,7 +4208,7 @@ class _WalletScreenState extends State<WalletScreen> {
           correlatedOrderId = correlatedOrder.id;
         } catch (_) {}
       }
-      
+
       // Tentar correlação por descrição
       if (correlatedOrder == null && description.contains('Bro')) {
         String? orderIdFromDesc;
@@ -3570,22 +4218,24 @@ class _WalletScreenState extends State<WalletScreen> {
         if (orderIdFromDesc != null && orderIdFromDesc.isNotEmpty) {
           try {
             correlatedOrder = orderProvider.orders.firstWhere(
-              (o) => o.id.startsWith(orderIdFromDesc!) || orderIdFromDesc!.startsWith(o.id.substring(0, 8)),
+              (o) =>
+                  o.id.startsWith(orderIdFromDesc!) ||
+                  orderIdFromDesc!.startsWith(o.id.substring(0, 8)),
             );
             correlatedOrderId = correlatedOrder.id;
           } catch (_) {}
         }
       }
-      
+
       // Tentar correlação por valor/data com ordens que eu criei
       if (correlatedOrder == null) {
         final myOrders = orderProvider.myCreatedOrders;
         final paymentDate = date is DateTime ? date : DateTime.now();
-        
+
         for (final order in myOrders) {
           final totalSats = (order.total / order.btcPrice * 100000000).round();
           final tolerance = (totalSats * 0.05).round();
-          
+
           if ((amount - totalSats).abs() <= tolerance) {
             final orderDate = order.createdAt;
             final diff = paymentDate.difference(orderDate).abs();
@@ -3598,21 +4248,24 @@ class _WalletScreenState extends State<WalletScreen> {
         }
       }
     }
-    
+
     // Determinar tipo para exibição
     String typeLabel;
     Color typeColor;
     IconData typeIcon;
-    
+
     // Verificar se é ganho Bro (sou o provedor, não o criador)
     bool isGanhoBro = isBroEarning;
-    if (correlatedOrder != null && correlatedOrder.providerId == currentPubkey && correlatedOrder.userPubkey != currentPubkey) {
+    if (correlatedOrder != null &&
+        correlatedOrder.providerId == currentPubkey &&
+        correlatedOrder.userPubkey != currentPubkey) {
       isGanhoBro = true;
     }
-    
+
     if (method.contains('withdraw')) {
       // v673: saque on-chain rotulado corretamente (não é "envio Lightning")
-      typeLabel = AppLocalizations.of(context).t('wallet_type_withdraw_onchain');
+      typeLabel =
+          AppLocalizations.of(context).t('wallet_type_withdraw_onchain');
       typeColor = Colors.orange;
       typeIcon = Icons.arrow_upward;
     } else if (method.contains('deposit')) {
@@ -3628,7 +4281,8 @@ class _WalletScreenState extends State<WalletScreen> {
       typeColor = Colors.amber;
       typeIcon = Icons.receipt_long;
     } else if (isReceived) {
-      typeLabel = AppLocalizations.of(context).t('wallet_type_received_lightning');
+      typeLabel =
+          AppLocalizations.of(context).t('wallet_type_received_lightning');
       typeColor = Colors.green;
       typeIcon = Icons.arrow_downward;
     } else {
@@ -3636,17 +4290,21 @@ class _WalletScreenState extends State<WalletScreen> {
       typeColor = Colors.red;
       typeIcon = Icons.arrow_upward;
     }
-    
+
     // v704: mesmo critério da lista — total consolidado = pagamento + taxa de
     // rede + taxa da plataforma. O detalhamento linha a linha fica na seção
     // de taxas logo abaixo (transparência sem poluir o histórico).
     int detailAmount = (amount is int) ? amount : (amount as num).toInt();
-    final int baseSats = detailAmount; // Valor original do pagamento Lightning (sats do PIX)
+    final int baseSats =
+        detailAmount; // Valor original do pagamento Lightning (sats do PIX)
     if (!isReceived) {
       final netFeeRaw = payment['fees'];
-      detailAmount += netFeeRaw is int ? netFeeRaw : (netFeeRaw is num ? netFeeRaw.toInt() : 0);
+      detailAmount += netFeeRaw is int
+          ? netFeeRaw
+          : (netFeeRaw is num ? netFeeRaw.toInt() : 0);
       if (correlatedOrderId != null) {
-        detailAmount += _platformFeeForOrder(correlatedOrderId!, baseSats: baseSats);
+        detailAmount +=
+            _platformFeeForOrder(correlatedOrderId!, baseSats: baseSats);
       }
     }
     // Ganho como Bro: incluir taxa de 3% do provedor no valor exibido
@@ -3654,7 +4312,7 @@ class _WalletScreenState extends State<WalletScreen> {
       final providerFeeRaw = (baseSats * AppConfig.providerFeePercent).round();
       detailAmount = baseSats + (providerFeeRaw < 1 ? 1 : providerFeeRaw);
     }
-    
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3720,16 +4378,24 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                   ],
                 ),
-                
+
                 const SizedBox(height: 24),
                 const Divider(color: Color(0xFF333333)),
                 const SizedBox(height: 16),
-                
+
                 // Detalhes
-                _buildDetailRow(AppLocalizations.of(context).t('wallet_date_time'), date != null ? _formatDateFull(date) : AppLocalizations.of(context).t('wallet_not_available')),
-                _buildDetailRow(AppLocalizations.of(context).t('wallet_status'), status.replaceAll('PaymentStatus.', '').toUpperCase()),
+                _buildDetailRow(
+                    AppLocalizations.of(context).t('wallet_date_time'),
+                    date != null
+                        ? _formatDateFull(date)
+                        : AppLocalizations.of(context)
+                            .t('wallet_not_available')),
+                _buildDetailRow(AppLocalizations.of(context).t('wallet_status'),
+                    status.replaceAll('PaymentStatus.', '').toUpperCase()),
                 if (description.isNotEmpty)
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_description'), description),
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_description'),
+                      description),
                 if (brixMemo != null && brixMemo!.isNotEmpty) ...[
                   const SizedBox(height: 4),
                   Container(
@@ -3743,14 +4409,16 @@ class _WalletScreenState extends State<WalletScreen> {
                     child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(Icons.chat_bubble_outline, color: Colors.amber, size: 18),
+                        const Icon(Icons.chat_bubble_outline,
+                            color: Colors.amber, size: 18),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                AppLocalizations.of(context).t('wallet_brix_message'),
+                                AppLocalizations.of(context)
+                                    .t('wallet_brix_message'),
                                 style: const TextStyle(
                                   color: Colors.amber,
                                   fontSize: 11,
@@ -3788,7 +4456,9 @@ class _WalletScreenState extends State<WalletScreen> {
                 // ticket de suporte). Com a descrição, ele vê na hora do que
                 // se trata ("Bro - Ordem X", "BRIX", etc.).
                 if (description.isNotEmpty)
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_description'), description),
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_description'),
+                      description),
 
                 // v630: Detalhamento universal de taxas — mostra a taxa REAL de
                 // rede/roteamento (campo `fees` do SDK Spark) em TODA transação,
@@ -3799,17 +4469,19 @@ class _WalletScreenState extends State<WalletScreen> {
                       ? feesRaw
                       : (feesRaw is num ? feesRaw.toInt() : null);
                   final totalBrixFeeSats = (networkFeeSats ?? 0) + brixFeeSats;
-                  final totalFeePercent = baseSats > 0
-                      ? totalBrixFeeSats / baseSats * 100
-                      : 0.0;
+                  final totalFeePercent =
+                      baseSats > 0 ? totalBrixFeeSats / baseSats * 100 : 0.0;
                   String feeValue;
                   if (networkFeeSats == null && brixOutgoingFee == null) {
-                    feeValue = AppLocalizations.of(context).t('wallet_not_available');
+                    feeValue =
+                        AppLocalizations.of(context).t('wallet_not_available');
                   } else if (_btcPrice > 0) {
                     final fiat = totalBrixFeeSats / 100000000 * _btcPrice;
-                    feeValue = '${totalFeePercent.toStringAsFixed(1)}% · $totalBrixFeeSats sats (~$_fiatSymbol ${fiat.toStringAsFixed(2)})';
+                    feeValue =
+                        '${totalFeePercent.toStringAsFixed(1)}% · $totalBrixFeeSats sats (~$_fiatSymbol ${fiat.toStringAsFixed(2)})';
                   } else {
-                    feeValue = '${totalFeePercent.toStringAsFixed(1)}% · $totalBrixFeeSats sats';
+                    feeValue =
+                        '${totalFeePercent.toStringAsFixed(1)}% · $totalBrixFeeSats sats';
                   }
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -3826,14 +4498,16 @@ class _WalletScreenState extends State<WalletScreen> {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      if (totalBrixFeeSats > 0 || (networkFeeSats == null && brixOutgoingFee == null))
+                      if (totalBrixFeeSats > 0 ||
+                          (networkFeeSats == null && brixOutgoingFee == null))
                         _buildDetailRow('taxa', feeValue),
                       // v706: TODAS as taxas condensadas aqui — Bro provedor
                       // (3%), app Bro (2%) e Spark. A nota embaixo virou uma
                       // linha só; o detalhamento é que explica (pedido Carol).
                       if (!isReceived && correlatedOrderId != null) ...[
                         Builder(builder: (context) {
-                          final provFee = (baseSats * AppConfig.providerFeePercent).round();
+                          final provFee =
+                              (baseSats * AppConfig.providerFeePercent).round();
                           if (provFee <= 0) return const SizedBox.shrink();
                           final pfText = _btcPrice > 0
                               ? '$provFee sats (~$_fiatSymbol ${(provFee / 100000000 * _btcPrice).toStringAsFixed(2)})'
@@ -3848,7 +4522,8 @@ class _WalletScreenState extends State<WalletScreen> {
                       // nunca escondida, mas sem virar item separado na lista.
                       if (!isReceived && correlatedOrderId != null) ...[
                         Builder(builder: (context) {
-                          final pf = _platformFeeForOrder(correlatedOrderId!, baseSats: baseSats);
+                          final pf = _platformFeeForOrder(correlatedOrderId!,
+                              baseSats: baseSats);
                           if (pf <= 0) return const SizedBox.shrink();
                           final pfText = _btcPrice > 0
                               ? '$pf sats (~$_fiatSymbol ${(pf / 100000000 * _btcPrice).toStringAsFixed(2)})'
@@ -3862,31 +4537,34 @@ class _WalletScreenState extends State<WalletScreen> {
                       if (!isBrixPayment && brixOutgoingFee == null) ...[
                         const SizedBox(height: 8),
                         Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.04),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: Colors.white.withOpacity(0.08)),
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Icon(Icons.info_outline, color: Colors.white38, size: 16),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                AppLocalizations.of(context).t('wallet_fees_note'),
-                                style: TextStyle(
-                                  color: Colors.white.withOpacity(0.55),
-                                  fontSize: 12,
-                                  height: 1.4,
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.04),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                                color: Colors.white.withOpacity(0.08)),
+                          ),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Icon(Icons.info_outline,
+                                  color: Colors.white38, size: 16),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  AppLocalizations.of(context)
+                                      .t('wallet_fees_note'),
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.55),
+                                    fontSize: 12,
+                                    height: 1.4,
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
                       ],
                     ],
                   );
@@ -3897,7 +4575,7 @@ class _WalletScreenState extends State<WalletScreen> {
                   const SizedBox(height: 16),
                   const Divider(color: Color(0xFF333333)),
                   const SizedBox(height: 16),
-                  
+
                   Text(
                     AppLocalizations.of(context).t('wallet_order_data'),
                     style: const TextStyle(
@@ -3907,14 +4585,27 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_order_number'), '#${correlatedOrder.id.substring(0, 8).toUpperCase()}'),
-                  _buildDetailRow(AppLocalizations.of(context).t('payment_type'), correlatedOrder.billType),
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_value_brl'), 'R\$ ${correlatedOrder.amount.toStringAsFixed(2)}'),
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_value_btc'), '${correlatedOrder.btcAmount.toStringAsFixed(8)} BTC'),
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_order_status'), correlatedOrder.status.toUpperCase()),
+
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_order_number'),
+                      '#${correlatedOrder.id.substring(0, 8).toUpperCase()}'),
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('payment_type'),
+                      correlatedOrder.billType),
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_value_brl'),
+                      'R\$ ${correlatedOrder.amount.toStringAsFixed(2)}'),
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_value_btc'),
+                      '${correlatedOrder.btcAmount.toStringAsFixed(8)} BTC'),
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_order_status'),
+                      correlatedOrder.status.toUpperCase()),
                   if (correlatedOrder.billCode.isNotEmpty)
-                    _buildDetailRow(AppLocalizations.of(context).t('wallet_code'), correlatedOrder.billCode, monospace: true),
+                    _buildDetailRow(
+                        AppLocalizations.of(context).t('wallet_code'),
+                        correlatedOrder.billCode,
+                        monospace: true),
                   // v406: Detalhamento de custos para o USUÁRIO (pagamento enviado)
                   if (!isReceived && !isGanhoBro) ...[
                     const SizedBox(height: 12),
@@ -3931,8 +4622,10 @@ class _WalletScreenState extends State<WalletScreen> {
                     const SizedBox(height: 8),
                     Builder(builder: (context) {
                       // v560: usar fórmula canônica (baseSats × 3%) — mesmo do invoice gerado.
-                      final billSats = (correlatedOrder!.btcAmount * 100000000).round();
-                      var provFeeSats = (billSats * AppConfig.providerFeePercent).round();
+                      final billSats =
+                          (correlatedOrder!.btcAmount * 100000000).round();
+                      var provFeeSats =
+                          (billSats * AppConfig.providerFeePercent).round();
                       if (provFeeSats < 1 && billSats > 0) provFeeSats = 1;
                       final totalSats = billSats + provFeeSats;
                       return Column(
@@ -3942,7 +4635,8 @@ class _WalletScreenState extends State<WalletScreen> {
                             '$billSats sats',
                           ),
                           _buildDetailRow(
-                            AppLocalizations.of(context).t('wallet_provider_fee'),
+                            AppLocalizations.of(context)
+                                .t('wallet_provider_fee'),
                             '$provFeeSats sats',
                           ),
                           const Divider(color: Color(0xFF333333)),
@@ -3955,12 +4649,13 @@ class _WalletScreenState extends State<WalletScreen> {
                     }),
                   ],
                   // Provider fee breakdown for Bro earnings
-                  if (isGanhoBro) ...[                    
+                  if (isGanhoBro) ...[
                     const SizedBox(height: 12),
                     const Divider(color: Color(0xFF333333)),
                     const SizedBox(height: 12),
                     Text(
-                      AppLocalizations.of(context).t('wallet_earnings_breakdown'),
+                      AppLocalizations.of(context)
+                          .t('wallet_earnings_breakdown'),
                       style: const TextStyle(
                         color: Colors.green,
                         fontSize: 14,
@@ -3974,7 +4669,8 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                     Builder(builder: (context) {
                       final providerFeeSats = detailAmount - baseSats;
-                      final providerFeeBrl = correlatedOrder!.amount * AppConfig.providerFeePercent;
+                      final providerFeeBrl = correlatedOrder!.amount *
+                          AppConfig.providerFeePercent;
                       return _buildDetailRow(
                         '💰 ${AppLocalizations.of(context).t('wallet_your_profit')} (${(AppConfig.providerFeePercent * 100).toStringAsFixed(0)}%)',
                         '+ $providerFeeSats sats (~R\$ ${providerFeeBrl.toStringAsFixed(2)})',
@@ -3987,11 +4683,11 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                   ],
                 ],
-                  
+
                 const SizedBox(height: 16),
                 const Divider(color: Color(0xFF333333)),
                 const SizedBox(height: 16),
-                
+
                 // Dados técnicos
                 Text(
                   AppLocalizations.of(context).t('wallet_technical_data'),
@@ -4002,14 +4698,24 @@ class _WalletScreenState extends State<WalletScreen> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                
-                if (paymentHash.isNotEmpty && paymentHash != 'N/A' && paymentHash != 'null')
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_payment_hash'), paymentHash, copyable: true, monospace: true),
+
+                if (paymentHash.isNotEmpty &&
+                    paymentHash != 'N/A' &&
+                    paymentHash != 'null')
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_payment_hash'),
+                      paymentHash,
+                      copyable: true,
+                      monospace: true),
                 if (paymentId.isNotEmpty)
-                  _buildDetailRow(AppLocalizations.of(context).t('wallet_transaction_id'), paymentId, copyable: true, monospace: true),
-                
+                  _buildDetailRow(
+                      AppLocalizations.of(context).t('wallet_transaction_id'),
+                      paymentId,
+                      copyable: true,
+                      monospace: true),
+
                 const SizedBox(height: 24),
-                
+
                 // Botão "Ver detalhes da ordem" — só quando há ordem correlacionada
                 if (correlatedOrder != null) ...[
                   SizedBox(
@@ -4017,8 +4723,9 @@ class _WalletScreenState extends State<WalletScreen> {
                     child: ElevatedButton.icon(
                       onPressed: () {
                         Navigator.pop(context);
-                        final isProvider = correlatedOrder!.providerId == currentPubkey &&
-                            correlatedOrder!.userPubkey != currentPubkey;
+                        final isProvider =
+                            correlatedOrder!.providerId == currentPubkey &&
+                                correlatedOrder!.userPubkey != currentPubkey;
                         if (isProvider) {
                           Navigator.push(
                             context,
@@ -4033,13 +4740,15 @@ class _WalletScreenState extends State<WalletScreen> {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => UserOrderDetailScreen(orderId: correlatedOrder!.id),
+                              builder: (_) => UserOrderDetailScreen(
+                                  orderId: correlatedOrder!.id),
                             ),
                           );
                         }
                       },
                       icon: const Icon(Icons.receipt_long, size: 18),
-                      label: Text(AppLocalizations.of(context).t('wallet_view_order_details')),
+                      label: Text(AppLocalizations.of(context)
+                          .t('wallet_view_order_details')),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFFF9800),
                         foregroundColor: Colors.white,
@@ -4056,7 +4765,8 @@ class _WalletScreenState extends State<WalletScreen> {
                   child: ElevatedButton.icon(
                     onPressed: () => _copyAllDetails(payment),
                     icon: const Icon(Icons.copy, size: 18),
-                    label: Text(AppLocalizations.of(context).t('wallet_copy_all_data')),
+                    label: Text(
+                        AppLocalizations.of(context).t('wallet_copy_all_data')),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF333333),
                       foregroundColor: Colors.white,
@@ -4064,7 +4774,7 @@ class _WalletScreenState extends State<WalletScreen> {
                     ),
                   ),
                 ),
-                
+
                 const SizedBox(height: 16),
               ],
             ),
@@ -4074,7 +4784,8 @@ class _WalletScreenState extends State<WalletScreen> {
     );
   }
 
-  Widget _buildDetailRow(String label, String value, {bool copyable = false, bool monospace = false, String? fullText}) {
+  Widget _buildDetailRow(String label, String value,
+      {bool copyable = false, bool monospace = false, String? fullText}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Row(
@@ -4106,7 +4817,8 @@ class _WalletScreenState extends State<WalletScreen> {
                 Clipboard.setData(ClipboardData(text: fullText ?? value));
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
-                    content: Text(AppLocalizations.of(context).tp('nip06_copied', {'label': label})),
+                    content: Text(AppLocalizations.of(context)
+                        .tp('nip06_copied', {'label': label})),
                     backgroundColor: const Color(0xFFFF9800),
                     duration: const Duration(seconds: 1),
                   ),
@@ -4127,30 +4839,40 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 
   void _copyAllDetails(Map<String, dynamic> payment) {
-    final isReceived = payment['type'] == 'received' || 
-                       payment['direction'] == 'incoming';
+    final isReceived =
+        payment['type'] == 'received' || payment['direction'] == 'incoming';
     final amount = payment['amountSats'] ?? payment['amount'] ?? 0;
     final date = payment['createdAt'] ?? payment['timestamp'];
     final description = payment['description']?.toString() ?? '';
     final paymentHash = payment['paymentHash']?.toString() ?? '';
     final paymentId = payment['id']?.toString() ?? '';
     final status = payment['status']?.toString() ?? '';
-    
+
     final buffer = StringBuffer();
     buffer.writeln(AppLocalizations.of(context).t('wallet_copy_header'));
-    buffer.writeln('${AppLocalizations.of(context).t('payment_type')}: ${isReceived ? AppLocalizations.of(context).t('wallet_received') : AppLocalizations.of(context).t('wallet_sent')}');
-    buffer.writeln('${AppLocalizations.of(context).t('payment_value_label')}: $amount sats');
-    if (date != null) buffer.writeln('${AppLocalizations.of(context).t('wallet_date_time')}: ${_formatDateFull(date)}');
-    buffer.writeln('${AppLocalizations.of(context).t('wallet_status')}: ${status.replaceAll('PaymentStatus.', '')}');
-    buffer.writeln('${AppLocalizations.of(context).t('wallet_network')}: Lightning Network');
-    if (description.isNotEmpty) buffer.writeln('${AppLocalizations.of(context).t('wallet_description')}: $description');
+    buffer.writeln(
+        '${AppLocalizations.of(context).t('payment_type')}: ${isReceived ? AppLocalizations.of(context).t('wallet_received') : AppLocalizations.of(context).t('wallet_sent')}');
+    buffer.writeln(
+        '${AppLocalizations.of(context).t('payment_value_label')}: $amount sats');
+    if (date != null)
+      buffer.writeln(
+          '${AppLocalizations.of(context).t('wallet_date_time')}: ${_formatDateFull(date)}');
+    buffer.writeln(
+        '${AppLocalizations.of(context).t('wallet_status')}: ${status.replaceAll('PaymentStatus.', '')}');
+    buffer.writeln(
+        '${AppLocalizations.of(context).t('wallet_network')}: Lightning Network');
+    if (description.isNotEmpty)
+      buffer.writeln(
+          '${AppLocalizations.of(context).t('wallet_description')}: $description');
     buffer.writeln('');
-    buffer.writeln(AppLocalizations.of(context).t('wallet_copy_technical_header'));
+    buffer.writeln(
+        AppLocalizations.of(context).t('wallet_copy_technical_header'));
     if (paymentId.isNotEmpty) buffer.writeln('ID: $paymentId');
-    if (paymentHash.isNotEmpty && paymentHash != 'null') buffer.writeln('Payment Hash: $paymentHash');
-    
+    if (paymentHash.isNotEmpty && paymentHash != 'null')
+      buffer.writeln('Payment Hash: $paymentHash');
+
     Clipboard.setData(ClipboardData(text: buffer.toString()));
-    
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(AppLocalizations.of(context).t('wallet_all_data_copied')),
@@ -4158,7 +4880,7 @@ class _WalletScreenState extends State<WalletScreen> {
         duration: Duration(seconds: 2),
       ),
     );
-    
+
     Navigator.pop(context);
   }
 
@@ -4172,13 +4894,16 @@ class _WalletScreenState extends State<WalletScreen> {
         final str = date.toString();
         dt = DateTime.parse(str);
       }
-      
+
       final now = DateTime.now();
-      final isToday = dt.day == now.day && dt.month == now.month && dt.year == now.year;
-      final isYesterday = dt.day == now.day - 1 && dt.month == now.month && dt.year == now.year;
-      
-      final time = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-      
+      final isToday =
+          dt.day == now.day && dt.month == now.month && dt.year == now.year;
+      final isYesterday =
+          dt.day == now.day - 1 && dt.month == now.month && dt.year == now.year;
+
+      final time =
+          '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
       if (isToday) {
         return 'Hoje às $time';
       } else if (isYesterday) {
@@ -4192,13 +4917,13 @@ class _WalletScreenState extends State<WalletScreen> {
   }
 }
 
-
 /// v562: Chip de selecao de modo no dialog Receber (sats / R$ / qualquer valor)
 class _ReceiveModeChip extends StatelessWidget {
   final String label;
   final bool selected;
   final VoidCallback? onTap;
-  const _ReceiveModeChip({required this.label, required this.selected, required this.onTap});
+  const _ReceiveModeChip(
+      {required this.label, required this.selected, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -4209,7 +4934,9 @@ class _ReceiveModeChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFF4CAF50).withOpacity(0.18) : const Color(0xFF222222),
+          color: selected
+              ? const Color(0xFF4CAF50).withOpacity(0.18)
+              : const Color(0xFF222222),
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
             color: selected ? const Color(0xFF4CAF50) : const Color(0xFF333333),
@@ -4221,7 +4948,9 @@ class _ReceiveModeChip extends StatelessWidget {
           label,
           textAlign: TextAlign.center,
           style: TextStyle(
-            color: disabled ? Colors.white24 : (selected ? const Color(0xFF4CAF50) : Colors.white70),
+            color: disabled
+                ? Colors.white24
+                : (selected ? const Color(0xFF4CAF50) : Colors.white70),
             fontSize: 13,
             fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
           ),
@@ -4230,4 +4959,3 @@ class _ReceiveModeChip extends StatelessWidget {
     );
   }
 }
-

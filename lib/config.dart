@@ -1,4 +1,4 @@
-﻿/// Configuracao centralizada do Bro App
+/// Configuracao centralizada do Bro App
 ///
 /// Secrets são carregados via --dart-define-from-file=env.json
 /// Veja env.example.json para as variáveis necessárias.
@@ -15,19 +15,20 @@ class AppConfig {
   // Para desenvolvimento local, crie um arquivo config_dev.dart
   // e faça override dessas constantes
   // ============================================
-  
+
   /// Modo de teste - usa dados mockados, sem backend real
   /// ⚠️ PRODUÇÃO: DEVE SER FALSE
   static const bool testMode = false; // DESATIVADO para teste de garantias
-  
+
   /// Permite provedores sem garantia depositada
   /// ⚠️ PRODUÇÃO: DEVE SER FALSE
-  static const bool providerTestMode = false; // DESATIVADO - corrigir persistência!
+  static const bool providerTestMode =
+      false; // DESATIVADO - corrigir persistência!
 
   // ============================================
   // BACKEND API
   // ============================================
-  
+
   /// URL do backend — HARDCODED para evitar bugs de env var mal-configurada.
   /// v538: logs da Carol provaram que Codemagic estava injetando
   /// http://10.0.2.2:3002 (emulador Android) via $BACKEND_URL. Agora eh
@@ -39,7 +40,7 @@ class AppConfig {
   // ============================================
   // BREEZ SDK (Lightning Network)
   // ============================================
-  
+
   /// API Key do Breez SDK — definido via env.json (BREEZ_API_KEY)
   /// Obtenha seu certificado em https://breez.technology
   static const String breezApiKey = String.fromEnvironment('BREEZ_API_KEY');
@@ -47,24 +48,25 @@ class AppConfig {
   // ============================================
   // APP INFO
   // ============================================
-  
+
   static const String appName = 'Bro';
   static const String appVersion = '1.0.0';
   static const int buildNumber = 1;
-  
+
   /// Bundle ID para iOS
   static const String iosBundleId = 'app.bro.mobile';
-  
+
   /// Package name para Android
   static const String androidPackage = 'app.bro.mobile';
 
   // ============================================
   // ADMIN / MEDIAÇÃO
   // ============================================
-  
+
   /// Pubkey hex do admin/mediador da plataforma
   /// Definido via env.json (ADMIN_PUBKEY)
-  static const String adminPubkey = String.fromEnvironment('ADMIN_PUBKEY', defaultValue: '');
+  static const String adminPubkey =
+      String.fromEnvironment('ADMIN_PUBKEY', defaultValue: '');
 
   // ADMIN_PRIVKEY removido por segurança — a chave privada do admin
   // agora é obtida via login Nostr (orderProvider.nostrPrivateKey)
@@ -72,14 +74,14 @@ class AppConfig {
   // ============================================
   // NETWORK (Bitcoin)
   // ============================================
-  
+
   /// true = MAINNET (Bitcoin real), false = TESTNET
   static const bool useMainnet = true;
 
   // ============================================
   // FEATURES
   // ============================================
-  
+
   static const bool enableProviderMode = true;
   static const bool enableNotifications = true;
   static const bool enableClassifieds = true;
@@ -88,19 +90,19 @@ class AppConfig {
   // ============================================
   // TAXAS E LIMITES
   // ============================================
-  
+
   /// Taxa do provedor Bro (3% - vai para a carteira Lightning do Bro)
   static const double providerFeePercent = 0.03;
-  
+
   /// Taxa da plataforma (2% - vai para manutenção da plataforma)
   static const double platformFeePercent = 0.02;
-  
+
   /// Taxa total cobrada do usuário (5%)
   static const double totalFeePercent = providerFeePercent + platformFeePercent;
-  
+
   /// Endereço Lightning da plataforma para receber taxas (2%)
   /// Definido via env.json (PLATFORM_LIGHTNING_ADDRESS)
-    static const String platformLightningAddress = String.fromEnvironment(
+  static const String platformLightningAddress = String.fromEnvironment(
     'PLATFORM_LIGHTNING_ADDRESS',
   );
 
@@ -110,7 +112,7 @@ class AppConfig {
   /// receber as taxas da plataforma. So pubkey desta lista pode rotear taxa;
   /// fora da lista, o roteamento cai no endereco fixo da plataforma
   /// (platformLightningAddress). Homologar = adicionar aqui (commit auditado).
-    static const Set<String> approvedCoordinatorPubkeys = {
+  static const Set<String> approvedCoordinatorPubkeys = {
     // Apex Cord - UNICO coordinator Bro da operacao. Em 18/12/2025 havia
     // exatamente 1 anuncio bro-coordinator valido nos relays permanentes
     // (verificado pelo agente revisor); este era ele. Se um coordinator
@@ -134,30 +136,30 @@ class AppConfig {
         lnurl.hasMatch(platformLightningAddress);
   }
 
-  /// Taxa BRIX (0.5% - cobrada em pagamentos recebidos via BRIX)
+  /// Taxa BRIX (0,5%, mínimo 1 sat — somente em envios confirmados)
   static const double brixFeePercent = 0.005;
-  
+
   /// Limite minimo em sats
   static const int minPaymentSats = 1000;
-  
+
   /// Limite maximo em sats (1M = ~R\ em dez/2025)
   static const int maxPaymentSats = 1000000;
 
   // ============================================
   // TIMEOUTS
   // ============================================
-  
+
   static const int apiTimeoutSeconds = 30;
   static const int invoiceExpirySeconds = 3600; // 1 hora
   static const int orderExpiryHours = 24;
-  
+
   // ============================================
   // HELPERS
   // ============================================
-  
+
   /// Retorna true se esta em modo de desenvolvimento
   static bool get isDevelopment => testMode || providerTestMode;
-  
+
   /// Retorna true se esta pronto para producao
   static bool get isProduction => !testMode && !providerTestMode;
 }
