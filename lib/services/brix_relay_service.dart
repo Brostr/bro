@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, TargetPlatform, visibleForTesting;
 import 'package:flutter/widgets.dart';
@@ -18,6 +19,7 @@ import 'package:bro_app/services/platform_fee_service.dart';
 import 'package:bro_app/providers/breez_provider.dart';
 import 'package:bro_app/config.dart';
 import 'package:bro_app/config/payment_methods.dart';
+import 'package:crypto/crypto.dart';
 
 /// Global BRIX invoice relay service.
 /// Polls the BRIX server for incoming invoice requests and auto-generates
@@ -68,6 +70,36 @@ class BrixRelayService {
       }
     }
     return null;
+  }
+
+  @visibleForTesting
+  static String brixIdempotencyKey(String paymentHash) {
+    if (paymentHash.isEmpty) return '';
+    final digest = sha256.convert(utf8.encode('brix-$paymentHash'));
+    final bytes = digest.bytes.take(16).toList();
+    // UUID v4 canônico: versão 4 e variante RFC 4122
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+  }
+
+  /// Legacy queue entries stored `brix-<hash>` (rejected by the SDK as
+  /// "Invalid TransferId format"). Re-derive a canonical UUID from the stored
+  /// attempt hash so old pending sends can still complete.
+  @visibleForTesting
+  static String normalizeIdempotencyKey(
+      String? stored, List<String> attemptHashes) {
+    final value = stored?.trim() ?? '';
+    final isUuid = RegExp(
+            r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        .hasMatch(value);
+    if (isUuid) return value;
+    final seed = attemptHashes.isNotEmpty
+        ? attemptHashes.last
+        : value.replaceFirst('brix-', '');
+    return brixIdempotencyKey(seed);
   }
 
   /// Ensure FCM token is registered with BRIX server (idempotent).
@@ -1124,8 +1156,11 @@ class BrixRelayService {
           final payResult = invoiceResult['prepared'] != null
               ? await breezProvider.payPreparedBrixPayment(
                   invoiceResult['prepared'],
-                  idempotencyKey: payment['idempotencyKey']?.toString() ??
-                      'brix-${payment['id']}',
+                  idempotencyKey: normalizeIdempotencyKey(
+                    payment['idempotencyKey']?.toString(),
+                    (payment['attemptHashes'] as List?)?.cast<String>() ??
+                        const <String>[],
+                  ),
                 )
               : await breezProvider.payInvoice(invoice);
 

@@ -33,6 +33,60 @@ void main() {
     expect(BrixRelayService.calculateBrixFee(1000), 5);
   });
 
+  test('idempotency key is a canonical UUID accepted by the SDK', () {
+    final key = BrixRelayService.brixIdempotencyKey('abc123hash');
+    expect(
+      RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+          .hasMatch(key),
+      isTrue,
+      reason: 'SDK rejects non-UUID TransferId: $key',
+    );
+    expect(BrixRelayService.brixIdempotencyKey('abc123hash'), key);
+    expect(BrixRelayService.brixIdempotencyKey('other'), isNot(key));
+  });
+
+  test('legacy non-UUID queue keys are normalized before sending', () {
+    final legacy = BrixRelayService.normalizeIdempotencyKey(
+        'brix-abc123hash', ['abc123hash']);
+    expect(
+      RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')
+          .hasMatch(legacy),
+      isTrue,
+    );
+    expect(legacy, BrixRelayService.brixIdempotencyKey('abc123hash'));
+
+    final valid = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+    expect(BrixRelayService.normalizeIdempotencyKey(valid, const []), valid);
+  });
+
+  test('BRIX fee is always charged, even when it equals the network cost',
+      () async {
+    SharedPreferences.setMockInitialValues({});
+    var charges = 0;
+    BrixRelayService.chargeOutgoingFeeOverride = ({
+      required orderId,
+      required totalSats,
+      required feePercent,
+      required onPaid,
+    }) async {
+      charges++;
+      await onPaid('fee-hash');
+      return true;
+    };
+
+    await BrixRelayService.recordSettledOutgoingFee(
+      paymentHash: 'tiny-fee-hash',
+      amountSats: 214,
+      feeSats: 1,
+      feeNetworkReserveSats: 1,
+    );
+
+    expect(charges, 1, reason: 'BRIX is a paid service — fee must be charged');
+    final fees = await BrixRelayService.getSettledOutgoingFees();
+    expect(fees['tiny-fee-hash']?['feeSats'], 1);
+    BrixRelayService.chargeOutgoingFeeOverride = null;
+  });
+
   test('manual BRIX amount is the total debit including both fees', () {
     expect(isBrixSendDestination('carol@brix.brostr.app'), isTrue);
     expect(isBrixSendDestination('carol'), isTrue);

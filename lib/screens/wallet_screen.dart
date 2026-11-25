@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -945,6 +946,7 @@ class _WalletScreenState extends State<WalletScreen> {
     double? btcPriceBrl;
     Map<String, dynamic>? brixPreparedPayment;
     bool isPreparingBrix = false;
+    String? brixPreviewError;
 
     // Get current balance
     final balanceSats =
@@ -1145,6 +1147,8 @@ class _WalletScreenState extends State<WalletScreen> {
                     enabled: !isSending,
                     onChanged: (value) {
                       brixPreparedPayment = null;
+                      brixPreviewError = null;
+
                       // Se for Lightning Address, LNURL-pay, phone, email ou username BRIX, mostrar campo de valor
                       final trimmed = value.trim().toLowerCase();
                       final isLnAddress =
@@ -1212,6 +1216,7 @@ class _WalletScreenState extends State<WalletScreen> {
                             enabled: !isSending,
                             onChanged: (_) => setModalState(() {
                               brixPreparedPayment = null;
+                              brixPreviewError = null;
                             }),
                             decoration: InputDecoration(
                               labelText: isReaisMode
@@ -1430,8 +1435,6 @@ class _WalletScreenState extends State<WalletScreen> {
                         destination: invoiceController.text,
                         amountSats: amountSats,
                         bitcoinPrice: btcPriceBrl,
-                        preparedPayment: brixPreparedPayment,
-                        isPreparing: isPreparingBrix,
                       );
                     }),
 
@@ -1817,17 +1820,13 @@ class _WalletScreenState extends State<WalletScreen> {
                                       }
                                       return;
                                     }
-                                    final confirmed = await _confirmBrixSend(
-                                      prepared,
-                                      btcPriceBrl,
-                                    );
-                                    if (confirmed != true) {
-                                      setModalState(() => isSending = false);
-                                      return;
-                                    }
+                                    // Envio direto: sem segunda confirmação.
                                     setModalState(() => isSending = true);
                                     final idempotencyKey =
-                                        'brix-${prepared['paymentHash']}';
+                                        BrixRelayService.brixIdempotencyKey(
+                                            prepared['paymentHash']
+                                                    ?.toString() ??
+                                                '');
                                     await BrixRelayService()
                                         .queueOutgoingPayment(
                                       recipient: resolvedDest,
@@ -2282,21 +2281,16 @@ class _WalletScreenState extends State<WalletScreen> {
     required String destination,
     required int amountSats,
     required double? bitcoinPrice,
-    Map<String, dynamic>? preparedPayment,
-    bool isPreparing = false,
   }) {
     if (!isBrixSendDestination(destination) || amountSats <= 0) {
       return const SizedBox.shrink();
     }
-    final feeSats = BrixRelayService.calculateBrixFee(amountSats);
+    final brixFeeSats = BrixRelayService.calculateBrixFee(amountSats);
     final fiat = bitcoinPrice != null && bitcoinPrice > 0
-        ? ' (≈ $_fiatSymbol ${(feeSats * bitcoinPrice / 100000000).toStringAsFixed(2)})'
+        ? ' ≈ $_fiatSymbol ${(brixFeeSats * bitcoinPrice / 100000000).toStringAsFixed(2)}'
         : '';
-    final status = isPreparing
-        ? 'Calculando taxa de rede...'
-        : preparedPayment?['success'] == true
-            ? 'Taxas calculadas. Revise na confirmação.'
-            : 'Toque em enviar para calcular a taxa de rede e o valor recebido.';
+    final approximateTotal = amountSats - brixFeeSats;
+
     return Padding(
       padding: const EdgeInsets.only(top: 12),
       child: Container(
@@ -2308,89 +2302,10 @@ class _WalletScreenState extends State<WalletScreen> {
           border: Border.all(color: Colors.orange.withOpacity(0.3)),
         ),
         child: Text(
-          'Débito total: $amountSats sats\n'
-          'Taxa BRIX (0,5%, mínimo 1 sat): $feeSats sat${feeSats == 1 ? '' : 's'}$fiat\n'
-          '$status',
+          'Taxas: 0,5% ($brixFeeSats sat${brixFeeSats == 1 ? '' : 's'}$fiat) + taxa de rede\n'
+          'Débito total aproximado: $approximateTotal sats',
           style: const TextStyle(color: Colors.white70, fontSize: 12),
         ),
-      ),
-    );
-  }
-
-  Future<bool?> _confirmBrixSend(
-    Map<String, dynamic> prepared,
-    double? bitcoinPrice,
-  ) {
-    final totalSats = (prepared['totalSats'] as num).toInt();
-    final brixFeeSats = (prepared['brixFeeSats'] as num).toInt();
-    final networkFeeSats = (prepared['networkFeeSats'] as num).toInt() +
-        ((prepared['feeNetworkReserveSats'] as num?)?.toInt() ?? 0);
-    final receiverSats = (prepared['receiverSats'] as num).toInt();
-    final totalFees = brixFeeSats + networkFeeSats;
-    final feePercent = totalSats > 0 ? totalFees / totalSats * 100 : 0.0;
-    final fiat = bitcoinPrice != null && bitcoinPrice > 0
-        ? ' (≈ $_fiatSymbol ${(totalFees * bitcoinPrice / 100000000).toStringAsFixed(2)})'
-        : '';
-    return showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Confirmar envio BRIX',
-            style: TextStyle(color: Colors.white)),
-        content: Text(
-          'Débito total: $totalSats sats\n'
-          'Destinatário recebe: $receiverSats sats\n'
-          'Taxa: ${feePercent.toStringAsFixed(1)}% · $totalFees sats$fiat\n'
-          '(BRIX: $brixFeeSats · rede: $networkFeeSats)',
-          style: const TextStyle(color: Colors.white70, height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancelar'),
-          ),
-          ElevatedButton(
-            onPressed: receiverSats > 0
-                ? () => Navigator.pop(dialogContext, true)
-                : null,
-            child: const Text('Confirmar'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<bool?> _confirmInvoiceSend({
-    required int amountSats,
-    required int networkFeeSats,
-    required double? bitcoinPrice,
-  }) {
-    final total = amountSats + networkFeeSats;
-    final fiat = bitcoinPrice != null && bitcoinPrice > 0
-        ? ' (≈ $_fiatSymbol ${(networkFeeSats * bitcoinPrice / 100000000).toStringAsFixed(2)})'
-        : '';
-    return showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF1A1A1A),
-        title: const Text('Confirmar pagamento',
-            style: TextStyle(color: Colors.white)),
-        content: Text(
-          'Destinatário recebe: $amountSats sats\n'
-          'Taxa de rede: $networkFeeSats sats$fiat\n'
-          'Débito total: $total sats',
-          style: const TextStyle(color: Colors.white70, height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Cancelar'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Confirmar'),
-          ),
-        ],
       ),
     );
   }
@@ -2966,8 +2881,6 @@ class _WalletScreenState extends State<WalletScreen> {
                       amountSats:
                           int.tryParse(amountController.text.trim()) ?? 0,
                       bitcoinPrice: bitcoinPrice,
-                      preparedPayment: brixPreparedPayment,
-                      isPreparing: isPreparingBrix,
                     ),
 
                   // Erro
@@ -3101,15 +3014,11 @@ class _WalletScreenState extends State<WalletScreen> {
                                     }
                                     return;
                                   }
-                                  final confirmed = await _confirmBrixSend(
-                                      prepared, bitcoinPrice);
-                                  if (confirmed != true) {
-                                    setModalState(() => isSending = false);
-                                    return;
-                                  }
                                   setModalState(() => isSending = true);
                                   final idempotencyKey =
-                                      'brix-${prepared['paymentHash']}';
+                                      BrixRelayService.brixIdempotencyKey(
+                                          prepared['paymentHash']?.toString() ??
+                                              '');
                                   await BrixRelayService().queueOutgoingPayment(
                                     recipient: invoice,
                                     amountSats: amountSats,
@@ -3225,16 +3134,6 @@ class _WalletScreenState extends State<WalletScreen> {
                                     });
                                     return;
                                   }
-                                  final confirmed = await _confirmInvoiceSend(
-                                    amountSats: amount,
-                                    networkFeeSats: networkFee,
-                                    bitcoinPrice: bitcoinPrice,
-                                  );
-                                  if (confirmed != true) {
-                                    setModalState(() => isSending = false);
-                                    return;
-                                  }
-                                  setModalState(() => isSending = true);
                                 }
 
                                 // Para Lightning Address ou LNURL, resolver para BOLT11 primeiro

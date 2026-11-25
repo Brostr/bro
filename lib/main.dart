@@ -1,6 +1,7 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -90,7 +91,8 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       if (oid.isNotEmpty && amt.isNotEmpty) {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('admin_payment_request_$oid', amt);
-        broLog('[FCM-BG] admin_payment_request gravado: ordem ${oid.substring(0, 8)} $amt sats');
+        broLog(
+            '[FCM-BG] admin_payment_request gravado: ordem ${oid.substring(0, 8)} $amt sats');
       }
     } catch (e) {
       broLog('[FCM-BG] admin_payment_request falhou: $e');
@@ -132,7 +134,8 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       return;
     }
 
-    broLog('[FCM-BG] order_update received — system notification handles display');
+    broLog(
+        '[FCM-BG] order_update received — system notification handles display');
 
     // v553: Marca a chave de dedup como ja exibida pelo sistema. Quando o
     // usuario abrir o app, o sync local detecta a transicao e tenta exibir
@@ -179,9 +182,8 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
       message.data['type'] != 'brix_pending_claim') return;
 
   final isPendingClaim = message.data['type'] == 'brix_pending_claim';
-  final requestId = isPendingClaim
-      ? message.data['payment_id']
-      : message.data['request_id'];
+  final requestId =
+      isPendingClaim ? message.data['payment_id'] : message.data['request_id'];
   final amountStr = message.data['amount_sats'];
   if (requestId == null || amountStr == null) return;
 
@@ -200,10 +202,11 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
     await spark.BreezSdkSparkLib.init();
     final seed = spark.Seed.mnemonic(mnemonic: mnemonic);
-    final network = BreezConfig.useMainnet ? spark.Network.mainnet : spark.Network.regtest;
+    final network =
+        BreezConfig.useMainnet ? spark.Network.mainnet : spark.Network.regtest;
     final config = spark.defaultConfig(network: network).copyWith(
-      apiKey: BreezConfig.apiKey,
-    );
+          apiKey: BreezConfig.apiKey,
+        );
     final appDir = await getApplicationDocumentsDirectory();
     // Use the SAME storageDir as the main isolate — when the background handler
     // runs, the main isolate is stopped (app killed) so there's no SQLite conflict.
@@ -211,73 +214,105 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     // invoice generation fast enough for WoS's ~10s timeout.
     final storageDir = '${appDir.path}/breez_spark_${pubkey.substring(0, 8)}';
 
-    sdk = await spark.connect(
-      request: spark.ConnectRequest(config: config, seed: seed, storageDir: storageDir),
-    ).timeout(const Duration(seconds: 15));
+    sdk = await spark
+        .connect(
+          request: spark.ConnectRequest(
+              config: config, seed: seed, storageDir: storageDir),
+        )
+        .timeout(const Duration(seconds: 15));
 
-    final resp = await sdk.receivePayment(
-      request: spark.ReceivePaymentRequest(
-        paymentMethod: spark.ReceivePaymentMethod.bolt11Invoice(
-          description: 'BRIX Payment',
-          amountSats: BigInt.from(amountSats),
-        ),
-      ),
-    ).timeout(const Duration(seconds: 10));
+    final resp = await sdk
+        .receivePayment(
+          request: spark.ReceivePaymentRequest(
+            paymentMethod: spark.ReceivePaymentMethod.bolt11Invoice(
+              description: 'BRIX Payment',
+              amountSats: BigInt.from(amountSats),
+            ),
+          ),
+        )
+        .timeout(const Duration(seconds: 10));
 
     final bolt11 = resp.paymentRequest;
     final brixService = BrixService();
     final ok = isPendingClaim
         ? await brixService.claimPayment(requestId, bolt11, pubkey)
         : await brixService.submitInvoice(requestId, bolt11, pubkey);
-    broLog('[FCM-BG] ${isPendingClaim ? "Claim" : "Invoice"} ${ok ? "submitted" : "failed"}: $amountSats sats');
+    broLog(
+        '[FCM-BG] ${isPendingClaim ? "Claim" : "Invoice"} ${ok ? "submitted" : "failed"}: $amountSats sats');
 
-    // Show local notification on success so user knows payment is arriving
+    // Show local notification on success so user knows payment is arriving.
+    // The server retries claim pushes with backoff, so the SAME payment can
+    // wake us many times. Use a stable id per payment and a persisted dedupe
+    // flag, otherwise every retry stacks another notification.
     if (ok) {
       try {
+        final prefs = await SharedPreferences.getInstance();
+        final shownKey = 'brix_notified_$requestId';
+        if (prefs.getBool(shownKey) != true) {
+          await prefs.setBool(shownKey, true);
+          final plugin = FlutterLocalNotificationsPlugin();
+          const androidSettings =
+              AndroidInitializationSettings('@mipmap/ic_launcher');
+          const settings = InitializationSettings(
+              android: androidSettings, iOS: DarwinInitializationSettings());
+          await plugin.initialize(settings);
+          // ID fixo do canal: um recebimento BRIX substitui o anterior em vez
+          // de empilhar. O servidor pode mandar brix_invoice_request E
+          // brix_pending_claim para o MESMO pagamento (ids diferentes), então
+          // um id por request gerava duas notificações.
+          await plugin.show(
+            8801,
+            'Pagamento BRIX recebido!',
+            'Recebendo $amountSats sats na sua carteira',
+            const NotificationDetails(
+              android: AndroidNotificationDetails(
+                'brix_payments',
+                'BRIX Payments',
+                importance: Importance.high,
+                priority: Priority.high,
+              ),
+              iOS: DarwinNotificationDetails(),
+            ),
+          );
+        }
+      } catch (_) {}
+    }
+  } catch (e) {
+    broLog('[FCM-BG] Error generating invoice in background: $e');
+    // Show notification so user knows to open the app. Same dedupe rule: the
+    // server retries this push, so one notification per payment is enough.
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final shownKey = 'brix_notified_fail_$requestId';
+      if (prefs.getBool(shownKey) != true) {
+        await prefs.setBool(shownKey, true);
         final plugin = FlutterLocalNotificationsPlugin();
-        const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
-        const settings = InitializationSettings(android: androidSettings, iOS: DarwinInitializationSettings());
+        const androidSettings =
+            AndroidInitializationSettings('@mipmap/ic_launcher');
+        const iosSettings = DarwinInitializationSettings();
+        const settings =
+            InitializationSettings(android: androidSettings, iOS: iosSettings);
         await plugin.initialize(settings);
         await plugin.show(
-          DateTime.now().millisecondsSinceEpoch % 2147483647,
-          'Pagamento BRIX recebido!',
-          'Recebendo $amountSats sats na sua carteira',
+          8801,
+          'Pagamento BRIX recebendo...',
+          'Abra o app para receber $amountSats sats',
           const NotificationDetails(
             android: AndroidNotificationDetails(
-              'brix_payments', 'BRIX Payments',
+              'brix_payments',
+              'BRIX Payments',
               importance: Importance.high,
               priority: Priority.high,
             ),
             iOS: DarwinNotificationDetails(),
           ),
         );
-      } catch (_) {}
-    }
-  } catch (e) {
-    broLog('[FCM-BG] Error generating invoice in background: $e');
-    // Show notification so user knows to open the app
-    try {
-      final plugin = FlutterLocalNotificationsPlugin();
-      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
-      const iosSettings = DarwinInitializationSettings();
-      const settings = InitializationSettings(android: androidSettings, iOS: iosSettings);
-      await plugin.initialize(settings);
-      await plugin.show(
-        9999,
-        'Pagamento BRIX recebendo...',
-        'Abra o app para receber $amountSats sats',
-        const NotificationDetails(
-          android: AndroidNotificationDetails(
-            'brix_payments', 'BRIX Payments',
-            importance: Importance.high,
-            priority: Priority.high,
-          ),
-          iOS: DarwinNotificationDetails(),
-        ),
-      );
+      }
     } catch (_) {}
   } finally {
-    try { await sdk?.disconnect(); } catch (_) {}
+    try {
+      await sdk?.disconnect();
+    } catch (_) {}
   }
 }
 
@@ -319,12 +354,16 @@ void main() async {
         await Future.delayed(const Duration(seconds: 5));
         apnsToken = await messaging.getAPNSToken();
       }
-      broLog('[FCM] iOS APNS: ${apnsToken != null ? "ready" : "STILL NULL — push may fail"}');
-      PushDiag.log('main: APNS=${apnsToken != null ? "ready(${apnsToken.length})" : "NULL"}');
+      broLog(
+          '[FCM] iOS APNS: ${apnsToken != null ? "ready" : "STILL NULL — push may fail"}');
+      PushDiag.log(
+          'main: APNS=${apnsToken != null ? "ready(${apnsToken.length})" : "NULL"}');
     }
     fcmToken = await messaging.getToken();
-    broLog('[FCM] Push token: ${fcmToken != null ? "present (${fcmToken!.length} chars)" : "NULL"}');
-    PushDiag.log('main: FCM token=${fcmToken != null ? "ok(${fcmToken.length})" : "NULL"}');
+    broLog(
+        '[FCM] Push token: ${fcmToken != null ? "present (${fcmToken!.length} chars)" : "NULL"}');
+    PushDiag.log(
+        'main: FCM token=${fcmToken != null ? "ok(${fcmToken.length})" : "NULL"}');
   } catch (e) {
     broLog('[FCM] Firebase init failed (push disabled): $e');
     PushDiag.log('main: Firebase init FAILED: $e');
@@ -335,7 +374,7 @@ void main() async {
 
   // Inicializar cache
   await CacheService().init();
-  
+
   // Inicializar PlatformFeeService (carrega ordens já pagas do storage)
   await PlatformFeeService.initialize();
 
@@ -361,18 +400,20 @@ void main() async {
     if (existingKey != null && existingKey.isNotEmpty) {
       await storage.markLoggedIn();
       isLoggedIn = true;
-      broLog('🔑 v721: sessão auto-recuperada (flag ausente, chave presente no secure storage)');
+      broLog(
+          '🔑 v721: sessão auto-recuperada (flag ausente, chave presente no secure storage)');
     }
   }
-  
+
   // Obter pubkey para o OrderProvider (antes de restaurar chaves)
   String? userPubkey;
-  
+
   // Se já está logado, restaurar chaves Nostr
   if (isLoggedIn) {
     await _restoreNostrKeys(storage);
     userPubkey = await storage.getNostrPublicKey();
-    broLog('📦 Pubkey para OrderProvider: ${userPubkey?.substring(0, 16) ?? "null"}...');
+    broLog(
+        '📦 Pubkey para OrderProvider: ${userPubkey?.substring(0, 16) ?? "null"}...');
 
     // Register FCM token with BRIX server for offline push notifications
     if (fcmToken != null && userPubkey != null) {
@@ -403,16 +444,20 @@ void main() async {
         // false. O backend (v544) preserva o flag existente quando o campo
         // e omitido — assim o provider mode so liga via tier_deposit ou
         // provider_orders_screen, nunca "desliga" sozinho aqui.
-        final isProvider = await SecureStorageService.isProviderMode(userPubkey: pubkey);
+        final isProvider =
+            await SecureStorageService.isProviderMode(userPubkey: pubkey);
         final ok = isProvider
             ? await ApiService().registerPushToken(token, providerEnabled: true)
             : await ApiService().registerPushToken(token);
-        PushDiag.log('main: backend register=$ok provider=$isProvider${isProvider ? '' : '(omitido)'}');
+        PushDiag.log(
+            'main: backend register=$ok provider=$isProvider${isProvider ? '' : '(omitido)'}');
         return ok;
       });
     } else {
-      broLog('[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
-      PushDiag.log('main: SKIP register (fcm=${fcmToken != null} pk=${userPubkey != null})');
+      broLog(
+          '[FCM] ⚠️ CANNOT register push: fcmToken=${fcmToken != null ? "present" : "NULL"} pubkey=${userPubkey != null ? "present" : "NULL"}');
+      PushDiag.log(
+          'main: SKIP register (fcm=${fcmToken != null} pk=${userPubkey != null})');
     }
 
     // Re-register when Firebase rotates the FCM token
@@ -423,7 +468,8 @@ void main() async {
       if (userPubkey != null) {
         try {
           await BrixService().initCredentials();
-          final brixOk = await BrixService().registerPushToken(newToken, userPubkey!);
+          final brixOk =
+              await BrixService().registerPushToken(newToken, userPubkey!);
           broLog('[FCM] BRIX push token re-registered after refresh: $brixOk');
         } catch (e) {
           broLog('[FCM] BRIX re-registration failed: $e');
@@ -433,11 +479,14 @@ void main() async {
           // re-registration omitted providerEnabled, and if the backend had
           // never received the flag (startup race), the rotated token stayed
           // non-provider → provider stopped getting 'Nova ordem' broadcasts.
-          final isProv = await SecureStorageService.isProviderMode(userPubkey: userPubkey);
+          final isProv =
+              await SecureStorageService.isProviderMode(userPubkey: userPubkey);
           final backendOk = isProv
-              ? await ApiService().registerPushToken(newToken, providerEnabled: true)
+              ? await ApiService()
+                  .registerPushToken(newToken, providerEnabled: true)
               : await ApiService().registerPushToken(newToken);
-          broLog('[FCM] Backend push token re-registered after refresh: $backendOk (provider=$isProv)');
+          broLog(
+              '[FCM] Backend push token re-registered after refresh: $backendOk (provider=$isProv)');
         } catch (e) {
           broLog('[FCM] Backend re-registration failed: $e');
         }
@@ -560,7 +609,8 @@ void main() async {
   }
 
   // Verificar se já viu onboarding
-  final hasSeenOnboarding = await storage.getData('has_seen_onboarding') == 'true';
+  final hasSeenOnboarding =
+      await storage.getData('has_seen_onboarding') == 'true';
 
   // Inicializar LocaleProvider (idioma salvo ou auto-detectar)
   final localeProvider = LocaleProvider();
@@ -568,11 +618,16 @@ void main() async {
 
   // Breez SDK sera inicializado no provider (lazy initialization)
 
-  runApp(BroApp(isLoggedIn: isLoggedIn, userPubkey: userPubkey, hasSeenOnboarding: hasSeenOnboarding, localeProvider: localeProvider));
+  runApp(BroApp(
+      isLoggedIn: isLoggedIn,
+      userPubkey: userPubkey,
+      hasSeenOnboarding: hasSeenOnboarding,
+      localeProvider: localeProvider));
 }
 
 /// Retry an async action with exponential backoff (fire-and-forget safe)
-Future<bool> _retryAsync(String label, Future<bool> Function() action, {int maxRetries = 3}) async {
+Future<bool> _retryAsync(String label, Future<bool> Function() action,
+    {int maxRetries = 3}) async {
   for (int attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       final ok = await action().timeout(const Duration(seconds: 10));
@@ -596,7 +651,8 @@ Future<void> _restoreNostrKeys(StorageService storage) async {
       final nostrService = NostrService();
       final publicKey = nostrService.getPublicKey(privateKey);
       nostrService.setKeys(privateKey, publicKey);
-      broLog('🔑 Chaves Nostr restauradas na inicialização: ${publicKey.substring(0, 16)}...');
+      broLog(
+          '🔑 Chaves Nostr restauradas na inicialização: ${publicKey.substring(0, 16)}...');
     } else {
       broLog('⚠️ Nenhuma chave Nostr salva para restaurar');
     }
@@ -606,7 +662,8 @@ Future<void> _restoreNostrKeys(StorageService storage) async {
 }
 
 /// Agendar reconciliacao automatica quando o SDK estiver pronto
-void _scheduleReconciliationOnStartup(BreezProvider breezProvider, OrderProvider orderProvider) {
+void _scheduleReconciliationOnStartup(
+    BreezProvider breezProvider, OrderProvider orderProvider) {
   // Tentar reconciliacao inicial apos 5 segundos
   Future.delayed(const Duration(seconds: 5), () async {
     await _tryReconciliation(breezProvider, orderProvider);
@@ -621,7 +678,8 @@ void _scheduleReconciliationOnStartup(BreezProvider breezProvider, OrderProvider
 }
 
 /// Tentar reconciliacao completa com pagamentos do Breez
-Future<void> _tryReconciliation(BreezProvider breezProvider, OrderProvider orderProvider) async {
+Future<void> _tryReconciliation(
+    BreezProvider breezProvider, OrderProvider orderProvider) async {
   if (!breezProvider.isInitialized) {
     broLog('SDK ainda nao inicializado, reconciliacao adiada');
     return;
@@ -629,25 +687,26 @@ Future<void> _tryReconciliation(BreezProvider breezProvider, OrderProvider order
 
   try {
     broLog('🔄 Iniciando reconciliação automática na inicialização...');
-    
+
     // Buscar TODOS os pagamentos (recebidos e enviados)
     final payments = await breezProvider.getAllPayments();
-    
+
     if (payments.isEmpty) {
       broLog('📭 Nenhum pagamento na carteira para reconciliar');
       return;
     }
-    
+
     broLog('💰 ${payments.length} pagamentos encontrados, reconciliando...');
-    
+
     // Usar o novo método completo de reconciliação
     final result = await orderProvider.autoReconcileWithBreezPayments(payments);
-    
+
     final pendingReconciled = result['pendingReconciled'] ?? 0;
     final completedReconciled = result['completedReconciled'] ?? 0;
-    
+
     if (pendingReconciled > 0 || completedReconciled > 0) {
-      broLog('🎉 Reconciliação na inicialização: $pendingReconciled pending→paid, $completedReconciled awaiting→completed');
+      broLog(
+          '🎉 Reconciliação na inicialização: $pendingReconciled pending→paid, $completedReconciled awaiting→completed');
     } else {
       broLog('✅ Nenhuma ordem precisou ser reconciliada na inicialização');
     }
@@ -662,7 +721,13 @@ class BroApp extends StatelessWidget {
   final bool hasSeenOnboarding;
   final LocaleProvider localeProvider;
 
-  const BroApp({Key? key, required this.isLoggedIn, this.userPubkey, required this.hasSeenOnboarding, required this.localeProvider}) : super(key: key);
+  const BroApp(
+      {Key? key,
+      required this.isLoggedIn,
+      this.userPubkey,
+      required this.hasSeenOnboarding,
+      required this.localeProvider})
+      : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -724,7 +789,8 @@ class BroApp extends StatelessWidget {
               }
               final List<Map<String, dynamic>> history;
               try {
-                history = await breezProvider.listPayments()
+                history = await breezProvider
+                    .listPayments()
                     .timeout(const Duration(seconds: 15));
               } catch (_) {
                 return null;
@@ -750,9 +816,11 @@ class BroApp extends StatelessWidget {
           // v677: recuperar ordem cujo pagamento confirmou COM O APP FECHADO
           // (ex.: usuária saiu pra atender ligação no meio do pagamento).
           // Se a carteira ainda não subiu, o checker falha e tenta no próximo start.
-          unawaited(orderProvider.recoverPendingOrderIntent(
-            (String h) => breezProvider.checkPaymentStatus(h),
-          ).catchError((e) => broLog('[Recover] erro: $e')));
+          unawaited(orderProvider
+              .recoverPendingOrderIntent(
+                (String h) => breezProvider.checkPaymentStatus(h),
+              )
+              .catchError((e) => broLog('[Recover] erro: $e')));
 
           // v441: Connect real-time order subscription to trigger sync
           OrderRealtimeService().onOrderEvent = () {
@@ -771,7 +839,8 @@ class BroApp extends StatelessWidget {
 
           // v552: Connect FCM order_update push -> mark order as syncing
           // so UI can show spinner/placeholder while the relay catches up.
-          OrderRealtimeService().onOrderPush = (String orderId, String subtype) {
+          OrderRealtimeService().onOrderPush =
+              (String orderId, String subtype) {
             final expected = OrderProvider.expectedStatusForSubtype(subtype);
             if (expected != null) {
               orderProvider.markSyncing(orderId, expected);
@@ -794,24 +863,29 @@ class BroApp extends StatelessWidget {
             // relays. Sync imediato pra baixar/decifrar o comprovante na hora
             // em vez de esperar o próximo ciclo (~25s com relay engasgado).
             if (subtype == 'proof_ready') {
-              broLog('[RT] proof_ready push — sync imediato (comprovante pronto)');
+              broLog(
+                  '[RT] proof_ready push — sync imediato (comprovante pronto)');
               orderProvider.syncOrdersFromNostr(force: true);
             }
           };
-          
+
           // Callback para pagamentos RECEBIDOS (menos comum no fluxo atual)
-          breezProvider.onPaymentReceived = (String paymentId, int amountSats, String? paymentHash) {
-            broLog('🔔 CALLBACK MAIN: Pagamento recebido! Reconciliando automaticamente...');
+          breezProvider.onPaymentReceived =
+              (String paymentId, int amountSats, String? paymentHash) {
+            broLog(
+                '🔔 CALLBACK MAIN: Pagamento recebido! Reconciliando automaticamente...');
             orderProvider.onPaymentReceived(
               paymentId: paymentId,
               amountSats: amountSats,
               paymentHash: paymentHash,
             );
           };
-          
+
           // Callback para pagamentos ENVIADOS (quando usuário libera BTC para o Bro)
-          breezProvider.onPaymentSent = (String paymentId, int amountSats, String? paymentHash) {
-            broLog('🔔 CALLBACK MAIN: Pagamento ENVIADO! Marcando ordem como completed...');
+          breezProvider.onPaymentSent =
+              (String paymentId, int amountSats, String? paymentHash) {
+            broLog(
+                '🔔 CALLBACK MAIN: Pagamento ENVIADO! Marcando ordem como completed...');
             orderProvider.onPaymentSent(
               paymentId: paymentId,
               amountSats: amountSats,
@@ -821,19 +895,21 @@ class BroApp extends StatelessWidget {
 
           // v132: Callback para auto-pagamento de ordens liquidadas
           orderProvider.onAutoPayLiquidation = (String orderId, order) async {
-            broLog('⚡ [AutoPay-Main] Auto-pagamento para ordem ${orderId.substring(0, 8)}');
+            broLog(
+                '⚡ [AutoPay-Main] Auto-pagamento para ordem ${orderId.substring(0, 8)}');
 
             // 🛡️ v634 ANTI GASTO-DUPLO: se o provedor JÁ foi pago (via confirmação
             // manual ou auto-pagamento anterior), NÃO pagar de novo. Mesmo invoice.
             if (ProviderPaymentGuard.isPaid(orderId)) {
-              broLog('🛡️ [AutoPay-Main] Ordem ${orderId.substring(0, 8)} já teve o provedor PAGO — pulando (anti double-spend)');
+              broLog(
+                  '🛡️ [AutoPay-Main] Ordem ${orderId.substring(0, 8)} já teve o provedor PAGO — pulando (anti double-spend)');
               return true;
             }
 
             // Buscar providerInvoice do metadata ou Nostr
             String? providerInvoice;
             providerInvoice = order.metadata?['providerInvoice'] as String?;
-            
+
             if (providerInvoice == null || providerInvoice.isEmpty) {
               try {
                 final nostrService = NostrOrderService();
@@ -841,7 +917,9 @@ class BroApp extends StatelessWidget {
                 // comprador — um invoice_refresh self (providerId corrompido)
                 // entrava como candidato e o autopay podia pagar a própria
                 // carteira (mesma classe do v768 na tela de confirmação).
-                final completeData = await nostrService.fetchOrderCompleteEvent(orderId, excludeAuthorPubkey: order.userPubkey);
+                final completeData = await nostrService.fetchOrderCompleteEvent(
+                    orderId,
+                    excludeAuthorPubkey: order.userPubkey);
                 if (completeData != null) {
                   providerInvoice = completeData['providerInvoice'] as String?;
                 }
@@ -849,48 +927,57 @@ class BroApp extends StatelessWidget {
                 broLog('⚠️ [AutoPay-Main] Erro ao buscar invoice do Nostr: $e');
               }
             }
-            
+
             if (providerInvoice == null || providerInvoice.isEmpty) {
-              broLog('❌ [AutoPay-Main] Sem providerInvoice para ${orderId.substring(0, 8)}');
+              broLog(
+                  '❌ [AutoPay-Main] Sem providerInvoice para ${orderId.substring(0, 8)}');
               return false;
             }
-            
+
             // v723: REGRA DA PROVA DE POSSE também no autopay. Antes o guarda
             // usava fetchOrderCompleteEvent que PREFERE invoice_refresh — o
             // refresh do canônico passava no guarda (completer==rastreado) e o
             // canônico era PAGO sem ter trabalhado (caso 58ebf198: 64 sats
             // pro iPhone da Carol; quem pagou o Pix foi 95a800b7).
             try {
-              final proof = await NostrOrderService().fetchProofWithInvoice(orderId)
+              final proof = await NostrOrderService()
+                  .fetchProofWithInvoice(orderId)
                   .timeout(const Duration(seconds: 12), onTimeout: () => null);
               if (proof != null) {
-                              // v781 (H1): 2+ participantes provaram pagamento pra mesma
-                              // ordem (provas conflitantes). Pagamento AUTOMATICO fica
-                              // proibido - paga-se so apos decisao humana na mediacao.
-                              // Sem esse gate, o autopay escolhe a mais nova e o provedor
-                              // da prova anterior perde o dinheiro silenciosamente.
-                              final conflict = proof['conflict'] as String?;
-                              if (conflict != null && conflict.isNotEmpty) {
-                                broLog('v781-H1 [AutoPay-Main]: PROVAS CONFLITANTES ($conflict) - NAO pagando automaticamente. Encaminhar para mediacao (decisao da dona).');
-                                return false;
-                              }
-                              final proofSender = proof['senderPubkey']!;
-                              final accepts = await NostrOrderService().fetchAllAcceptsForOrder(orderId)
-                    .timeout(const Duration(seconds: 8), onTimeout: () => <String>[]);
+                // v781 (H1): 2+ participantes provaram pagamento pra mesma
+                // ordem (provas conflitantes). Pagamento AUTOMATICO fica
+                // proibido - paga-se so apos decisao humana na mediacao.
+                // Sem esse gate, o autopay escolhe a mais nova e o provedor
+                // da prova anterior perde o dinheiro silenciosamente.
+                final conflict = proof['conflict'] as String?;
+                if (conflict != null && conflict.isNotEmpty) {
+                  broLog(
+                      'v781-H1 [AutoPay-Main]: PROVAS CONFLITANTES ($conflict) - NAO pagando automaticamente. Encaminhar para mediacao (decisao da dona).');
+                  return false;
+                }
+                final proofSender = proof['senderPubkey']!;
+                final accepts = await NostrOrderService()
+                    .fetchAllAcceptsForOrder(orderId)
+                    .timeout(const Duration(seconds: 8),
+                        onTimeout: () => <String>[]);
                 if (accepts.isEmpty) {
-                  broLog('🛡️ [AutoPay-Main] aceites não verificáveis — NÃO pagando (fail-closed)');
+                  broLog(
+                      '🛡️ [AutoPay-Main] aceites não verificáveis — NÃO pagando (fail-closed)');
                   return false;
                 }
                 if (!accepts.contains(proofSender)) {
-                  broLog('🚨 [AutoPay-Main] prova de ${proofSender.substring(0, 8)} que NÃO participou da corrida — NÃO pagando');
+                  broLog(
+                      '🚨 [AutoPay-Main] prova de ${proofSender.substring(0, 8)} que NÃO participou da corrida — NÃO pagando');
                   return false;
                 }
                 final proofInv = proof['providerInvoice'];
                 if (proofInv != null && proofInv.isNotEmpty) {
                   providerInvoice = proofInv; // paga a invoice de QUEM PROVOU
-                  broLog('🏁 [AutoPay-Main] pagando invoice de quem comprovou: ${proofSender.substring(0, 8)}');
+                  broLog(
+                      '🏁 [AutoPay-Main] pagando invoice de quem comprovou: ${proofSender.substring(0, 8)}');
                 } else {
-                  broLog('⏳ [AutoPay-Main] prova sem invoice — aguardando invoice de ${proofSender.substring(0, 8)}');
+                  broLog(
+                      '⏳ [AutoPay-Main] prova sem invoice — aguardando invoice de ${proofSender.substring(0, 8)}');
                   return false;
                 }
               } else {
@@ -899,7 +986,8 @@ class BroApp extends StatelessWidget {
                 // invoice_refresh — foi assim que o canônico recebeu 64 sats
                 // sem ninguém ter pago o Pix (43b789c7, 06/11). Se um dia
                 // aparecer prova, o próximo sync paga certinho.
-                broLog('🛡️ [AutoPay-Main] sem comprovante no relay — NÃO pagando (v727). Aguardando prova.');
+                broLog(
+                    '🛡️ [AutoPay-Main] sem comprovante no relay — NÃO pagando (v727). Aguardando prova.');
                 return false;
               }
             } catch (e) {
@@ -908,24 +996,28 @@ class BroApp extends StatelessWidget {
               // possivelmente poluída por refresh self-assinado). Exceção no
               // guarda (relay instável no meio do fetch, parse quebrado) NÃO
               // autoriza pagar — próximo sync tenta de novo com dados frescos.
-              broLog('🚨 [AutoPay-Main] guarda de corrida EXCEÇÃO — NÃO pagando neste ciclo (fail-closed): $e');
+              broLog(
+                  '🚨 [AutoPay-Main] guarda de corrida EXCEÇÃO — NÃO pagando neste ciclo (fail-closed): $e');
               return false;
             }
 
             // v449: Validar invoice amount antes de pagar (segurança contra invoice inflado)
             final baseSats = (order.btcAmount * 100000000).round();
-            final expectedWithFee = baseSats + (baseSats * AppConfig.providerFeePercent).round();
+            final expectedWithFee =
+                baseSats + (baseSats * AppConfig.providerFeePercent).round();
             final maxAllowed = (expectedWithFee * 1.03).ceil();
             final minAllowed = (expectedWithFee * 0.97).floor();
             try {
               if (breezProvider.isInitialized) {
-                final decoded = await breezProvider.decodeInvoice(providerInvoice!);
+                final decoded =
+                    await breezProvider.decodeInvoice(providerInvoice!);
                 // vSEC: decode FALHOU (null ou success=false) → BLOQUEAR.
                 // Antes, o `if (decoded != null && success == true)` deixava
                 // o fluxo SEGUIR E PAGAR sem validar valor/expiração quando o
                 // decode falhava — pagamento às cegas de invoice não validado.
                 if (decoded == null || decoded['success'] != true) {
-                  broLog('🚨 [AutoPay-Main] BLOQUEADO: falha ao decodificar invoice (${decoded?['error'] ?? 'null'}) — não pagar sem validar. Retry no próximo invoice fresco.');
+                  broLog(
+                      '🚨 [AutoPay-Main] BLOQUEADO: falha ao decodificar invoice (${decoded?['error'] ?? 'null'}) — não pagar sem validar. Retry no próximo invoice fresco.');
                   return false;
                 }
                 {
@@ -934,22 +1026,34 @@ class BroApp extends StatelessWidget {
                   // (notificação chata que aparecia toda madrugada). Se expirou,
                   // pulamos silenciosamente; o provedor renova o invoice a cada
                   // 30min e o pagamento acontece assim que chega um fresco.
-                  final tsSecs = int.tryParse(decoded['invoice']?['timestamp']?.toString() ?? '0') ?? 0;
-                  final expSecs = int.tryParse(decoded['invoice']?['expiry']?.toString() ?? '0') ?? 0;
+                  final tsSecs = int.tryParse(
+                          decoded['invoice']?['timestamp']?.toString() ??
+                              '0') ??
+                      0;
+                  final expSecs = int.tryParse(
+                          decoded['invoice']?['expiry']?.toString() ?? '0') ??
+                      0;
                   if (tsSecs > 0 && expSecs > 0) {
-                    final expiresAt = DateTime.fromMillisecondsSinceEpoch((tsSecs + expSecs) * 1000);
+                    final expiresAt = DateTime.fromMillisecondsSinceEpoch(
+                        (tsSecs + expSecs) * 1000);
                     if (DateTime.now().isAfter(expiresAt)) {
-                      broLog('⏳ [AutoPay-Main] Invoice EXPIRADO em $expiresAt — pulando sem tentar pagar (aguardando invoice fresco do provedor).');
+                      broLog(
+                          '⏳ [AutoPay-Main] Invoice EXPIRADO em $expiresAt — pulando sem tentar pagar (aguardando invoice fresco do provedor).');
                       return false;
                     }
                   }
-                  final invoiceSats = int.tryParse(decoded['invoice']?['amountSats']?.toString() ?? '0') ?? 0;
+                  final invoiceSats = int.tryParse(
+                          decoded['invoice']?['amountSats']?.toString() ??
+                              '0') ??
+                      0;
                   if (invoiceSats <= 0) {
-                    broLog('🚨 [AutoPay-Main] BLOQUEADO: invoice com 0 sats! Aguardando invoice válido.');
+                    broLog(
+                        '🚨 [AutoPay-Main] BLOQUEADO: invoice com 0 sats! Aguardando invoice válido.');
                     return false;
                   }
                   if (invoiceSats > maxAllowed) {
-                    broLog('🚨 [AutoPay-Main] BLOQUEADO: invoice inflado! $invoiceSats > $maxAllowed (esperado ~$expectedWithFee). Aguardando novo invoice do provedor.');
+                    broLog(
+                        '🚨 [AutoPay-Main] BLOQUEADO: invoice inflado! $invoiceSats > $maxAllowed (esperado ~$expectedWithFee). Aguardando novo invoice do provedor.');
                     return false;
                   }
                   // v621: NÃO adiar mais invoices ABAIXO do esperado. O invoice é
@@ -960,29 +1064,32 @@ class BroApp extends StatelessWidget {
                   // (bug de taxa composta) → esperado inflado rejeitava o invoice correto
                   // base+3%. Mantemos só o teto anti-inflação (maxAllowed) e o >0.
                   if (invoiceSats < minAllowed) {
-                    broLog('⚠️ [AutoPay-Main] Invoice abaixo do esperado ($invoiceSats < $minAllowed) — pagando mesmo assim (valor autorizado pelo provedor, sem risco p/ comprador).');
+                    broLog(
+                        '⚠️ [AutoPay-Main] Invoice abaixo do esperado ($invoiceSats < $minAllowed) — pagando mesmo assim (valor autorizado pelo provedor, sem risco p/ comprador).');
                   } else {
-                    broLog('✅ [AutoPay-Main] Invoice validado: $invoiceSats sats (esperado ~$expectedWithFee, range $minAllowed-$maxAllowed)');
+                    broLog(
+                        '✅ [AutoPay-Main] Invoice validado: $invoiceSats sats (esperado ~$expectedWithFee, range $minAllowed-$maxAllowed)');
                   }
                 }
               }
             } catch (e) {
-              broLog('🚨 [AutoPay-Main] Erro ao decodificar invoice — bloqueando por segurança: $e');
+              broLog(
+                  '🚨 [AutoPay-Main] Erro ao decodificar invoice — bloqueando por segurança: $e');
               return false;
             }
-            
+
             // Tentar pagar via Spark ou Liquid (3 tentativas)
             for (int attempt = 1; attempt <= 3; attempt++) {
               try {
                 Map<String, dynamic>? payResult;
-                
+
                 if (breezProvider.isInitialized) {
                   payResult = await breezProvider.payInvoice(providerInvoice!);
                 } else {
                   broLog('⚠️ [AutoPay-Main] Nenhuma carteira inicializada');
                   return false;
                 }
-                
+
                 if (payResult != null && payResult['success'] == true) {
                   broLog('✅ [AutoPay-Main] Pagamento OK na tentativa $attempt');
                   // 🛡️ v634: travar a ordem de forma persistente (anti gasto-duplo)
@@ -994,30 +1101,36 @@ class BroApp extends StatelessWidget {
                   // curto. Derivar da base garante comprador paga exatamente base+5%
                   // (provider base+3% + plataforma 2%), com a plataforma absorvendo roteamento.
                   final amountSats = (order.btcAmount * 100000000).round();
-                  if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                  if (AppConfig.isPlatformLightningAddressValid &&
+                      amountSats > 0) {
                     await PlatformFeeService.sendPlatformFee(
                       orderId: orderId,
                       totalSats: amountSats,
-                      knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                      knownFeeHash:
+                          order.metadata?['feePaymentHash'] as String?,
                     );
                   }
                   // v823a: atestar a entrega no relay (preimage = prova
                   // verificável por qualquer um: sha256 == payment_hash)
                   final preAuto = payResult['payment']?['preimage'] as String?;
                   if (preAuto != null && preAuto.isNotEmpty) {
-                    orderProvider.updateOrderMetadataLocal(orderId, {'paymentPreimage': preAuto});
-                    unawaited(orderProvider.updateOrderStatus(
-                      orderId: orderId,
-                      status: 'completed',
-                      providerId: order.providerId,
-                      paymentProof: preAuto,
-                    ).catchError((_) => false));
+                    orderProvider.updateOrderMetadataLocal(
+                        orderId, {'paymentPreimage': preAuto});
+                    unawaited(orderProvider
+                        .updateOrderStatus(
+                          orderId: orderId,
+                          status: 'completed',
+                          providerId: order.providerId,
+                          paymentProof: preAuto,
+                        )
+                        .catchError((_) => false));
                   }
                   return true;
                 }
-                
+
                 // v515: Detect AlreadyExists → invoice was already paid, treat as success
-                final payError = payResult?['error']?.toString().toLowerCase() ?? '';
+                final payError =
+                    payResult?['error']?.toString().toLowerCase() ?? '';
                 if (payError.contains('alreadyexists') ||
                     payError.contains('already paid') ||
                     payError.contains('already settled') ||
@@ -1026,14 +1139,17 @@ class BroApp extends StatelessWidget {
                   // envio LIQUIDADO (falso-positivo de pendente-pra-sempre).
                   final evAuto = await verifySettledProviderPayment(orderId);
                   if (evAuto == true) {
-                    broLog('✅ [AutoPay-Main] Invoice já pago E liquidado (verificado)');
+                    broLog(
+                        '✅ [AutoPay-Main] Invoice já pago E liquidado (verificado)');
                     await ProviderPaymentGuard.markPaid(orderId);
                     final amountSats = (order.btcAmount * 100000000).round();
-                    if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                    if (AppConfig.isPlatformLightningAddressValid &&
+                        amountSats > 0) {
                       await PlatformFeeService.sendPlatformFee(
                         orderId: orderId,
                         totalSats: amountSats,
-                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                        knownFeeHash:
+                            order.metadata?['feePaymentHash'] as String?,
                       );
                     }
                     return true;
@@ -1041,11 +1157,13 @@ class BroApp extends StatelessWidget {
                   if (evAuto == false) {
                     await ProviderPaymentGuard.clearPaid(orderId);
                   }
-                  broLog('⚠️ [AutoPay-Main] "já pago" sem evidência liquidada — próximo sync re-verifica');
+                  broLog(
+                      '⚠️ [AutoPay-Main] "já pago" sem evidência liquidada — próximo sync re-verifica');
                   return false;
                 }
-                
-                broLog('⚠️ [AutoPay-Main] Tentativa $attempt falhou: ${payResult?['error']}');
+
+                broLog(
+                    '⚠️ [AutoPay-Main] Tentativa $attempt falhou: ${payResult?['error']}');
               } catch (e) {
                 final errStr = e.toString().toLowerCase();
                 if (errStr.contains('alreadyexists') ||
@@ -1054,14 +1172,17 @@ class BroApp extends StatelessWidget {
                   // v820e: idem no caminho de exceção.
                   final evAuto2 = await verifySettledProviderPayment(orderId);
                   if (evAuto2 == true) {
-                    broLog('✅ [AutoPay-Main] Invoice já pago E liquidado (exception, verificado)');
+                    broLog(
+                        '✅ [AutoPay-Main] Invoice já pago E liquidado (exception, verificado)');
                     await ProviderPaymentGuard.markPaid(orderId);
                     final amountSats = (order.btcAmount * 100000000).round();
-                    if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                    if (AppConfig.isPlatformLightningAddressValid &&
+                        amountSats > 0) {
                       await PlatformFeeService.sendPlatformFee(
                         orderId: orderId,
                         totalSats: amountSats,
-                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                        knownFeeHash:
+                            order.metadata?['feePaymentHash'] as String?,
                       );
                     }
                     return true;
@@ -1069,18 +1190,20 @@ class BroApp extends StatelessWidget {
                   if (evAuto2 == false) {
                     await ProviderPaymentGuard.clearPaid(orderId);
                   }
-                  broLog('⚠️ [AutoPay-Main] "já pago" (exception) sem evidência liquidada — próximo sync re-verifica');
+                  broLog(
+                      '⚠️ [AutoPay-Main] "já pago" (exception) sem evidência liquidada — próximo sync re-verifica');
                   return false;
                 }
                 broLog('⚠️ [AutoPay-Main] Tentativa $attempt erro: $e');
               }
-              
+
               if (attempt < 3) {
                 await Future.delayed(const Duration(seconds: 2));
               }
             }
-            
-            broLog('❌ [AutoPay-Main] 3 tentativas falharam para ${orderId.substring(0, 8)}');
+
+            broLog(
+                '❌ [AutoPay-Main] 3 tentativas falharam para ${orderId.substring(0, 8)}');
             return false;
           };
 
@@ -1090,23 +1213,29 @@ class BroApp extends StatelessWidget {
           // (validado em fetchAdminReimbursementInvoice). Aqui ainda validamos
           // valor > 0, não-expirado e um teto de sanidade (defesa contra chave
           // admin comprometida).
-          orderProvider.onAutoPayDisputeReimbursement = (String orderId, order) async {
-            broLog('⚡ [DisputeAutoPay-Main] Reembolso admin para ordem ${orderId.substring(0, 8)}');
+          orderProvider.onAutoPayDisputeReimbursement =
+              (String orderId, order) async {
+            broLog(
+                '⚡ [DisputeAutoPay-Main] Reembolso admin para ordem ${orderId.substring(0, 8)}');
             // 🛡️ v634: o comprador paga NO MÁXIMO uma vez por ordem. Se já pagou
             // (providerInvoice na confirmação/liquidação), NÃO pagar reembolso também.
             if (ProviderPaymentGuard.isPaid(orderId)) {
-              broLog('🛡️ [DisputeAutoPay-Main] Ordem ${orderId.substring(0, 8)} já paga — pulando reembolso (anti double-spend)');
+              broLog(
+                  '🛡️ [DisputeAutoPay-Main] Ordem ${orderId.substring(0, 8)} já paga — pulando reembolso (anti double-spend)');
               return true;
             }
             final nostrService = NostrOrderService();
             String? adminInvoice;
             try {
-              adminInvoice = await nostrService.fetchAdminReimbursementInvoice(orderId);
+              adminInvoice =
+                  await nostrService.fetchAdminReimbursementInvoice(orderId);
             } catch (e) {
-              broLog('⚠️ [DisputeAutoPay-Main] Erro ao buscar invoice de reembolso: $e');
+              broLog(
+                  '⚠️ [DisputeAutoPay-Main] Erro ao buscar invoice de reembolso: $e');
             }
             if (adminInvoice == null || adminInvoice.isEmpty) {
-              broLog('❌ [DisputeAutoPay-Main] Sem invoice de reembolso admin para ${orderId.substring(0, 8)}');
+              broLog(
+                  '❌ [DisputeAutoPay-Main] Sem invoice de reembolso admin para ${orderId.substring(0, 8)}');
               return false;
             }
 
@@ -1115,33 +1244,50 @@ class BroApp extends StatelessWidget {
               if (breezProvider.isInitialized) {
                 final decoded = await breezProvider.decodeInvoice(adminInvoice);
                 if (decoded != null && decoded['success'] == true) {
-                  final tsSecs = int.tryParse(decoded['invoice']?['timestamp']?.toString() ?? '0') ?? 0;
-                  final expSecs = int.tryParse(decoded['invoice']?['expiry']?.toString() ?? '0') ?? 0;
+                  final tsSecs = int.tryParse(
+                          decoded['invoice']?['timestamp']?.toString() ??
+                              '0') ??
+                      0;
+                  final expSecs = int.tryParse(
+                          decoded['invoice']?['expiry']?.toString() ?? '0') ??
+                      0;
                   if (tsSecs > 0 && expSecs > 0) {
-                    final expiresAt = DateTime.fromMillisecondsSinceEpoch((tsSecs + expSecs) * 1000);
+                    final expiresAt = DateTime.fromMillisecondsSinceEpoch(
+                        (tsSecs + expSecs) * 1000);
                     if (DateTime.now().isAfter(expiresAt)) {
-                      broLog('⏳ [DisputeAutoPay-Main] Invoice de reembolso EXPIRADO — pulando (admin renova).');
+                      broLog(
+                          '⏳ [DisputeAutoPay-Main] Invoice de reembolso EXPIRADO — pulando (admin renova).');
                       return false;
                     }
                   }
-                  final invoiceSats = int.tryParse(decoded['invoice']?['amountSats']?.toString() ?? '0') ?? 0;
+                  final invoiceSats = int.tryParse(
+                          decoded['invoice']?['amountSats']?.toString() ??
+                              '0') ??
+                      0;
                   if (invoiceSats <= 0) {
-                    broLog('🚨 [DisputeAutoPay-Main] BLOQUEADO: invoice reembolso 0 sats.');
+                    broLog(
+                        '🚨 [DisputeAutoPay-Main] BLOQUEADO: invoice reembolso 0 sats.');
                     return false;
                   }
                   // Teto de sanidade: reembolso ~ base + taxa; 2x cobre folga de
                   // roteamento. Só o admin assina, mas isto limita dano se a
                   // chave admin vazar.
                   final baseSats = (order.btcAmount * 100000000).round();
-                  final sanityCap = ((baseSats + (baseSats * AppConfig.providerFeePercent).round()) * 2).ceil();
+                  final sanityCap = ((baseSats +
+                              (baseSats * AppConfig.providerFeePercent)
+                                  .round()) *
+                          2)
+                      .ceil();
                   if (sanityCap > 0 && invoiceSats > sanityCap) {
-                    broLog('🚨 [DisputeAutoPay-Main] BLOQUEADO: invoice reembolso inflado! $invoiceSats > $sanityCap');
+                    broLog(
+                        '🚨 [DisputeAutoPay-Main] BLOQUEADO: invoice reembolso inflado! $invoiceSats > $sanityCap');
                     return false;
                   }
                 }
               }
             } catch (e) {
-              broLog('🚨 [DisputeAutoPay-Main] Erro ao decodificar invoice reembolso — bloqueando: $e');
+              broLog(
+                  '🚨 [DisputeAutoPay-Main] Erro ao decodificar invoice reembolso — bloqueando: $e');
               return false;
             }
 
@@ -1151,30 +1297,36 @@ class BroApp extends StatelessWidget {
                 if (breezProvider.isInitialized) {
                   payResult = await breezProvider.payInvoice(adminInvoice);
                 } else {
-                  broLog('⚠️ [DisputeAutoPay-Main] Nenhuma carteira inicializada');
+                  broLog(
+                      '⚠️ [DisputeAutoPay-Main] Nenhuma carteira inicializada');
                   return false;
                 }
                 if (payResult != null && payResult['success'] == true) {
-                  broLog('✅ [DisputeAutoPay-Main] Reembolso pago na tentativa $attempt');
+                  broLog(
+                      '✅ [DisputeAutoPay-Main] Reembolso pago na tentativa $attempt');
                   await ProviderPaymentGuard.markPaid(orderId);
                   return true;
                 }
-                final payError = payResult?['error']?.toString().toLowerCase() ?? '';
+                final payError =
+                    payResult?['error']?.toString().toLowerCase() ?? '';
                 if (payError.contains('alreadyexists') ||
                     payError.contains('already paid') ||
                     payError.contains('already settled') ||
                     payError.contains('preimage request already exists')) {
-                  broLog('✅ [DisputeAutoPay-Main] Invoice já pago (AlreadyExists) — sucesso');
+                  broLog(
+                      '✅ [DisputeAutoPay-Main] Invoice já pago (AlreadyExists) — sucesso');
                   await ProviderPaymentGuard.markPaid(orderId);
                   return true;
                 }
-                broLog('⚠️ [DisputeAutoPay-Main] Tentativa $attempt falhou: ${payResult?['error']}');
+                broLog(
+                    '⚠️ [DisputeAutoPay-Main] Tentativa $attempt falhou: ${payResult?['error']}');
               } catch (e) {
                 final errStr = e.toString().toLowerCase();
                 if (errStr.contains('alreadyexists') ||
                     errStr.contains('already paid') ||
                     errStr.contains('preimage request already exists')) {
-                  broLog('✅ [DisputeAutoPay-Main] Invoice já pago (AlreadyExists exception) — sucesso');
+                  broLog(
+                      '✅ [DisputeAutoPay-Main] Invoice já pago (AlreadyExists exception) — sucesso');
                   await ProviderPaymentGuard.markPaid(orderId);
                   return true;
                 }
@@ -1184,7 +1336,8 @@ class BroApp extends StatelessWidget {
                 await Future.delayed(const Duration(seconds: 2));
               }
             }
-            broLog('❌ [DisputeAutoPay-Main] 3 tentativas falharam para ${orderId.substring(0, 8)}');
+            broLog(
+                '❌ [DisputeAutoPay-Main] 3 tentativas falharam para ${orderId.substring(0, 8)}');
             return false;
           };
 
@@ -1196,7 +1349,8 @@ class BroApp extends StatelessWidget {
           // (v634, anti double-spend), validação de invoice (decode, expiry,
           // 0 sats, teto de sanidade) e idempotência via disputeProviderPaid.
           orderProvider.onAutoPayDisputeWinner = (String orderId, order) async {
-            broLog('⚡ [WinnerAutoPay-Main] Pagamento do provedor pós-resolução para ${orderId.substring(0, 8)}');
+            broLog(
+                '⚡ [WinnerAutoPay-Main] Pagamento do provedor pós-resolução para ${orderId.substring(0, 8)}');
             // 🛡️ v634: se o provedor já foi pago (qualquer fluxo), NÃO pagar de novo.
             if (ProviderPaymentGuard.isPaid(orderId)) {
               // v820e: a flag precisa de evidência de envio liquidado — o
@@ -1206,26 +1360,31 @@ class BroApp extends StatelessWidget {
               // (fail-closed, tenta no próximo sync).
               final ev = await verifySettledProviderPayment(orderId);
               if (ev == false) {
-                broLog('⚠️ [WinnerAutoPay-Main] v820e: flag isPaid SEM evidência settled (verificado) — limpando e pagando o vencedor');
+                broLog(
+                    '⚠️ [WinnerAutoPay-Main] v820e: flag isPaid SEM evidência settled (verificado) — limpando e pagando o vencedor');
                 await ProviderPaymentGuard.clearPaid(orderId);
               } else {
                 if (ev == null) {
-                  broLog('🛡️ [WinnerAutoPay-Main] pagamento não verificável — mantendo pendente para retry');
+                  broLog(
+                      '🛡️ [WinnerAutoPay-Main] pagamento não verificável — mantendo pendente para retry');
                   return false;
                 }
                 final amountSats = (order.btcAmount * 100000000).round();
-                if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                if (AppConfig.isPlatformLightningAddressValid &&
+                    amountSats > 0) {
                   final feePaid = await PlatformFeeService.sendPlatformFee(
                     orderId: orderId,
                     totalSats: amountSats,
                     knownFeeHash: order.metadata?['feePaymentHash'] as String?,
                   );
                   if (!feePaid) {
-                    broLog('⏳ [WinnerAutoPay-Main] provedor pago, mas taxa não confirmada — mantendo pendente para retry');
+                    broLog(
+                        '⏳ [WinnerAutoPay-Main] provedor pago, mas taxa não confirmada — mantendo pendente para retry');
                     return false;
                   }
                 }
-                broLog('🛡️ [WinnerAutoPay-Main] Ordem ${orderId.substring(0, 8)} já paga e taxa confirmada — concluindo');
+                broLog(
+                    '🛡️ [WinnerAutoPay-Main] Ordem ${orderId.substring(0, 8)} já paga e taxa confirmada — concluindo');
                 return true;
               }
             }
@@ -1233,60 +1392,82 @@ class BroApp extends StatelessWidget {
             // reembolso (onAutoPayDisputeReimbursement) — não pagar 2x.
             String? adminInvoice;
             try {
-              adminInvoice = await NostrOrderService().fetchAdminReimbursementInvoice(orderId);
+              adminInvoice = await NostrOrderService()
+                  .fetchAdminReimbursementInvoice(orderId);
             } catch (_) {}
             if (adminInvoice != null && adminInvoice.isNotEmpty) {
-              broLog('🧾 [WinnerAutoPay-Main] Admin já pagou o provedor — reembolso cobre o fluxo, pulando pagamento direto');
+              broLog(
+                  '🧾 [WinnerAutoPay-Main] Admin já pagou o provedor — reembolso cobre o fluxo, pulando pagamento direto');
               return true;
             }
 
             // Invoice do provedor: metadata → evento COMPLETE (excluindo
             // refresh self-assinado, v773).
-            String? providerInvoice = order.metadata?['providerInvoice'] as String?;
+            String? providerInvoice =
+                order.metadata?['providerInvoice'] as String?;
             if (providerInvoice == null || providerInvoice.isEmpty) {
               try {
-                final completeData = await NostrOrderService().fetchOrderCompleteEvent(orderId, excludeAuthorPubkey: order.userPubkey);
+                final completeData = await NostrOrderService()
+                    .fetchOrderCompleteEvent(orderId,
+                        excludeAuthorPubkey: order.userPubkey);
                 providerInvoice = completeData?['providerInvoice'] as String?;
               } catch (e) {
-                broLog('⚠️ [WinnerAutoPay-Main] Erro ao buscar invoice do Nostr: $e');
+                broLog(
+                    '⚠️ [WinnerAutoPay-Main] Erro ao buscar invoice do Nostr: $e');
               }
             }
             if (providerInvoice == null || providerInvoice.isEmpty) {
-              broLog('❌ [WinnerAutoPay-Main] Sem providerInvoice para ${orderId.substring(0, 8)} — tentará no próximo sync');
+              broLog(
+                  '❌ [WinnerAutoPay-Main] Sem providerInvoice para ${orderId.substring(0, 8)} — tentará no próximo sync');
               return false;
             }
 
             // Validar invoice antes de pagar (mesma classe do AutoPay-Main)
             try {
               if (breezProvider.isInitialized) {
-                final decoded = await breezProvider.decodeInvoice(providerInvoice);
+                final decoded =
+                    await breezProvider.decodeInvoice(providerInvoice);
                 if (decoded == null || decoded['success'] != true) {
-                  broLog('🚨 [WinnerAutoPay-Main] BLOQUEADO: falha ao decodificar invoice — não pagar sem validar');
+                  broLog(
+                      '🚨 [WinnerAutoPay-Main] BLOQUEADO: falha ao decodificar invoice — não pagar sem validar');
                   return false;
                 }
-                final tsSecs = int.tryParse(decoded['invoice']?['timestamp']?.toString() ?? '0') ?? 0;
-                final expSecs = int.tryParse(decoded['invoice']?['expiry']?.toString() ?? '0') ?? 0;
+                final tsSecs = int.tryParse(
+                        decoded['invoice']?['timestamp']?.toString() ?? '0') ??
+                    0;
+                final expSecs = int.tryParse(
+                        decoded['invoice']?['expiry']?.toString() ?? '0') ??
+                    0;
                 if (tsSecs > 0 && expSecs > 0) {
-                  final expiresAt = DateTime.fromMillisecondsSinceEpoch((tsSecs + expSecs) * 1000);
+                  final expiresAt = DateTime.fromMillisecondsSinceEpoch(
+                      (tsSecs + expSecs) * 1000);
                   if (DateTime.now().isAfter(expiresAt)) {
-                    broLog('⏳ [WinnerAutoPay-Main] Invoice EXPIRADO — pulando (provedor renova)');
+                    broLog(
+                        '⏳ [WinnerAutoPay-Main] Invoice EXPIRADO — pulando (provedor renova)');
                     return false;
                   }
                 }
-                final invoiceSats = int.tryParse(decoded['invoice']?['amountSats']?.toString() ?? '0') ?? 0;
+                final invoiceSats = int.tryParse(
+                        decoded['invoice']?['amountSats']?.toString() ?? '0') ??
+                    0;
                 if (invoiceSats <= 0) {
                   broLog('🚨 [WinnerAutoPay-Main] BLOQUEADO: invoice 0 sats');
                   return false;
                 }
                 final baseSats = (order.btcAmount * 100000000).round();
-                final sanityCap = ((baseSats + (baseSats * AppConfig.providerFeePercent).round()) * 2).ceil();
+                final sanityCap = ((baseSats +
+                            (baseSats * AppConfig.providerFeePercent).round()) *
+                        2)
+                    .ceil();
                 if (sanityCap > 0 && invoiceSats > sanityCap) {
-                  broLog('🚨 [WinnerAutoPay-Main] BLOQUEADO: invoice inflado! $invoiceSats > $sanityCap');
+                  broLog(
+                      '🚨 [WinnerAutoPay-Main] BLOQUEADO: invoice inflado! $invoiceSats > $sanityCap');
                   return false;
                 }
               }
             } catch (e) {
-              broLog('🚨 [WinnerAutoPay-Main] Erro ao decodificar invoice — bloqueando: $e');
+              broLog(
+                  '🚨 [WinnerAutoPay-Main] Erro ao decodificar invoice — bloqueando: $e');
               return false;
             }
 
@@ -1296,36 +1477,44 @@ class BroApp extends StatelessWidget {
                 if (breezProvider.isInitialized) {
                   payResult = await breezProvider.payInvoice(providerInvoice!);
                 } else {
-                  broLog('⚠️ [WinnerAutoPay-Main] Nenhuma carteira inicializada');
+                  broLog(
+                      '⚠️ [WinnerAutoPay-Main] Nenhuma carteira inicializada');
                   return false;
                 }
                 if (payResult != null && payResult['success'] == true) {
-                  broLog('✅ [WinnerAutoPay-Main] Provedor pago na tentativa $attempt');
+                  broLog(
+                      '✅ [WinnerAutoPay-Main] Provedor pago na tentativa $attempt');
                   await ProviderPaymentGuard.markPaid(orderId);
                   // Taxa da plataforma (2% da base, padrão v621)
                   final amountSats = (order.btcAmount * 100000000).round();
-                  if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                  if (AppConfig.isPlatformLightningAddressValid &&
+                      amountSats > 0) {
                     await PlatformFeeService.sendPlatformFee(
                       orderId: orderId,
                       totalSats: amountSats,
-                      knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                      knownFeeHash:
+                          order.metadata?['feePaymentHash'] as String?,
                     );
                   }
                   // v823a: atestar a entrega no relay (preimage = prova
                   // verificável por qualquer um: sha256 == payment_hash)
                   final pre = payResult['payment']?['preimage'] as String?;
                   if (pre != null && pre.isNotEmpty) {
-                    orderProvider.updateOrderMetadataLocal(orderId, {'paymentPreimage': pre});
-                    unawaited(orderProvider.updateOrderStatus(
-                      orderId: orderId,
-                      status: 'completed',
-                      providerId: order.providerId,
-                      paymentProof: pre,
-                    ).catchError((_) => false));
+                    orderProvider.updateOrderMetadataLocal(
+                        orderId, {'paymentPreimage': pre});
+                    unawaited(orderProvider
+                        .updateOrderStatus(
+                          orderId: orderId,
+                          status: 'completed',
+                          providerId: order.providerId,
+                          paymentProof: pre,
+                        )
+                        .catchError((_) => false));
                   }
                   return true;
                 }
-                final payError = payResult?['error']?.toString().toLowerCase() ?? '';
+                final payError =
+                    payResult?['error']?.toString().toLowerCase() ?? '';
                 if (payError.contains('alreadyexists') ||
                     payError.contains('already paid') ||
                     payError.contains('already settled') ||
@@ -1333,24 +1522,29 @@ class BroApp extends StatelessWidget {
                   // v820e: string 'already paid' só vale com hash LIQUIDADO.
                   final ev2 = await verifySettledProviderPayment(orderId);
                   if (ev2 == true) {
-                    broLog('✅ [WinnerAutoPay-Main] Invoice já pago E liquidado (verificado) — sucesso');
+                    broLog(
+                        '✅ [WinnerAutoPay-Main] Invoice já pago E liquidado (verificado) — sucesso');
                     await ProviderPaymentGuard.markPaid(orderId);
                     // v820f: a taxa também sai NESTE ramo — antes retornava
                     // sucesso SEM enviar a taxa da plataforma.
                     final amountSats = (order.btcAmount * 100000000).round();
-                    if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                    if (AppConfig.isPlatformLightningAddressValid &&
+                        amountSats > 0) {
                       await PlatformFeeService.sendPlatformFee(
                         orderId: orderId,
                         totalSats: amountSats,
-                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                        knownFeeHash:
+                            order.metadata?['feePaymentHash'] as String?,
                       );
                     }
                     return true;
                   }
-                  broLog('⚠️ [WinnerAutoPay-Main] "já pago" sem evidência liquidada — próximo sync re-verifica');
+                  broLog(
+                      '⚠️ [WinnerAutoPay-Main] "já pago" sem evidência liquidada — próximo sync re-verifica');
                   return false;
                 }
-                broLog('⚠️ [WinnerAutoPay-Main] Tentativa $attempt falhou: ${payResult?['error']}');
+                broLog(
+                    '⚠️ [WinnerAutoPay-Main] Tentativa $attempt falhou: ${payResult?['error']}');
               } catch (e) {
                 final errStr = e.toString().toLowerCase();
                 if (errStr.contains('alreadyexists') ||
@@ -1359,19 +1553,23 @@ class BroApp extends StatelessWidget {
                   // v820e: idem — só com hash LIQUIDADO, e com a taxa (v820f).
                   final ev2 = await verifySettledProviderPayment(orderId);
                   if (ev2 == true) {
-                    broLog('✅ [WinnerAutoPay-Main] Invoice já pago E liquidado (exception, verificado)');
+                    broLog(
+                        '✅ [WinnerAutoPay-Main] Invoice já pago E liquidado (exception, verificado)');
                     await ProviderPaymentGuard.markPaid(orderId);
                     final amountSats = (order.btcAmount * 100000000).round();
-                    if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                    if (AppConfig.isPlatformLightningAddressValid &&
+                        amountSats > 0) {
                       await PlatformFeeService.sendPlatformFee(
                         orderId: orderId,
                         totalSats: amountSats,
-                        knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                        knownFeeHash:
+                            order.metadata?['feePaymentHash'] as String?,
                       );
                     }
                     return true;
                   }
-                  broLog('⚠️ [WinnerAutoPay-Main] "já pago" (exception) sem evidência liquidada — próximo sync re-verifica');
+                  broLog(
+                      '⚠️ [WinnerAutoPay-Main] "já pago" (exception) sem evidência liquidada — próximo sync re-verifica');
                   return false;
                 }
                 broLog('⚠️ [WinnerAutoPay-Main] Tentativa $attempt erro: $e');
@@ -1380,7 +1578,8 @@ class BroApp extends StatelessWidget {
                 await Future.delayed(const Duration(seconds: 2));
               }
             }
-            broLog('❌ [WinnerAutoPay-Main] 3 tentativas falharam para ${orderId.substring(0, 8)}');
+            broLog(
+                '❌ [WinnerAutoPay-Main] 3 tentativas falharam para ${orderId.substring(0, 8)}');
             return false;
           };
 
@@ -1389,8 +1588,10 @@ class BroApp extends StatelessWidget {
           // provedor receber → paga aqui, sozinho, com todas as travas
           // (invoice de quem PROVOU — v723; teto de valor; anti double-pay
           // com evidência — v820e). Caso-âncora: 98bc3e84 (17/11).
-          orderProvider.onReconcileProviderPayment = (String orderId, order) async {
-            broLog('🔎 [ReconcilePay-Main] Verificando pagamento da ordem completed ${orderId.substring(0, 8)}');
+          orderProvider.onReconcileProviderPayment =
+              (String orderId, order) async {
+            broLog(
+                '🔎 [ReconcilePay-Main] Verificando pagamento da ordem completed ${orderId.substring(0, 8)}');
             // 0) Já pago de verdade? Evidência settled encerra sem pagar.
             final ev = await verifySettledProviderPayment(orderId);
             if (ev == true) {
@@ -1403,11 +1604,13 @@ class BroApp extends StatelessWidget {
                   knownFeeHash: order.metadata?['feePaymentHash'] as String?,
                 );
               }
-              broLog('✅ [ReconcilePay-Main] ${orderId.substring(0, 8)} já paga (evidência) — taxa reconciliada');
+              broLog(
+                  '✅ [ReconcilePay-Main] ${orderId.substring(0, 8)} já paga (evidência) — taxa reconciliada');
               return true;
             }
             if (ev == null) {
-              broLog('⏳ [ReconcilePay-Main] ${orderId.substring(0, 8)}: evidência não verificável agora — próximo sync');
+              broLog(
+                  '⏳ [ReconcilePay-Main] ${orderId.substring(0, 8)}: evidência não verificável agora — próximo sync');
               return false;
             }
             if (ProviderPaymentGuard.isPaid(orderId)) {
@@ -1417,7 +1620,8 @@ class BroApp extends StatelessWidget {
             // 1) Invoice de QUEM PROVOU (v723) — nunca de refresh de terceiro
             String? providerInvoice;
             try {
-              final proof = await NostrOrderService().fetchProofWithInvoice(orderId)
+              final proof = await NostrOrderService()
+                  .fetchProofWithInvoice(orderId)
                   .timeout(const Duration(seconds: 12), onTimeout: () => null);
               providerInvoice = proof?['providerInvoice'];
             } catch (_) {}
@@ -1425,29 +1629,45 @@ class BroApp extends StatelessWidget {
               providerInvoice = order.metadata?['providerInvoice'] as String?;
             }
             if (providerInvoice == null || providerInvoice.isEmpty) {
-              broLog('❌ [ReconcilePay-Main] sem providerInvoice para ${orderId.substring(0, 8)}');
+              broLog(
+                  '❌ [ReconcilePay-Main] sem providerInvoice para ${orderId.substring(0, 8)}');
               return false;
             }
             // 2) validação: decode + expiry + teto (mesma classe do WinnerAutoPay)
             try {
               if (!breezProvider.isInitialized) return false;
-              final decoded = await breezProvider.decodeInvoice(providerInvoice);
+              final decoded =
+                  await breezProvider.decodeInvoice(providerInvoice);
               if (decoded == null || decoded['success'] != true) {
                 broLog('🚨 [ReconcilePay-Main] falha ao decodificar invoice');
                 return false;
               }
-              final tsSecs = int.tryParse(decoded['invoice']?['timestamp']?.toString() ?? '0') ?? 0;
-              final expSecs = int.tryParse(decoded['invoice']?['expiry']?.toString() ?? '0') ?? 0;
-              if (tsSecs > 0 && expSecs > 0 &&
-                  DateTime.now().isAfter(DateTime.fromMillisecondsSinceEpoch((tsSecs + expSecs) * 1000))) {
-                broLog('⏳ [ReconcilePay-Main] invoice EXPIRADO — o provedor renova');
+              final tsSecs = int.tryParse(
+                      decoded['invoice']?['timestamp']?.toString() ?? '0') ??
+                  0;
+              final expSecs = int.tryParse(
+                      decoded['invoice']?['expiry']?.toString() ?? '0') ??
+                  0;
+              if (tsSecs > 0 &&
+                  expSecs > 0 &&
+                  DateTime.now().isAfter(DateTime.fromMillisecondsSinceEpoch(
+                      (tsSecs + expSecs) * 1000))) {
+                broLog(
+                    '⏳ [ReconcilePay-Main] invoice EXPIRADO — o provedor renova');
                 return false;
               }
-              final invoiceSats = int.tryParse(decoded['invoice']?['amountSats']?.toString() ?? '0') ?? 0;
+              final invoiceSats = int.tryParse(
+                      decoded['invoice']?['amountSats']?.toString() ?? '0') ??
+                  0;
               final baseSats = (order.btcAmount * 100000000).round();
-              final sanityCap = ((baseSats + (baseSats * AppConfig.providerFeePercent).round()) * 2).ceil();
-              if (invoiceSats <= 0 || (sanityCap > 0 && invoiceSats > sanityCap)) {
-                broLog('🚨 [ReconcilePay-Main] invoice fora do teto: $invoiceSats (cap $sanityCap)');
+              final sanityCap = ((baseSats +
+                          (baseSats * AppConfig.providerFeePercent).round()) *
+                      2)
+                  .ceil();
+              if (invoiceSats <= 0 ||
+                  (sanityCap > 0 && invoiceSats > sanityCap)) {
+                broLog(
+                    '🚨 [ReconcilePay-Main] invoice fora do teto: $invoiceSats (cap $sanityCap)');
                 return false;
               }
               await ProviderPaymentGuard.recordAttempt(
@@ -1464,24 +1684,29 @@ class BroApp extends StatelessWidget {
               if (payResult != null && payResult['success'] == true) {
                 await ProviderPaymentGuard.markPaid(orderId);
                 final amountSats = (order.btcAmount * 100000000).round();
-                if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                if (AppConfig.isPlatformLightningAddressValid &&
+                    amountSats > 0) {
                   await PlatformFeeService.sendPlatformFee(
                     orderId: orderId,
                     totalSats: amountSats,
                     knownFeeHash: order.metadata?['feePaymentHash'] as String?,
                   );
                 }
-                broLog('✅ [ReconcilePay-Main] ${orderId.substring(0, 8)} PAGA na reconciliação');
+                broLog(
+                    '✅ [ReconcilePay-Main] ${orderId.substring(0, 8)} PAGA na reconciliação');
                 // v823a: atestar a entrega no relay (preimage = prova verificável)
                 final pre = payResult['payment']?['preimage'] as String?;
                 if (pre != null && pre.isNotEmpty) {
-                  orderProvider.updateOrderMetadataLocal(orderId, {'paymentPreimage': pre});
-                  unawaited(orderProvider.updateOrderStatus(
-                    orderId: orderId,
-                    status: 'completed',
-                    providerId: order.providerId,
-                    paymentProof: pre,
-                  ).catchError((_) => false));
+                  orderProvider.updateOrderMetadataLocal(
+                      orderId, {'paymentPreimage': pre});
+                  unawaited(orderProvider
+                      .updateOrderStatus(
+                        orderId: orderId,
+                        status: 'completed',
+                        providerId: order.providerId,
+                        paymentProof: pre,
+                      )
+                      .catchError((_) => false));
                 }
                 return true;
               }
@@ -1495,18 +1720,21 @@ class BroApp extends StatelessWidget {
                 if (ev2 == true) {
                   await ProviderPaymentGuard.markPaid(orderId);
                   final amountSats = (order.btcAmount * 100000000).round();
-                  if (AppConfig.isPlatformLightningAddressValid && amountSats > 0) {
+                  if (AppConfig.isPlatformLightningAddressValid &&
+                      amountSats > 0) {
                     await PlatformFeeService.sendPlatformFee(
                       orderId: orderId,
                       totalSats: amountSats,
-                      knownFeeHash: order.metadata?['feePaymentHash'] as String?,
+                      knownFeeHash:
+                          order.metadata?['feePaymentHash'] as String?,
                     );
                   }
                   return true;
                 }
                 return false; // pendente em voo — o próximo sync re-verifica
               }
-              broLog('⚠️ [ReconcilePay-Main] pagamento falhou: ${payResult?['error']}');
+              broLog(
+                  '⚠️ [ReconcilePay-Main] pagamento falhou: ${payResult?['error']}');
               return false;
             } catch (e) {
               broLog('⚠️ [ReconcilePay-Main] exceção ao pagar: $e');
@@ -1515,19 +1743,24 @@ class BroApp extends StatelessWidget {
           };
 
           // v133: Callback para gerar invoice Lightning (provider side)
-          orderProvider.onGenerateProviderInvoice = (int amountSats, String orderId) async {
+          orderProvider.onGenerateProviderInvoice =
+              (int amountSats, String orderId) async {
             try {
               Map<String, dynamic>? result;
               if (breezProvider.isInitialized) {
-                result = await breezProvider.createInvoice(
-                  amountSats: amountSats,
-                  description: 'Bro - Ordem ${orderId.substring(0, 8)}',
-                ).timeout(const Duration(seconds: 30));
+                result = await breezProvider
+                    .createInvoice(
+                      amountSats: amountSats,
+                      description: 'Bro - Ordem ${orderId.substring(0, 8)}',
+                    )
+                    .timeout(const Duration(seconds: 30));
               }
               // v823b: guardar o hash — o atestado de recebimento casa por string
               final ph = result?['paymentHash'] as String?;
               if (ph != null && ph.isNotEmpty) {
-                try { await orderProvider.setProviderInvoiceHash(orderId, ph); } catch (_) {}
+                try {
+                  await orderProvider.setProviderInvoiceHash(orderId, ph);
+                } catch (_) {}
               }
               return result?['bolt11'] as String?;
             } catch (e) {
@@ -1570,81 +1803,100 @@ class BroApp extends StatelessWidget {
                     ),
                   );
                 },
-                home: isLoggedIn 
-                    ? const HomeScreen() 
-                    : (!hasSeenOnboarding 
-                        ? const OnboardingScreen() 
+                home: isLoggedIn
+                    ? const HomeScreen()
+                    : (!hasSeenOnboarding
+                        ? const OnboardingScreen()
                         : const LoginScreen()),
-            onGenerateRoute: (settings) {
-              // Rotas com parametros
-              if (settings.name == '/order-status') {
-                final args = settings.arguments as Map<String, dynamic>?;
-                broLog('Navegando para /order-status com args: $args');
+                onGenerateRoute: (settings) {
+                  // Rotas com parametros
+                  if (settings.name == '/order-status') {
+                    final args = settings.arguments as Map<String, dynamic>?;
+                    broLog('Navegando para /order-status com args: $args');
 
-                final amountSatsValue = args?['amountSats'];
-                final int sats = amountSatsValue is int ? amountSatsValue : (amountSatsValue ?? 0).toInt();
+                    final amountSatsValue = args?['amountSats'];
+                    final int sats = amountSatsValue is int
+                        ? amountSatsValue
+                        : (amountSatsValue ?? 0).toInt();
 
-                return MaterialPageRoute(
-                  builder: (context) => OrderStatusScreen(
-                    orderId: args?['orderId'] ?? '',
-                    userId: args?['userId'],
-                    amountBrl: (args?['amountBrl'] ?? 0.0).toDouble(),
-                    amountSats: sats,
-                  ),
-                );
-              }
-              if (settings.name == '/user-orders') {
-                final args = settings.arguments as Map<String, dynamic>;
-                return MaterialPageRoute(
-                  builder: (context) => UserOrdersScreen(userId: args['userId']),
-                );
-              }
-              if (settings.name == '/provider-orders') {
-                final args = settings.arguments as Map<String, dynamic>?;
-                // v690: placeholder 'temp' vazava pra disputas/chats (caso
-                // 4f486f3d). Default = pubkey real do usuário logado.
-                final providerId = args?['providerId'] as String? ?? NostrService().publicKey ?? '';
-                return MaterialPageRoute(
-                  builder: (context) => ProviderOrdersScreen(providerId: providerId),
-                );
-              }
-              if (settings.name == '/provider-my-orders') {
-                final args = settings.arguments as String?;
-                final providerId = args ?? NostrService().publicKey ?? '';
-                return MaterialPageRoute(
-                  builder: (context) => ProviderMyOrdersScreen(providerId: providerId),
-                );
-              }
-              if (settings.name == '/provider-history') {
-                final args = settings.arguments as String?;
-                final providerId = args ?? NostrService().publicKey ?? '';
-                return MaterialPageRoute(
-                  builder: (context) => ProviderOrderHistoryScreen(providerId: providerId),
-                );
-              }
-              return null;
-            },
-            routes: {
-              '/home': (context) => const HomeScreen(),
-              '/login': (context) => const LoginScreen(),
-              '/settings': (context) => const SettingsScreen(),
-              '/nostr-messages': (context) => const NostrConversationsScreen(),
-              '/relay-management': (context) => const RelayManagementScreen(),
-              '/nostr-profile': (context) => const NostrProfileScreen(),
-              '/nip06-backup': (context) => const Nip06BackupScreen(),
-              '/privacy-settings': (context) => const PrivacySettingsScreen(),
-              '/wallet': (context) => const WalletScreen(),
-              '/marketplace': (context) => const MarketplaceScreen(),
-              '/brix': (context) => const BrixScreen(),
-              '/provider-education': (context) => const ProviderEducationScreen(),
-              '/provider-collateral': (context) => ProviderCollateralScreen(providerId: NostrService().publicKey ?? ''),
-              '/provider-order-detail': (context) => ProviderOrderDetailScreen(orderId: 'temp', providerId: NostrService().publicKey ?? ''),
-              '/provider-balance': (context) => const ProviderBalanceScreen(),
-              '/platform-balance': (context) => const PlatformBalanceScreen(),
-                '/admin-bro-2024': (context) => const PlatformAdminScreen(),
-              '/notifications': (context) => const NotificationsInboxScreen(),
-            },
-          );
+                    return MaterialPageRoute(
+                      builder: (context) => OrderStatusScreen(
+                        orderId: args?['orderId'] ?? '',
+                        userId: args?['userId'],
+                        amountBrl: (args?['amountBrl'] ?? 0.0).toDouble(),
+                        amountSats: sats,
+                      ),
+                    );
+                  }
+                  if (settings.name == '/user-orders') {
+                    final args = settings.arguments as Map<String, dynamic>;
+                    return MaterialPageRoute(
+                      builder: (context) =>
+                          UserOrdersScreen(userId: args['userId']),
+                    );
+                  }
+                  if (settings.name == '/provider-orders') {
+                    final args = settings.arguments as Map<String, dynamic>?;
+                    // v690: placeholder 'temp' vazava pra disputas/chats (caso
+                    // 4f486f3d). Default = pubkey real do usuário logado.
+                    final providerId = args?['providerId'] as String? ??
+                        NostrService().publicKey ??
+                        '';
+                    return MaterialPageRoute(
+                      builder: (context) =>
+                          ProviderOrdersScreen(providerId: providerId),
+                    );
+                  }
+                  if (settings.name == '/provider-my-orders') {
+                    final args = settings.arguments as String?;
+                    final providerId = args ?? NostrService().publicKey ?? '';
+                    return MaterialPageRoute(
+                      builder: (context) =>
+                          ProviderMyOrdersScreen(providerId: providerId),
+                    );
+                  }
+                  if (settings.name == '/provider-history') {
+                    final args = settings.arguments as String?;
+                    final providerId = args ?? NostrService().publicKey ?? '';
+                    return MaterialPageRoute(
+                      builder: (context) =>
+                          ProviderOrderHistoryScreen(providerId: providerId),
+                    );
+                  }
+                  return null;
+                },
+                routes: {
+                  '/home': (context) => const HomeScreen(),
+                  '/login': (context) => const LoginScreen(),
+                  '/settings': (context) => const SettingsScreen(),
+                  '/nostr-messages': (context) =>
+                      const NostrConversationsScreen(),
+                  '/relay-management': (context) =>
+                      const RelayManagementScreen(),
+                  '/nostr-profile': (context) => const NostrProfileScreen(),
+                  '/nip06-backup': (context) => const Nip06BackupScreen(),
+                  '/privacy-settings': (context) =>
+                      const PrivacySettingsScreen(),
+                  '/wallet': (context) => const WalletScreen(),
+                  '/marketplace': (context) => const MarketplaceScreen(),
+                  '/brix': (context) => const BrixScreen(),
+                  '/provider-education': (context) =>
+                      const ProviderEducationScreen(),
+                  '/provider-collateral': (context) => ProviderCollateralScreen(
+                      providerId: NostrService().publicKey ?? ''),
+                  '/provider-order-detail': (context) =>
+                      ProviderOrderDetailScreen(
+                          orderId: 'temp',
+                          providerId: NostrService().publicKey ?? ''),
+                  '/provider-balance': (context) =>
+                      const ProviderBalanceScreen(),
+                  '/platform-balance': (context) =>
+                      const PlatformBalanceScreen(),
+                  '/admin-bro-2024': (context) => const PlatformAdminScreen(),
+                  '/notifications': (context) =>
+                      const NotificationsInboxScreen(),
+                },
+              );
             },
           );
         },

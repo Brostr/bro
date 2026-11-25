@@ -1439,10 +1439,26 @@ class BreezProvider with ChangeNotifier {
               ? ' (+ escrow $escrowCoverSats = $effectiveBalance efetivo)'
               : ''));
 
+      // Para BOLT11 com valor embutido, preparar primeiro para obter a taxa de rede
+      final bool invoiceHasAmount = invoiceAmount != null && invoiceAmount > 0;
       var requiredAmount = amountSats ?? invoiceAmount;
       if (preparedPayment is spark.PrepareSendPaymentResponse) {
         requiredAmount = preparedPayment.amount.toInt() +
             preparedNetworkFeeSats(preparedPayment);
+      } else if (invoiceHasAmount) {
+        // For fixed BOLT11 invoices without prepared payment, prepare first to get network fee
+        final prepareReq = spark.PrepareSendPaymentRequest(
+          paymentRequest: spark.PaymentRequest.input(input: bolt11),
+          amount: null,
+          tokenIdentifier: null,
+        );
+        final prepareResp = await _sdk!
+            .prepareSendPayment(request: prepareReq)
+            .timeout(const Duration(seconds: 30),
+                onTimeout: () => throw TimeoutException(
+                    'Timeout ao preparar pagamento (30s)'));
+        requiredAmount =
+            prepareResp.amount.toInt() + preparedNetworkFeeSats(prepareResp);
       }
       if (requiredAmount != null && effectiveBalance < requiredAmount) {
         final errorMsg =
@@ -1461,7 +1477,6 @@ class BreezProvider with ChangeNotifier {
       // Step 1: Prepare payment
       // Para BOLT11 sem valor embutido (open-amount), passar o amountSats que o usuário digitou.
       // Para BOLT11 com valor embutido, deixar null (SDK deduz do invoice).
-      final bool invoiceHasAmount = invoiceAmount != null && invoiceAmount > 0;
       final BigInt? prepareAmount =
           (!invoiceHasAmount && amountSats != null && amountSats > 0)
               ? BigInt.from(amountSats)

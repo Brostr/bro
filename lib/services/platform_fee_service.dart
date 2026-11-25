@@ -602,16 +602,8 @@ class PlatformFeeService {
         }
         broLog('💼 Pagando via $_currentBackend...');
 
-        if (maxNetworkFeeSats > 0) {
-          final quote = await BreezProvider().prepareInvoicePayment(invoice);
-          final networkFee = (quote['networkFeeSats'] as num?)?.toInt() ??
-              maxNetworkFeeSats + 1;
-          if (quote['success'] != true || networkFee > maxNetworkFeeSats) {
-            broLog(
-                '🛡️ Taxa de rede da cobrança BRIX excede o valor reservado; não enviar');
-            return false;
-          }
-        }
+        // A taxa BRIX é um serviço e deve ser cobrada. A reserva de rede só
+        // evita pagar a taxa duas vezes; nunca impede a cobrança.
         final payResult = await _payInvoiceCallback!(invoice);
 
         if (payResult != null && payResult['success'] == true) {

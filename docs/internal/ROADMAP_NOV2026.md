@@ -86,19 +86,13 @@ Prazo: tudo entregue e aprovado até **30/nov**.
 
 ---
 
-## R3 — Timeout de 2h pro provedor pagar 🥉
-**Problema:** provedor aceita e some → liquidez presa, usuário ansioso.
+## R3 — Timeout de 2h pro provedor pagar — ❌ SUSPENSO (25/11)
 
-**Fluxo aprovado (palavras da Carol):** aceite tem **2 horas** pra pagar. Estourou → o aceite cai, provedor recebe **notificação**, usuário vê em **Minhas Ordens** o aviso com as duas escolhas: **republicar** a ordem ou **cancelar e sacar os sats**. (Os dois botões dessa escolha estão AUTORIZADOS — pedido explícito da Carol.)
+**Decisão da Carol (25/11):** **não será implementado.** A feature ficou complexa demais, gerou muitos bugs e volume de suporte desproporcional ao benefício. O código da branch `test/r3-perf-integration` **não deve ser mergeado**.
 
-**O que fazer:**
-- Timer no app do usuário a partir do `acceptedAt` (clampado, v775) do aceite canônico: +2h sem comprovante/30081 → aceite expirado.
-- **NÃO deletar o aceite com NIP-09** (lição da semana: deleção apaga evidência). Expiração é um NOVO evento 30080 `accept_expired` + estado local — histórico permanece intacto pra mediação.
-- Push ao provedor expirado ("seu aceite expirou") via fluxo FCM existente.
-- Republicar = volta a ordem a `pending` com novo 30078 (mesma ordem, novo round de aceites). Cancelar = fluxo de cancelamento existente + saque dos sats pra carteira dela.
-- Anti-corrida: se o comprovante chegar NO LIMITE (relágio do provedor adiantado), vale o `created_at` clampado — mesma regra do v775.
+**Não reintroduzir** timeout automático de aceite sem nova decisão explícita da Carol.
 
-**Critério de aceite:** teste de corrida novo em `test/race/` (aceite expira aos 120min; comprovante aos 119min mantém; comprovante aos 121min não ressuscita); notificação disparada; ordem republicável; cancelamento devolve sats.
+**Proteção atual (mantida):** o fluxo existente de cancelamento/republicação manual continua disponível; a mediação resolve casos de provedor que some.
 
 ---
 
@@ -121,7 +115,7 @@ Prazo: tudo entregue e aprovado até **30/nov**.
 | 12–14/nov | **R5** 🚨 (lista do provedor via watchtower — usuário não consegue pagar ordem HOJE) |
 | 14–16/nov | **R1** (tela preta do comprovante) |
 | 16–20/nov | **R2** (tabela de garantia; HODL T2 consome essa tabela — série T do HODL já está pronta na branch local, merge após R5+R1 estabilizarem no main) |
-| 21–26/nov | **R3** (timeout 2h) |
+| 21–26/nov | ~~**R3** (timeout 2h)~~ — **SUSPENSO em 25/11** (complexidade/bugs/suporte) |
 | 27–30/nov | **R4** (admin) + merge HODL (se Carol aprovar) + regressão completa + build candidato |
 
 **Régua de liberação:** cada item só vai pros testadores quando (1) agente implementou + testou, (2) Copilot revisou + rodou testes independentes, (3) Carol retestou no aparelho e aprovou. 💜

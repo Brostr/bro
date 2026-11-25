@@ -17,8 +17,8 @@ class BrixService {
 
   late final Dio _dio = Dio(BaseOptions(
     baseUrl: _brixServerUrl,
-    connectTimeout: const Duration(seconds: 15),
-    receiveTimeout: const Duration(seconds: 15),
+    connectTimeout: const Duration(seconds: 20),
+    receiveTimeout: const Duration(seconds: 30),
     headers: {'Content-Type': 'application/json'},
   ));
 
@@ -36,7 +36,8 @@ class BrixService {
   /// Create Options with NIP-98 signed Authorization header.
   /// v566: optional [body] adds NIP-98 `payload` tag = sha256(jsonEncode(body))
   /// to bind auth event to the request body (replay protection).
-  Options _signedOptions(String path, String method, {String? pubkey, Object? body}) {
+  Options _signedOptions(String path, String method,
+      {String? pubkey, Object? body}) {
     final headers = <String, String>{};
     if (pubkey != null) headers['x-nostr-pubkey'] = pubkey;
     if (_privateKey != null) {
@@ -67,7 +68,8 @@ class BrixService {
           'content': event.content,
           'sig': event.sig,
         };
-        headers['Authorization'] = 'Nostr ${base64Encode(utf8.encode(jsonEncode(eventMap)))}';
+        headers['Authorization'] =
+            'Nostr ${base64Encode(utf8.encode(jsonEncode(eventMap)))}';
       } catch (_) {}
     }
     return Options(headers: headers);
@@ -83,9 +85,11 @@ class BrixService {
         error: data['error'] as String?,
       );
     } on DioException catch (e) {
-      return BrixUsernameCheckResult(available: false, error: 'Erro de conexão', isConnectionError: true);
+      return BrixUsernameCheckResult(
+          available: false, error: 'Erro de conexão', isConnectionError: true);
     } catch (e) {
-      return BrixUsernameCheckResult(available: false, error: 'Erro de conexão', isConnectionError: true);
+      return BrixUsernameCheckResult(
+          available: false, error: 'Erro de conexão', isConnectionError: true);
     }
   }
 
@@ -106,7 +110,10 @@ class BrixService {
         if (phone != null && phone.isNotEmpty) 'phone': phone,
         if (email != null && email.isNotEmpty) 'email': email,
       };
-      final response = await _dio.post('/brix/register', data: body, options: _signedOptions('/brix/register', 'POST', pubkey: nostrPubkey, body: body));
+      final response = await _dio.post('/brix/register',
+          data: body,
+          options: _signedOptions('/brix/register', 'POST',
+              pubkey: nostrPubkey, body: body));
       final data = response.data;
       return BrixRegisterResult(
         success: data['success'] == true,
@@ -121,7 +128,8 @@ class BrixService {
       final msg = e.response?.data?['error'] ?? 'Servidor BRIX indisponível';
       return BrixRegisterResult(success: false, error: msg.toString());
     } catch (e) {
-      return BrixRegisterResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+      return BrixRegisterResult(
+          success: false, error: 'Erro ao conectar ao servidor BRIX');
     }
   }
 
@@ -146,7 +154,8 @@ class BrixService {
       final msg = e.response?.data?['error'] ?? 'Servidor BRIX indisponível';
       return BrixVerifyResult(success: false, error: msg.toString());
     } catch (e) {
-      return BrixVerifyResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+      return BrixVerifyResult(
+          success: false, error: 'Erro ao conectar ao servidor BRIX');
     }
   }
 
@@ -167,7 +176,8 @@ class BrixService {
       final msg = e.response?.data?['error'] ?? 'Servidor BRIX indisponível';
       return BrixRegisterResult(success: false, error: msg.toString());
     } catch (e) {
-      return BrixRegisterResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+      return BrixRegisterResult(
+          success: false, error: 'Erro ao conectar ao servidor BRIX');
     }
   }
 
@@ -178,8 +188,10 @@ class BrixService {
     try {
       await initCredentials();
       final path = '/brix/claim-nonce/$paymentId';
-      final response = await _dio.get(path, options: _signedOptions(path, 'GET', pubkey: pubkey));
-      if (response.data?['ok'] == true) return response.data['nonce'] as String?;
+      final response = await _dio.get(path,
+          options: _signedOptions(path, 'GET', pubkey: pubkey));
+      if (response.data?['ok'] == true)
+        return response.data['nonce'] as String?;
     } catch (_) {}
     return null;
   }
@@ -187,7 +199,8 @@ class BrixService {
   /// Get the BRIX address for a given Nostr pubkey
   Future<BrixAddressResult> getAddress(String pubkey) async {
     try {
-      final response = await _dio.get('/brix/address/$pubkey',
+      final response = await _dio.get(
+        '/brix/address/$pubkey',
         options: _signedOptions('/brix/address/$pubkey', 'GET', pubkey: pubkey),
       );
       final data = response.data;
@@ -215,7 +228,8 @@ class BrixService {
     try {
       await initCredentials();
       final path = '/brix/admin/address-of/$pubkey';
-      final response = await _dio.get(path, options: _signedOptions(path, 'GET'));
+      final response =
+          await _dio.get(path, options: _signedOptions(path, 'GET'));
       final data = response.data;
       if (data['found'] == true) {
         return BrixAddressResult(
@@ -235,7 +249,8 @@ class BrixService {
     try {
       final response = await _dio.get(
         '/brix/find-by-email/${Uri.encodeComponent(email)}',
-        options: _signedOptions('/brix/find-by-email/${Uri.encodeComponent(email)}', 'GET'),
+        options: _signedOptions(
+            '/brix/find-by-email/${Uri.encodeComponent(email)}', 'GET'),
       );
       final data = response.data;
       return BrixAddressResult(
@@ -254,15 +269,18 @@ class BrixService {
   }
 
   /// Link a real nostr pubkey to a web-created BRIX
-  Future<BrixVerifyResult> linkPubkey({required String username, required String nostrPubkey}) async {
+  Future<BrixVerifyResult> linkPubkey(
+      {required String username, required String nostrPubkey}) async {
     try {
       final body = {
         'username': username,
         'nostr_pubkey': nostrPubkey,
       };
-      final response = await _dio.post('/brix/link-pubkey',
+      final response = await _dio.post(
+        '/brix/link-pubkey',
         data: body,
-        options: _signedOptions('/brix/link-pubkey', 'POST', pubkey: nostrPubkey, body: body),
+        options: _signedOptions('/brix/link-pubkey', 'POST',
+            pubkey: nostrPubkey, body: body),
       );
       final data = response.data;
       return BrixVerifyResult(
@@ -274,7 +292,8 @@ class BrixService {
       final msg = e.response?.data?['error'] ?? 'Erro ao vincular BRIX';
       return BrixVerifyResult(success: false, error: msg.toString());
     } catch (e) {
-      return BrixVerifyResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+      return BrixVerifyResult(
+          success: false, error: 'Erro ao conectar ao servidor BRIX');
     }
   }
 
@@ -287,9 +306,11 @@ class BrixService {
   }) async {
     try {
       final body = {'username': username};
-      final response = await _dio.post('/brix/claim-web-request',
+      final response = await _dio.post(
+        '/brix/claim-web-request',
         data: body,
-        options: _signedOptions('/brix/claim-web-request', 'POST', pubkey: nostrPubkey, body: body),
+        options: _signedOptions('/brix/claim-web-request', 'POST',
+            pubkey: nostrPubkey, body: body),
       );
       final data = response.data;
       return BrixVerifyResult(
@@ -300,7 +321,8 @@ class BrixService {
       final msg = e.response?.data?['error'] ?? 'Erro ao solicitar verificação';
       return BrixVerifyResult(success: false, error: msg.toString());
     } catch (e) {
-      return BrixVerifyResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+      return BrixVerifyResult(
+          success: false, error: 'Erro ao conectar ao servidor BRIX');
     }
   }
 
@@ -313,9 +335,11 @@ class BrixService {
   }) async {
     try {
       final body = {'username': username, 'code': code};
-      final response = await _dio.post('/brix/claim-web-verify',
+      final response = await _dio.post(
+        '/brix/claim-web-verify',
         data: body,
-        options: _signedOptions('/brix/claim-web-verify', 'POST', pubkey: nostrPubkey, body: body),
+        options: _signedOptions('/brix/claim-web-verify', 'POST',
+            pubkey: nostrPubkey, body: body),
       );
       final data = response.data;
       return BrixVerifyResult(
@@ -327,32 +351,49 @@ class BrixService {
       final msg = e.response?.data?['error'] ?? 'Código inválido ou expirado';
       return BrixVerifyResult(success: false, error: msg.toString());
     } catch (e) {
-      return BrixVerifyResult(success: false, error: 'Erro ao conectar ao servidor BRIX');
+      return BrixVerifyResult(
+          success: false, error: 'Erro ao conectar ao servidor BRIX');
     }
   }
 
   /// Get pending payments for a pubkey
   Future<List<BrixPendingPayment>> getPendingPayments(String pubkey) async {
-    try {
-      final response = await _dio.get('/brix/pending-payments',
-        options: _signedOptions('/brix/pending-payments', 'GET', pubkey: pubkey),
-      );
-      final data = response.data;
-      final payments = data['payments'] as List? ?? [];
-      return payments
-          .map((p) => BrixPendingPayment(
-                id: p['id'] as String,
-                amountSats: p['amount_sats'] as int,
-                grossAmountSats: (p['gross_amount_sats'] as num?)?.toInt() ?? 0,
-                feeSats: (p['fee_sats'] as num?)?.toInt() ?? 0,
-                senderNote: p['sender_note'] as String?,
-                createdAt: p['created_at'] as String,
-              ))
-          .toList();
-    } catch (e) {
-      broLog('[BRIX] Error fetching pending payments: $e');
-      return [];
+    // Offline receipts are the only way a payment lands while the app is
+    // closed, so a single timeout must not silently drop it. Retry once.
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final response = await _dio.get(
+          '/brix/pending-payments',
+          options:
+              _signedOptions('/brix/pending-payments', 'GET', pubkey: pubkey),
+        );
+        final data = response.data;
+        final payments = data['payments'] as List? ?? [];
+        return payments
+            .map((p) => BrixPendingPayment(
+                  id: p['id'] as String,
+                  amountSats: p['amount_sats'] as int,
+                  grossAmountSats:
+                      (p['gross_amount_sats'] as num?)?.toInt() ?? 0,
+                  feeSats: (p['fee_sats'] as num?)?.toInt() ?? 0,
+                  senderNote: p['sender_note'] as String?,
+                  createdAt: p['created_at'] as String,
+                ))
+            .toList();
+      } catch (e) {
+        final isTimeout = e is DioException &&
+            (e.type == DioExceptionType.receiveTimeout ||
+                e.type == DioExceptionType.connectionTimeout);
+        if (isTimeout && attempt == 0) {
+          broLog('[BRIX] pending-payments timeout — retrying once');
+          await Future.delayed(const Duration(seconds: 2));
+          continue;
+        }
+        broLog('[BRIX] Error fetching pending payments: $e');
+        return [];
+      }
     }
+    return [];
   }
 
   /// Health check
@@ -370,7 +411,8 @@ class BrixService {
     try {
       final response = await _dio.get(
         '/brix/resolve/${Uri.encodeComponent(query)}',
-        options: _signedOptions('/brix/resolve/${Uri.encodeComponent(query)}', 'GET'),
+        options: _signedOptions(
+            '/brix/resolve/${Uri.encodeComponent(query)}', 'GET'),
       );
       final data = response.data;
       if (data['found'] == true) {
@@ -384,32 +426,39 @@ class BrixService {
       }
       return BrixResolveResult(found: false);
     } catch (e) {
-      return BrixResolveResult(found: false, error: 'Erro ao conectar ao servidor BRIX');
+      return BrixResolveResult(
+          found: false, error: 'Erro ao conectar ao servidor BRIX');
     }
   }
 
   /// Poll for pending invoice requests (called when BRIX is active)
-  Future<List<BrixInvoiceRequest>> getInvoiceRequests(String pubkey, {String? username}) async {
+  Future<List<BrixInvoiceRequest>> getInvoiceRequests(String pubkey,
+      {String? username}) async {
     try {
       String path = '/brix/invoice-requests/$pubkey';
       if (username != null && username.isNotEmpty) {
         path += '?username=${Uri.encodeComponent(username)}';
       }
-      final response = await _dio.get(path,
-        options: _signedOptions('/brix/invoice-requests/$pubkey', 'GET', pubkey: pubkey),
+      final response = await _dio.get(
+        path,
+        options: _signedOptions('/brix/invoice-requests/$pubkey', 'GET',
+            pubkey: pubkey),
       );
       final data = response.data;
       final requests = data['requests'] as List? ?? [];
-      return requests.map((r) => BrixInvoiceRequest(
-        id: r['id'] as String,
-        amountSats: r['amount_sats'] as int,
-        createdAt: r['created_at'] as String,
-        comment: r['comment'] as String?,
-      )).toList();
+      return requests
+          .map((r) => BrixInvoiceRequest(
+                id: r['id'] as String,
+                amountSats: r['amount_sats'] as int,
+                createdAt: r['created_at'] as String,
+                comment: r['comment'] as String?,
+              ))
+          .toList();
     } on DioException catch (e) {
       if (e.response?.statusCode == 403) {
         broLog('[BRIX] 403 Unauthorized polling invoice-requests');
-      } else if (e.type == DioExceptionType.connectionTimeout || e.type == DioExceptionType.receiveTimeout) {
+      } else if (e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.receiveTimeout) {
         broLog('[BRIX] Timeout polling invoice-requests');
       }
       return [];
@@ -420,12 +469,15 @@ class BrixService {
   }
 
   /// Submit a generated invoice for a pending request
-  Future<bool> submitInvoice(String requestId, String invoice, String pubkey) async {
+  Future<bool> submitInvoice(
+      String requestId, String invoice, String pubkey) async {
     try {
       final body = {'request_id': requestId, 'invoice': invoice};
-      final response = await _dio.post('/brix/submit-invoice',
+      final response = await _dio.post(
+        '/brix/submit-invoice',
         data: body,
-        options: _signedOptions('/brix/submit-invoice', 'POST', pubkey: pubkey, body: body),
+        options: _signedOptions('/brix/submit-invoice', 'POST',
+            pubkey: pubkey, body: body),
       );
       return response.data?['success'] == true;
     } catch (e) {
@@ -434,12 +486,15 @@ class BrixService {
   }
 
   /// Claim a pending offline payment by submitting a recipient invoice
-  Future<bool> claimPayment(String paymentId, String invoice, String pubkey) async {
+  Future<bool> claimPayment(
+      String paymentId, String invoice, String pubkey) async {
     try {
       final body = {'payment_id': paymentId, 'invoice': invoice};
-      final response = await _dio.post('/brix/claim',
+      final response = await _dio.post(
+        '/brix/claim',
         data: body,
-        options: _signedOptions('/brix/claim', 'POST', pubkey: pubkey, body: body),
+        options:
+            _signedOptions('/brix/claim', 'POST', pubkey: pubkey, body: body),
       );
       return response.data?['success'] == true;
     } catch (e) {
@@ -459,9 +514,11 @@ class BrixService {
         if (phone != null && phone.isNotEmpty) 'phone': phone,
         if (email != null && email.isNotEmpty) 'email': email,
       };
-      final response = await _dio.post('/brix/update-contact',
+      final response = await _dio.post(
+        '/brix/update-contact',
         data: body,
-        options: _signedOptions('/brix/update-contact', 'POST', pubkey: pubkey, body: body),
+        options: _signedOptions('/brix/update-contact', 'POST',
+            pubkey: pubkey, body: body),
       );
       final data = response.data;
       return BrixRegisterResult(
@@ -490,9 +547,11 @@ class BrixService {
         if (phone != null && phone.isNotEmpty) 'phone': phone,
         if (email != null && email.isNotEmpty) 'email': email,
       };
-      final response = await _dio.post('/brix/confirm-update',
+      final response = await _dio.post(
+        '/brix/confirm-update',
         data: body,
-        options: _signedOptions('/brix/confirm-update', 'POST', pubkey: pubkey, body: body),
+        options: _signedOptions('/brix/confirm-update', 'POST',
+            pubkey: pubkey, body: body),
       );
       final data = response.data;
       return BrixVerifyResult(
@@ -518,15 +577,18 @@ class BrixService {
   Future<bool?> registerPushToken(String fcmToken, String pubkey) async {
     try {
       final body = {'fcm_token': fcmToken};
-      final response = await _dio.post('/brix/register-push',
+      final response = await _dio.post(
+        '/brix/register-push',
         data: body,
-        options: _signedOptions('/brix/register-push', 'POST', pubkey: pubkey, body: body),
+        options: _signedOptions('/brix/register-push', 'POST',
+            pubkey: pubkey, body: body),
       );
       return response.data?['success'] == true;
     } on DioException catch (e) {
       // 404 = usuário sem conta BRIX (permanente). NÃO é erro de rede.
       if (e.response?.statusCode == 404) {
-        broLog('[BRIX] register-push 404: pubkey sem conta BRIX — não tentar de novo');
+        broLog(
+            '[BRIX] register-push 404: pubkey sem conta BRIX — não tentar de novo');
         return null;
       }
       broLog('[BRIX] Error registering push token: $e');
@@ -541,8 +603,10 @@ class BrixService {
   /// Links them to the caller's pubkey so the relay picks up their invoices.
   Future<List<String>> claimWebAccounts(String pubkey) async {
     try {
-      final response = await _dio.post('/brix/claim-web-accounts',
-        options: _signedOptions('/brix/claim-web-accounts', 'POST', pubkey: pubkey),
+      final response = await _dio.post(
+        '/brix/claim-web-accounts',
+        options:
+            _signedOptions('/brix/claim-web-accounts', 'POST', pubkey: pubkey),
       );
       final linked = response.data?['linked'] as List? ?? [];
       return linked.cast<String>();
@@ -557,7 +621,8 @@ class BrixUsernameCheckResult {
   final String? error;
   final bool isConnectionError;
 
-  BrixUsernameCheckResult({required this.available, this.error, this.isConnectionError = false});
+  BrixUsernameCheckResult(
+      {required this.available, this.error, this.isConnectionError = false});
 }
 
 class BrixRegisterResult {
@@ -569,7 +634,14 @@ class BrixRegisterResult {
   final bool verified;
   final String? brixAddress;
 
-  BrixRegisterResult({required this.success, this.userId, this.username, this.devCode, this.error, this.verified = false, this.brixAddress});
+  BrixRegisterResult(
+      {required this.success,
+      this.userId,
+      this.username,
+      this.devCode,
+      this.error,
+      this.verified = false,
+      this.brixAddress});
 }
 
 class BrixVerifyResult {
@@ -578,7 +650,8 @@ class BrixVerifyResult {
   final String? username;
   final String? error;
 
-  BrixVerifyResult({required this.success, this.brixAddress, this.username, this.error});
+  BrixVerifyResult(
+      {required this.success, this.brixAddress, this.username, this.error});
 }
 
 class BrixAddressResult {
@@ -589,7 +662,13 @@ class BrixAddressResult {
   final String? email;
   final bool hasWebPubkey;
 
-  BrixAddressResult({required this.hasAddress, this.address, this.username, this.phone, this.email, this.hasWebPubkey = false});
+  BrixAddressResult(
+      {required this.hasAddress,
+      this.address,
+      this.username,
+      this.phone,
+      this.email,
+      this.hasWebPubkey = false});
 }
 
 class BrixPendingPayment {
@@ -610,7 +689,8 @@ class BrixPendingPayment {
   });
 
   /// Bruto − taxa = líquido. Se o servidor não enviar gross, usa amount+fee.
-  int get displayGross => grossAmountSats > 0 ? grossAmountSats : amountSats + feeSats;
+  int get displayGross =>
+      grossAmountSats > 0 ? grossAmountSats : amountSats + feeSats;
 }
 
 class BrixResolveResult {
@@ -621,7 +701,13 @@ class BrixResolveResult {
   final String? nostrPubkey;
   final String? error;
 
-  BrixResolveResult({required this.found, this.brixAddress, this.username, this.matchedBy, this.nostrPubkey, this.error});
+  BrixResolveResult(
+      {required this.found,
+      this.brixAddress,
+      this.username,
+      this.matchedBy,
+      this.nostrPubkey,
+      this.error});
 }
 
 class BrixInvoiceRequest {
@@ -630,5 +716,9 @@ class BrixInvoiceRequest {
   final String createdAt;
   final String? comment;
 
-  BrixInvoiceRequest({required this.id, required this.amountSats, required this.createdAt, this.comment});
+  BrixInvoiceRequest(
+      {required this.id,
+      required this.amountSats,
+      required this.createdAt,
+      this.comment});
 }
