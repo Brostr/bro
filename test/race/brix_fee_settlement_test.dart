@@ -219,6 +219,7 @@ void main() {
       return service.sendBrixFeeForTest(
         {
           'requestId': requestId,
+          'paymentHash': paymentHash,
           'feeSats': 1405,
           'idempotencyKey': '11111111-1111-4111-8111-111111111111',
         },
@@ -651,6 +652,11 @@ void main() {
       expect(prefs.getStringList('brix_paid_fee_request_ids'), [requestId]);
       expect(prefs.getStringList('brix_settled_fee_payment_hashes'), [feeHash]);
       expect(await BrixRelayService.getSettledFeePaymentHashes(), {feeHash});
+      final links = await BrixRelayService.getSettledFeeLinks();
+      expect(links[paymentHash], {
+        'feePaymentHash': feeHash,
+        'feeSats': 1405,
+      });
     });
 
     test('display hash persists before paid marker and queue removal', () async {
@@ -674,6 +680,7 @@ void main() {
       expect(writes, [
         'brix_pending_fee_payments',
         'brix_pending_fee_payments',
+        'brix_settled_fee_links',
         'brix_settled_fee_payment_hashes',
         'brix_paid_fee_request_ids',
         'brix_pending_fee_payments',

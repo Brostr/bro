@@ -5,20 +5,20 @@
 
 Prazo: tudo entregue e aprovado até **30/nov**.
 
-## Estabilização v848 — BRIX e taxas (24/11)
+## Estabilização v849 — BRIX e taxas (24/11)
 
 - R3/expiração automática de aceites permanece **descartado** nesta linha; não reintroduzir com as correções de estabilização ou performance.
 - BRIX: o evento Spark pode persistir o recebimento antes do claim autenticado. O merge por `paymentHash` agora enriquece o mesmo registro com bruto/taxa do servidor, inclusive quando o SDK já contém a transação. Leitura/merge/escrita são serializados para não perder metadados ou pagamentos concorrentes.
 - Taxa da plataforma: os caminhos AutoPay/Winner/Reconcile com provedor já liquidado também reconciliam a taxa. Hash salvo não confirmado na carteira é fail-closed: não autoriza nova cobrança. O Winner mantém a pendência para retry se a taxa não puder ser confirmada.
 - Build interno do Codemagic passa a ser somente manual; pushes em `test/*` não consomem minutos macOS automaticamente.
 - Taxa BRIX online: máquina de estados persistente (`awaitingPaymentHash`, `awaitingReceipt`, `sending`, `pendingSettlement`). Nenhum envio por tempo ou por invoice apenas criada; recebimento exige hash/direção/valor liquidados. Envio exige invoice com valor exato e persistência prévia. Timeout/crash reconcilia a mesma invoice/key; falha ambígua preserva a tentativa original.
-- A 846 foi descartada antes de instalação por ainda conter o envio BRIX temporizado. A 847 substitui esse identificador; a 848 adiciona a regra comercial unificada e os recibos BRIX.
-- Validação local: gate `test/race test/integration` **136/136**; análise dos arquivos da recuperação sem problemas; revisão independente final sem achados significativos. Testes financeiros com mocks, sem pagamentos reais. Liberação externa ainda depende de validação real Android/iOS, deploy do servidor BRIX e aprovação da Carol.
+- A 846 foi descartada antes de instalação por ainda conter o envio BRIX temporizado. A 847 substitui esse identificador; a 848 adicionou a regra comercial unificada e a 849 consolida os recibos BRIX líquidos.
+- Validação local: gate `test/race test/integration` **140/140**; análise dos arquivos da recuperação sem problemas; revisão independente final sem achados significativos. Testes financeiros com mocks, sem pagamentos reais. Servidor BRIX publicado em `3ea2546` (0,5%, mínimo 1 sat). Liberação externa ainda depende de validação real Android/iOS e aprovação da Carol.
 
 ### BRIX — regra comercial e recibos
 
 - Taxa padronizada em **0,5% com mínimo de 1 sat** para recebimento online e offline. Valores de até 1 sat não geram taxa.
-- Online: recebimento integral e saída separada identificada como taxa BRIX após liquidação. Offline: bruto − taxa = líquido.
+- Online e offline: uma única entrada BRIX líquida no histórico, com bruto − taxa = líquido no detalhe. A saída da taxa só é ocultada quando o par recebimento/taxa existe e a consolidação foi aplicada; taxa de rede fica preservada no detalhe.
 - Recibos BRIX não exibem a nota de 3%/2% das ordens; taxa de rede igual a zero não é exibida.
 
 ### Próxima atualização — recuperação BRIX por email

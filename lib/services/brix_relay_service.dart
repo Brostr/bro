@@ -535,6 +535,7 @@ class BrixRelayService {
   final Set<String> _paidFees = {};
   static const _paidFeesKey = 'brix_paid_fee_request_ids';
   static const _settledFeeHashesKey = 'brix_settled_fee_payment_hashes';
+  static const _settledFeeLinksKey = 'brix_settled_fee_links';
   bool _paidFeesLoaded = false;
   // v661: Track claims to prevent duplicates — agora PERSISTENTE. Antes era só
   // em memória: se o app crashava/fechava entre marcar o pagamento como
@@ -575,6 +576,18 @@ class BrixRelayService {
       return (prefs.getStringList(_settledFeeHashesKey) ?? const <String>[]).toSet();
     } catch (_) {
       return <String>{};
+    }
+  }
+
+  static Future<Map<String, Map<String, dynamic>>> getSettledFeeLinks() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final decoded = jsonDecode(prefs.getString(_settledFeeLinksKey) ?? '{}');
+      if (decoded is! Map) return <String, Map<String, dynamic>>{};
+      return decoded.map((key, value) => MapEntry(
+          key.toString(), Map<String, dynamic>.from(value as Map)));
+    } catch (_) {
+      return <String, Map<String, dynamic>>{};
     }
   }
 
@@ -1057,7 +1070,12 @@ class BrixRelayService {
       paymentHash: feePaymentHash,
       feeSats: fee['feeSats'] as int,
     )) {
-      await _settleBrixFee(requestId, paymentHash: feePaymentHash);
+      await _settleBrixFee(
+        requestId,
+        paymentHash: feePaymentHash,
+        incomingPaymentHash: fee['paymentHash'] as String?,
+        feeSats: fee['feeSats'] as int,
+      );
       return;
     }
     if (isMissingOutgoingPayment(status)) {
@@ -1082,10 +1100,27 @@ class BrixRelayService {
     }
   }
 
-  Future<void> _settleBrixFee(String requestId, {String? paymentHash}) async {
+  Future<void> _settleBrixFee(
+    String requestId, {
+    String? paymentHash,
+    String? incomingPaymentHash,
+    int? feeSats,
+  }) async {
     await _withFeeStorageLock(() async {
       final prefs = await _feePrefs();
       if (paymentHash != null && paymentHash.isNotEmpty) {
+        if (incomingPaymentHash != null &&
+            incomingPaymentHash.isNotEmpty &&
+            feeSats != null) {
+          final links = await getSettledFeeLinks();
+          links[incomingPaymentHash] = {
+            'feePaymentHash': paymentHash,
+            'feeSats': feeSats,
+          };
+          final saved = await prefs.setString(
+              _settledFeeLinksKey, jsonEncode(links));
+          if (!saved) throw StateError('Could not persist BRIX fee link');
+        }
         final hashes = prefs.getStringList(_settledFeeHashesKey) ?? <String>[];
         if (!hashes.contains(paymentHash)) {
           hashes.add(paymentHash);
@@ -1210,7 +1245,12 @@ class BrixRelayService {
           feeSats: feeSats,
         );
         if (settled) {
-          await _settleBrixFee(requestId, paymentHash: feePaymentHash);
+          await _settleBrixFee(
+            requestId,
+            paymentHash: feePaymentHash,
+            incomingPaymentHash: fee['paymentHash'] as String?,
+            feeSats: feeSats,
+          );
           broLog('⚡ [BRIX-RELAY] Fee settled: $feeSats sats');
           return;
         }

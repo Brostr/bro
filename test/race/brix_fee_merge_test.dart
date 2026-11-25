@@ -69,6 +69,102 @@ void main() {
       expect(merged['isBrix'], isTrue);
     });
 
+    test('wallet shows one net BRIX receipt and hides separate fee debit', () {
+      final payments = [
+        {
+          'paymentHash': 'incoming-200',
+          'amountSats': 200,
+          'description': 'BRIX Payment',
+          'type': 'received',
+        },
+        {
+          'paymentHash': 'fee-1',
+          'amountSats': 1,
+          'fees': 3,
+          'type': 'sent',
+        },
+      ];
+      final consolidated = consolidateBrixReceipts(
+        payments,
+        {'fee-1'},
+        {
+          'incoming-200': {'feePaymentHash': 'fee-1', 'feeSats': 1},
+        },
+      );
+
+      expect(consolidated, hasLength(1));
+      expect(consolidated.single['amountSats'], 199);
+      expect(consolidated.single['grossAmountSats'], 200);
+      expect(consolidated.single['feeSats'], 1);
+      expect(consolidated.single['brixNetworkFeeSats'], 3);
+      expect(consolidated.single['isBrix'], isTrue);
+    });
+
+    test('legacy fee without link remains visible instead of disappearing', () {
+      final payments = [
+        {
+          'paymentHash': 'incoming-200',
+          'amountSats': 200,
+          'description': 'BRIX Payment',
+          'type': 'received',
+        },
+        {
+          'paymentHash': 'legacy-fee',
+          'amountSats': 1,
+          'type': 'sent',
+        },
+      ];
+      final consolidated = consolidateBrixReceipts(
+        payments,
+        {'legacy-fee'},
+        const <String, Map<String, dynamic>>{},
+      );
+
+      expect(consolidated, hasLength(2));
+      expect(consolidated[0]['amountSats'], 200);
+      expect(consolidated[1]['paymentHash'], 'legacy-fee');
+    });
+
+    test('missing incoming receipt keeps the outgoing fee visible', () {
+      final payments = [
+        {
+          'paymentHash': 'fee-1',
+          'amountSats': 1,
+          'fees': 3,
+          'type': 'sent',
+        },
+      ];
+      final consolidated = consolidateBrixReceipts(
+        payments,
+        {'fee-1'},
+        {
+          'missing-incoming': {'feePaymentHash': 'fee-1', 'feeSats': 1},
+        },
+      );
+
+      expect(consolidated, hasLength(1));
+      expect(consolidated.single['paymentHash'], 'fee-1');
+    });
+
+    test('platform filter preserves legacy BRIX fee but hides order fee', () {
+      expect(
+        shouldHideFeePayment(
+          paymentHash: 'legacy-brix-fee',
+          platformFeeHashes: {'legacy-brix-fee', 'order-fee'},
+          brixFeeHashes: {'legacy-brix-fee'},
+        ),
+        isFalse,
+      );
+      expect(
+        shouldHideFeePayment(
+          paymentHash: 'order-fee',
+          platformFeeHashes: {'legacy-brix-fee', 'order-fee'},
+          brixFeeHashes: {'legacy-brix-fee'},
+        ),
+        isTrue,
+      );
+    });
+
     test('concurrent storage operations cannot overwrite each other', () async {
       final stored = <dynamic>[];
       final firstRead = Completer<void>();
