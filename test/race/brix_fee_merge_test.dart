@@ -125,6 +125,29 @@ void main() {
       expect(consolidated[1]['paymentHash'], 'legacy-fee');
     });
 
+    test('settled link consolidates even when SDK omits outgoing fee', () {
+      final payments = [
+        {
+          'paymentHash': 'incoming-200',
+          'amountSats': 200,
+          'description': 'BRIX Payment',
+          'type': 'received',
+        },
+      ];
+      final consolidated = consolidateBrixReceipts(
+        payments,
+        {'fee-1'},
+        {
+          'incoming-200': {'feePaymentHash': 'fee-1', 'feeSats': 1},
+        },
+      );
+
+      expect(consolidated, hasLength(1));
+      expect(consolidated.single['amountSats'], 199);
+      expect(consolidated.single['grossAmountSats'], 200);
+      expect(consolidated.single['feeSats'], 1);
+    });
+
     test('missing incoming receipt keeps the outgoing fee visible', () {
       final payments = [
         {

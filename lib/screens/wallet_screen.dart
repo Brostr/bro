@@ -53,11 +53,11 @@ List<Map<String, dynamic>> consolidateBrixReceipts(
     if (feeSats <= 0 || feeHash.isEmpty) continue;
     final feeIndex = consolidated.indexWhere(
         (candidate) => candidate['paymentHash']?.toString() == feeHash);
-    if (feeIndex == -1) continue;
     final gross =
         ((payment['amountSats'] ?? payment['amount'] ?? 0) as num).toInt();
-    final outgoingNetworkFee =
-        (consolidated[feeIndex]['fees'] as num?)?.toInt() ?? 0;
+    final outgoingNetworkFee = feeIndex == -1
+        ? 0
+        : (consolidated[feeIndex]['fees'] as num?)?.toInt() ?? 0;
     consolidated[i] = {
       ...payment,
       'grossAmountSats': gross,
@@ -3522,8 +3522,6 @@ class _WalletScreenState extends State<WalletScreen> {
     final brixFeeSats = (payment['feeSats'] as num?)?.toInt() ??
         (brixFeeLink?['feeSats'] as num?)?.toInt() ??
         0;
-    final brixGrossSats = (payment['grossAmountSats'] as num?)?.toInt() ??
-        ((amount is num ? amount.toInt() : 0) + brixFeeSats);
     
     // v411: Extract BRIX memo from description (format: "BRIX: <memo>")
     String? brixMemo;
@@ -3856,26 +3854,10 @@ class _WalletScreenState extends State<WalletScreen> {
                         ),
                       ),
                       const SizedBox(height: 8),
-                      if (networkFeeSats == null || networkFeeSats > 0)
+                      if (!isBrixPayment && (networkFeeSats == null || networkFeeSats > 0))
                         _buildDetailRow(feeLabel, feeValue),
-                      // BRIX: mostrar bruto − taxa = líquido quando disponível
-                      if (isReceived && isBrixPayment) ...[
-                        Builder(builder: (context) {
-                          final feeSats = brixFeeSats;
-                          if (feeSats <= 0) return const SizedBox.shrink();
-                          final grossSats = brixGrossSats;
-                          final netSats = grossSats - feeSats;
-                          return Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const SizedBox(height: 8),
-                              _buildDetailRow('⚡ BRIX bruto', '$grossSats sats'),
-                              _buildDetailRow('⚡ BRIX taxa', '−$feeSats sats'),
-                              _buildDetailRow('⚡ BRIX líquido', '$netSats sats'),
-                            ],
-                          );
-                        }),
-                      ],
+                      if (isReceived && isBrixPayment && brixFeeSats > 0)
+                        _buildDetailRow('Taxa BRIX (0,5%)', '−$brixFeeSats sat'),
                       // v706: TODAS as taxas condensadas aqui — Bro provedor
                       // (3%), app Bro (2%) e Spark. A nota embaixo virou uma
                       // linha só; o detalhamento é que explica (pedido Carol).
@@ -3907,8 +3889,9 @@ class _WalletScreenState extends State<WalletScreen> {
                           );
                         }),
                       ],
-                      const SizedBox(height: 8),
-                      Container(
+                      if (!isBrixPayment) ...[
+                        const SizedBox(height: 8),
+                        Container(
                         width: double.infinity,
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
@@ -3923,9 +3906,7 @@ class _WalletScreenState extends State<WalletScreen> {
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                isBrixPayment
-                                    ? 'BRIX: bruto − taxa de 0,5% (mínimo 1 sat) = líquido. A taxa de rede, quando existir, aparece apenas neste detalhamento.'
-                                    : AppLocalizations.of(context).t('wallet_fees_note'),
+                                AppLocalizations.of(context).t('wallet_fees_note'),
                                 style: TextStyle(
                                   color: Colors.white.withOpacity(0.55),
                                   fontSize: 12,
@@ -3936,6 +3917,7 @@ class _WalletScreenState extends State<WalletScreen> {
                           ],
                         ),
                       ),
+                      ],
                     ],
                   );
                 }),
