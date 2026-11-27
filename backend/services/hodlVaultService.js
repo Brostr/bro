@@ -47,6 +47,7 @@ class HodlVaultService {
     this._sdk = null;
     this._initializing = null;
     this._records = new Map(); // paymentHash → record
+    this._creatingInvoices = new Set();
     this._pollTimer = null;
     this._masterKey = null; // Buffer de 32 bytes
     this._loadState();
@@ -158,11 +159,15 @@ class HodlVaultService {
 
   /** Garantia ATIVA de um provedor (qualquer status não-final). */
   getActiveForProvider(providerPubkey) {
+    let active = null;
     for (const r of this._records.values()) {
       if (r.providerPubkey !== providerPubkey) continue;
-      if (['awaiting_payment', 'locked', 'release_pending'].includes(r.status)) return r;
+      if (r.status === 'locked') return r;
+      if (r.status === 'awaiting_payment' || r.status === 'release_pending') {
+        active ??= r;
+      }
     }
-    return null;
+    return active;
   }
 
   listAll() {
@@ -178,28 +183,35 @@ class HodlVaultService {
   }
 
   /**
-   * Cria o invoice HODL da garantia. Um provedor = uma garantia ativa por vez.
+   * Cria o invoice HODL da garantia. Serializa a criação por provedor.
    * expirySecs custom só é permitido pro ADMIN (testes com ciclos curtos).
    */
-  async createLockInvoice({ providerPubkey, tierId, tierName, amountSats, expirySecs, upgrade = false }) {
+  async createLockInvoice(options) {
+    const { providerPubkey } = options;
+    if (this._creatingInvoices.has(providerPubkey)) {
+      throw new Error('Criação de garantia em andamento');
+    }
+    this._creatingInvoices.add(providerPubkey);
+    try {
+      return await this._createLockInvoice(options);
+    } finally {
+      this._creatingInvoices.delete(providerPubkey);
+    }
+  }
+
+  async _createLockInvoice({ providerPubkey, tierId, tierName, amountSats, expirySecs, upgrade = false }) {
+    for (const pending of this._records.values()) {
+      if (pending.providerPubkey !== providerPubkey || pending.status !== 'awaiting_payment') continue;
+      if (pending.tierId === tierId) {
+        return { invoice: pending.invoice, paymentHash: pending.paymentHash, reused: true };
+      }
+      throw new Error('Provedor já tem uma garantia aguardando pagamento');
+    }
+
     const existing = this.getActiveForProvider(providerPubkey);
-    if (existing) {
-      // Idempotente: se já tem garantia ativa do MESMO tier, devolve o invoice
-      // atual (app pode ter perdido a resposta anterior).
-      if (existing.status === 'awaiting_payment' && existing.tierId === tierId) {
-        return { invoice: existing.invoice, paymentHash: existing.paymentHash, reused: true };
-      }
-      // UPGRADE/DOWNGRADE de tier: a garantia antiga é liberada na hora (os
-      // sats voltam no vencimento DELA) e a nova é criada. Sem admin — o
-      // provedor segue coberto durante a transição (a antiga continua
-      // travada até o vencimento, então nunca há janela sem garantia).
-      if (upgrade === true && existing.status === 'locked' && existing.tierId !== tierId) {
-        existing.status = 'released';
-        existing.history.push({ at: Math.floor(Date.now() / 1000), event: 'released_for_upgrade', toTier: tierId });
-        console.log(`🔀 [Vault] upgrade de tier: ${existing.tierId} → ${tierId} (${providerPubkey.substring(0, 8)}). Antiga devolvida no vencimento.`);
-      } else {
-        throw new Error(`Provedor já tem garantia ativa (status: ${existing.status})`);
-      }
+    const replacing = upgrade === true && existing?.status === 'locked' && existing.tierId !== tierId;
+    if (existing && !replacing) {
+      throw new Error(`Provedor já tem garantia ativa (status: ${existing.status})`);
     }
 
     const adminPk = (process.env.ADMIN_PUBKEY || '').toLowerCase();
@@ -241,6 +253,7 @@ class HodlVaultService {
       expiresAt: null, // preenchido quando travar (pagamento chega)
       lockedAt: null,
       preimageEnc: this._encryptPreimage(preimage),
+      ...(replacing ? { replacesPaymentHash: existing.paymentHash } : {}),
       renewals: [],
       history: [{ at: now, event: 'invoice_created', expirySecs: expiry }],
     };
@@ -500,7 +513,20 @@ class HodlVaultService {
       r.lockedAt = now;
       r.expiresAt = now + r.expirySecs;
       r.history.push({ at: now, event: 'locked' });
+      const previous = this._records.get(r.replacesPaymentHash);
+      const needsReleaseReview = previous?.status === 'locked' && previous.providerPubkey === r.providerPubkey;
+      if (needsReleaseReview) {
+        previous.status = 'release_pending';
+        previous.history.push({ at: now, event: 'replacement_locked', replacement: r.paymentHash });
+      }
       this._saveState();
+      const adminPk = (process.env.ADMIN_PUBKEY || '').toLowerCase();
+      if (needsReleaseReview && adminPk) {
+        await this._push(adminPk, {
+          title: '🔓 Garantia anterior aguardando revisão',
+          body: 'A nova garantia foi travada. Revise as ordens do provedor antes de liberar a anterior.',
+        }, { type: 'hodl_vault', subtype: 'admin_release_request', payment_hash: previous.paymentHash });
+      }
       await this._push(r.providerPubkey, {
         title: '🔒 Garantia travada com sucesso',
         body: `Seu tier ${r.tierName} está ativo com ${r.amountSats} sats em garantia.`,
@@ -513,7 +539,7 @@ class HodlVaultService {
       r.history.push({ at: now, event: 'settled_without_lock_ANOMALY' });
       this._saveState();
       console.error(`⚠️ [Vault] garantia SETTLED sem passar por locked: ${hash.substring(0, 12)}… — verificar`);
-    } else if ((r.status === 'locked' || r.status === 'released') && observed === 'returned') {
+    } else if (['locked', 'release_pending', 'released'].includes(r.status) && observed === 'returned') {
       const wasReleased = r.status === 'released';
       r.status = wasReleased ? 'returned' : 'expired_unreleased';
       r.history.push({ at: now, event: wasReleased ? 'returned_after_release' : 'EXPIRED_WITHOUT_RELEASE' });
