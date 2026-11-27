@@ -197,6 +197,14 @@ class PlatformFeeService {
   static Future<bool> _payFoundationShare(FeeSplit split, String orderId) async {
     if (!split.hasSplit) return true;
     if (_payInvoiceCallback == null) return false;
+    // v876 [write-ahead]: grava a pendência ANTES de tentar pagar.
+    //
+    // Antes, a entrada só era criada DEPOIS da falha. Se o app morresse
+    // durante o pagamento (liquidou mas o app não soube), o dinheiro ficava
+    // órfão para sempre. Com write-ahead, o pior caso vira "pagar duas vezes"
+    // — e como o destinatário é o NOSSO endereço, isso é estritamente melhor
+    // que perder a fatia.
+    await _queuePendingFoundation(split, orderId, error: 'em andamento');
     try {
       broLog('💼 [Fundação] Enviando ${split.foundationSats} sats para ${split.foundationAddress}');
       final ln = LnAddressService();
@@ -308,6 +316,9 @@ class PlatformFeeService {
         if (attempts >= 5) {
           broLog('⛔ [Fundação] ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}: '
               '5 tentativas — desistindo (verificar endereço $address)');
+          // v876: remove da fila para não crescer indefinidamente. O log
+          // acima é o registro permanente da desistência.
+          await _removePendingFoundation(orderId);
           continue;
         }
         final split = FeeSplit(

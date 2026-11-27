@@ -1513,15 +1513,24 @@ class BreezProvider with ChangeNotifier {
             prepareResp.amount.toInt() + preparedNetworkFeeSats(prepareResp);
       }
       if (requiredAmount != null && effectiveBalance < requiredAmount) {
-        final errorMsg =
-            'Saldo insuficiente. Você tem $currentBalance sats mas precisa de $requiredAmount sats';
+        // v876: distinguir "saldo realmente insuficiente" de "não consegui
+        // ler o saldo". Antes, uma falha de rede no getBalance virava
+        // currentBalance=0 e a mensagem dizia "você tem 0 sats" — confundindo
+        // o usuário numa blip de rede (caso 27/11, Orbot em modo VPN).
+        final balanceReadFailed = balanceInfo['ok'] == false;
+        final errorMsg = balanceReadFailed
+            ? 'Não foi possível ler o saldo da carteira agora. '
+                'Verifique sua conexão e tente novamente.'
+            : 'Saldo insuficiente. Você tem $currentBalance sats mas precisa de $requiredAmount sats';
         _setError(errorMsg);
         broLog('❌ $errorMsg');
         return {
           'success': false,
           'error': errorMsg,
-          'errorType': 'INSUFFICIENT_FUNDS',
-          'balance': currentBalance,
+          'errorType': balanceReadFailed
+              ? 'BALANCE_UNAVAILABLE'
+              : 'INSUFFICIENT_FUNDS',
+          'balance': balanceReadFailed ? null : currentBalance,
           'required': requiredAmount,
         };
       }

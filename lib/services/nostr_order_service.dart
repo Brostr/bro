@@ -1839,8 +1839,17 @@ class NostrOrderService {
           
           if (eventOrderId == orderId) {
             final eventTimestamp = event['created_at'] as int? ?? 0;
-            final eventStatus = content['status'] as String?;
-            
+            // v876 [defesa em profundidade]: o `bro_complete` (kind 30081)
+            // NUNCA dita status terminal. Mesmo clamp do
+            // fetchOrderUpdatesForUser — aqui o impacto é só o display do
+            // admin, mas manter a regra num lugar só evita que um caminho
+            // futuro a esqueça.
+            final eventKind = event['kind'] as int?;
+            final rawStatus = content['status'] as String?;
+            final eventStatus = eventKind == kindBroComplete
+                ? 'awaiting_confirmation'
+                : rawStatus;
+
             if (eventStatus != null && eventTimestamp > latestTimestamp) {
               latestTimestamp = eventTimestamp;
               latestStatus = eventStatus;
