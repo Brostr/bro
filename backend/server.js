@@ -190,10 +190,13 @@ app.get('/canonical/:orderId', watchtowerReadLimiter, (req, res) => {
 // Auth NIP-98: quem consulta as “minhas” deve assinar como provedor.
 app.get('/watchtower/available-orders', watchtowerReadLimiter, requireAuth, (req, res) => {
   const provider = req.query.provider ? String(req.query.provider) : null;
-  // Se provider tiver formato inválido (não hex 64), tratamos como público.
-  const isHex64 = provider && /^[0-9a-f]{64}$/.test(provider);
-  if (provider && !isHex64) return res.status(400).json({ error: 'provider invalid' });
-  const list = watchtower.getAvailableOrdersSnapshot(isHex64 ? provider : null);
+  if (provider && !/^[0-9a-f]{64}$/.test(provider)) {
+    return res.status(400).json({ error: 'provider invalid' });
+  }
+  if (provider && provider !== req.verifiedPubkey) {
+    return res.status(403).json({ error: 'Cannot view another provider\'s orders' });
+  }
+  const list = watchtower.getAvailableOrdersSnapshot(provider ? req.verifiedPubkey : null);
   res.json({ orders: list, ts: Math.floor(Date.now() / 1000) });
 });
 // v688: canal redundante do billCode (blob NIP-44 via backend+FCM quando os
