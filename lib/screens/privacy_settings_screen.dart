@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'dart:io' show Platform;
 import '../l10n/app_localizations.dart';
 import '../services/storage_service.dart';
 import '../services/biometric_lock_service.dart';
+import '../services/tor_service.dart';
 
 class PrivacySettingsScreen extends StatefulWidget {
   const PrivacySettingsScreen({Key? key}) : super(key: key);
@@ -12,6 +14,7 @@ class PrivacySettingsScreen extends StatefulWidget {
 
 class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
   bool _torEnabled = false;
+  bool _torActive = false;
   bool _nip44Enabled = true;
   bool _hideBalance = false;
   bool _sharePaymentReceipts = false;
@@ -29,6 +32,7 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
     // resetava a cada abertura do app, como o usuário reportou).
     final storage = StorageService();
     _torEnabled = await storage.getTorEnabled();
+    _torActive = TorService.instance.isActive;
     _nip44Enabled = await storage.getNip44Enabled();
     _hideBalance = await storage.getHideBalance();
     _sharePaymentReceipts = await storage.getShareReceipts();
@@ -296,11 +300,18 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      _torEnabled 
-                          ? AppLocalizations.of(context).t('privacy_ip_hidden')
-                          : AppLocalizations.of(context).t('privacy_hides_real_ip'),
+                      // v857: estado REAL, não o desejo do usuário. Antes dizia
+                      // "IP oculto" só porque o toggle estava ligado, mesmo sem
+                      // nenhum proxy instalado (o toggle não fazia nada).
+                      !_torEnabled
+                          ? AppLocalizations.of(context).t('privacy_hides_real_ip')
+                          : (_torActive
+                              ? AppLocalizations.of(context).t('privacy_ip_hidden')
+                              : 'Orbot não detectado — abra o Orbot para o Tor funcionar'),
                       style: TextStyle(
-                        color: _torEnabled ? Colors.green : const Color(0x99FFFFFF),
+                        color: !_torEnabled
+                            ? const Color(0x99FFFFFF)
+                            : (_torActive ? Colors.green : Colors.orange),
                         fontSize: 13,
                       ),
                     ),
@@ -309,12 +320,13 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
               ),
               Switch(
                 value: _torEnabled,
-                onChanged: (value) {
+                onChanged: (value) async {
                   setState(() => _torEnabled = value);
-                  _saveSetting('tor_enabled', value);
-                  
+                  final ok = await TorService.instance.setEnabled(value);
+                  if (!mounted) return;
+                  setState(() => _torActive = ok);
                   if (value) {
-                    _showTorInfo();
+                    _showTorInfo(daemonOk: ok);
                   }
                 },
                 activeColor: const Color(0xFF9C27B0),
@@ -342,13 +354,49 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
                 ],
               ),
             ),
+            const SizedBox(height: 8),
+            // v857: verificação do daemon. Sem isso o usuário não tem como
+            // saber se o Tor está de fato roteando o tráfego.
+            InkWell(
+              onTap: () async {
+                final ok = await TorService.instance.recheck();
+                if (!mounted) return;
+                setState(() => _torActive = ok);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(ok
+                        ? '✅ Tor ativo — tráfego roteado por 127.0.0.1:${Platform.isIOS ? 39050 : 9050}'
+                        : '⚠️ Orbot não respondeu. Abra o Orbot e ative o modo VPN/SOCKS.'),
+                    backgroundColor: ok ? Colors.green : Colors.orange,
+                  ),
+                );
+              },
+              child: Row(
+                children: [
+                  Icon(
+                    _torActive ? Icons.check_circle : Icons.error_outline,
+                    color: _torActive ? Colors.green : Colors.orange,
+                    size: 16,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _torActive ? 'Tor conectado — verificar de novo' : 'Verificar conexão Tor',
+                    style: TextStyle(
+                      color: _torActive ? Colors.green : Colors.orange,
+                      fontSize: 12,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ],
       ),
     );
   }
 
-  void _showTorInfo() {
+  void _showTorInfo({bool daemonOk = true}) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -361,9 +409,37 @@ class _PrivacySettingsScreenState extends State<PrivacySettingsScreen> {
             Text(AppLocalizations.of(context).t('privacy_tor_enabled'), style: const TextStyle(color: Colors.white)),
           ],
         ),
-        content: Text(
-          AppLocalizations.of(context).t('privacy_tor_info'),
-          style: const TextStyle(color: Color(0xB3FFFFFF)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              AppLocalizations.of(context).t('privacy_tor_info'),
+              style: const TextStyle(color: Color(0xB3FFFFFF)),
+            ),
+            const SizedBox(height: 12),
+            // v857: instrução real de uso — sem isso o toggle não funciona e
+            // o usuário não tem como saber por quê.
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: (daemonOk ? Colors.green : Colors.orange).withOpacity(0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                daemonOk
+                    ? '✅ Orbot detectado. Seu tráfego de relays, API e BRIX passa pelo Tor.'
+                    : '⚠️ Instale e abra o Orbot (Play Store / App Store) e ative o modo SOCKS5. '
+                        'Sem ele o Tor não tem por onde rotear.\n\n'
+                        'Obs.: o SDK da carteira Lightning (Breez/Spark) usa conexão própria '
+                        'e não passa pelo Tor.',
+                style: TextStyle(
+                  color: daemonOk ? Colors.green : Colors.orange,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ],
         ),
         actions: [
           ElevatedButton(

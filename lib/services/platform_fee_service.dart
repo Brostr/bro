@@ -7,6 +7,34 @@ import 'lnaddress_service.dart';
 import 'coordinator_service.dart';
 import '../providers/breez_provider_export.dart';
 
+/// v857: resultado do split da taxa da plataforma.
+///
+/// Regra comercial (Carol, 26/11): coordinator fica com 80% do que recebe,
+/// fundação com 20%. Sem coordinator escolhido, 100% vai para a plataforma.
+class FeeSplit {
+  /// Endereço que recebe a maior fatia (coordinator, ou plataforma se Automático).
+  final String primaryAddress;
+  final int primarySats;
+
+  /// Endereço da fundação. Vazio quando não há split.
+  final String foundationAddress;
+  final int foundationSats;
+
+  /// Nome do coordinator (para log/recibo). Vazio quando Automático.
+  final String coordinatorName;
+
+  const FeeSplit({
+    required this.primaryAddress,
+    required this.primarySats,
+    required this.foundationAddress,
+    required this.foundationSats,
+    this.coordinatorName = '',
+  });
+
+  bool get hasSplit => foundationSats > 0 && foundationAddress.isNotEmpty;
+  int get totalSats => primarySats + foundationSats;
+}
+
 /// Serviço para rastrear taxas da plataforma
 ///
 /// MODO ATUAL: TRACKING ONLY
@@ -24,6 +52,14 @@ class PlatformFeeService {
   static const String _autoCollectionKey = 'platform_auto_collection_enabled';
   static const String _paidOrderIdsKey = 'platform_fee_paid_order_ids';
   static const String _feePaymentHashesKey = 'platform_fee_payment_hashes';
+
+  /// v876: fila persistente de fatias da fundação que falharam.
+  ///
+  /// Quando o pagamento principal (coordinator) passa mas a fatia de 20% da
+  /// fundação falha, o dinheiro fica órfão — antes só logava. Agora a
+  /// pendência é persistida e reprocessada no próximo boot/reconciliação.
+  /// Formato: [{orderId, address, sats, attempts, lastError, createdAt}]
+  static const String _pendingFoundationKey = 'platform_fee_pending_foundation';
 
   /// Taxa da plataforma — centralizada em AppConfig
   static const double platformFeePercent = AppConfig.platformFeePercent;
@@ -153,6 +189,141 @@ class PlatformFeeService {
     return false;
   }
 
+  /// v857: paga a fatia da FUNDAÇÃO (20% da taxa quando há coordinator).
+  ///
+  /// Chamado DEPOIS do pagamento principal ter sucesso. Falha aqui não
+  /// invalida o pagamento — o coordinator já recebeu. Só loga e retorna false;
+  /// a fundação pode ser reconciliada pelo histórico da carteira.
+  static Future<bool> _payFoundationShare(FeeSplit split, String orderId) async {
+    if (!split.hasSplit) return true;
+    if (_payInvoiceCallback == null) return false;
+    try {
+      broLog('💼 [Fundação] Enviando ${split.foundationSats} sats para ${split.foundationAddress}');
+      final ln = LnAddressService();
+      final inv = await ln.getInvoice(
+        lnAddress: split.foundationAddress,
+        amountSats: split.foundationSats,
+        comment: 'Bro Foundation Fee - ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}',
+      );
+      final invoice = inv['invoice'] as String?;
+      if (inv['success'] != true || invoice == null || invoice.isEmpty) {
+        broLog('⚠️ [Fundação] Falha ao obter invoice: ${inv['error'] ?? 'unknown'}');
+        await _queuePendingFoundation(split, orderId,
+            error: 'invoice: ${inv['error'] ?? 'unknown'}');
+        return false;
+      }
+      final pay = await _payInvoiceCallback!(invoice);
+      final ok = pay != null && pay['success'] == true;
+      if (ok) {
+        broLog('✅ [Fundação] ${split.foundationSats} sats pagos');
+        await _removePendingFoundation(orderId);
+      } else {
+        broLog('⚠️ [Fundação] pagamento falhou: $pay');
+        await _queuePendingFoundation(split, orderId,
+            error: 'pay: ${pay?['error'] ?? 'unknown'}');
+      }
+      return ok;
+    } catch (e) {
+      broLog('⚠️ [Fundação] erro: $e');
+      await _queuePendingFoundation(split, orderId, error: e.toString());
+      return false;
+    }
+  }
+
+  /// v876: persiste a fatia da fundação que falhou, para retry posterior.
+  ///
+  /// Sem isso, uma falha de rede no momento do split deixava os 20% órfãos
+  /// para sempre — só um log registrava. A fila sobrevive à reinstalação.
+  static Future<void> _queuePendingFoundation(
+    FeeSplit split,
+    String orderId, {
+    required String error,
+  }) async {
+    if (!split.hasSplit) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_pendingFoundationKey) ?? '[]';
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      // Idempotente por orderId: atualiza a tentativa em vez de duplicar.
+      final idx = list.indexWhere((e) => e['orderId'] == orderId);
+      final entry = {
+        'orderId': orderId,
+        'address': split.foundationAddress,
+        'sats': split.foundationSats,
+        'attempts': idx >= 0 ? ((list[idx]['attempts'] as int?) ?? 0) + 1 : 1,
+        'lastError': error,
+        'createdAt': idx >= 0
+            ? list[idx]['createdAt']
+            : DateTime.now().toIso8601String(),
+      };
+      if (idx >= 0) {
+        list[idx] = entry;
+      } else {
+        list.add(entry);
+      }
+      await prefs.setString(_pendingFoundationKey, jsonEncode(list));
+      broLog('📥 [Fundação] pendência registrada para ${orderId.length > 8 ? orderId.substring(0, 8) : orderId} '
+          '(${split.foundationSats} sats, tentativa ${entry['attempts']})');
+    } catch (e) {
+      broLog('⚠️ [Fundação] falha ao persistir pendência: $e');
+    }
+  }
+
+  static Future<void> _removePendingFoundation(String orderId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_pendingFoundationKey) ?? '[]';
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      final before = list.length;
+      list.removeWhere((e) => e['orderId'] == orderId);
+      if (list.length != before) {
+        await prefs.setString(_pendingFoundationKey, jsonEncode(list));
+      }
+    } catch (_) {}
+  }
+
+  /// v876: reprocessa as fatias da fundação que falharam.
+  ///
+  /// Chamado no boot (após a carteira estar pronta) e pela reconciliação.
+  /// Limite de 5 tentativas por entrada para não virar loop infinito com
+  /// endereço inválido.
+  static Future<int> retryPendingFoundationShares() async {
+    if (_payInvoiceCallback == null) return 0;
+    int paid = 0;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_pendingFoundationKey) ?? '[]';
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      if (list.isEmpty) return 0;
+      broLog('🔄 [Fundação] ${list.length} pendência(s) para reprocessar');
+      for (final entry in List<Map<String, dynamic>>.from(list)) {
+        final orderId = entry['orderId']?.toString() ?? '';
+        final address = entry['address']?.toString() ?? '';
+        final sats = (entry['sats'] as num?)?.toInt() ?? 0;
+        final attempts = (entry['attempts'] as num?)?.toInt() ?? 0;
+        if (orderId.isEmpty || address.isEmpty || sats <= 0) {
+          await _removePendingFoundation(orderId);
+          continue;
+        }
+        if (attempts >= 5) {
+          broLog('⛔ [Fundação] ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}: '
+              '5 tentativas — desistindo (verificar endereço $address)');
+          continue;
+        }
+        final split = FeeSplit(
+          primaryAddress: '',
+          primarySats: 0,
+          foundationAddress: address,
+          foundationSats: sats,
+        );
+        if (await _payFoundationShare(split, orderId)) paid++;
+      }
+    } catch (e) {
+      broLog('⚠️ [Fundação] erro no retry: $e');
+    }
+    return paid;
+  }
+
   /// ETAPA 2 (roteamento de taxa p/ coordinator): resolve para qual endereço
   /// Lightning a taxa vai.
   /// - Se o usuário escolheu um coordinator específico (não "Automático") e ele
@@ -160,9 +331,24 @@ class PlatformFeeService {
   /// - Senão (Automático), usa o endereço fixo atual (Bro original) — mesmo
   ///   comportamento de sempre.
   ///
-  /// NOTA: enquanto a Etapa 2 não for ligada na UI, a seleção fica "Automático"
-  /// e este método sempre retorna o endereço padrão (zero mudança de hoje).
+  /// v857: quando há coordinator, a taxa é DIVIDIDA — 80% para o coordinator e
+  /// 20% para a fundação (decisão da Carol, 26/11). Ver [resolveFeeSplit].
   static Future<String> _resolveFeeDestination() async {
+    final split = await resolveFeeSplit();
+    return split.primaryAddress;
+  }
+
+  /// v857: resolve o split da taxa da plataforma.
+  ///
+  /// Regra comercial (Carol, 26/11): o coordinator fica com **80%** de tudo o
+  /// que recebe; **20%** vai para a fundação (desenvolvimento do código).
+  ///
+  /// Sem coordinator escolhido (Automático), 100% vai para o endereço da
+  /// plataforma — comportamento idêntico ao anterior.
+  ///
+  /// Retorna um [FeeSplit] com os dois destinos e os valores em sats. Quando
+  /// `foundationSats == 0` (sem coordinator, ou taxa de 1 sat), só há um envio.
+  static Future<FeeSplit> resolveFeeSplit({int totalFeeSats = 0}) async {
     try {
       final svc = CoordinatorService();
       await svc.loadSelection();
@@ -177,15 +363,52 @@ class PlatformFeeService {
           card = svc.selectedCard(cards);
         }
         if (card != null && card.lnAddress.isNotEmpty) {
-          broLog(
-              '💼 Taxa roteada para coordinator escolhido: ${card.name} (${card.lnAddress})');
-          return card.lnAddress;
+          // v876 [SEGURANÇA — anti self-dealing]: a fatia da fundação vai
+          // SEMPRE para o endereço da plataforma, NUNCA para a tag
+          // `foundation` do cartão.
+          //
+          // O cartão é um evento Nostr público (kind 30082) que qualquer um
+          // publica. Antes, um coordinator malicioso anunciava `ln`=ele e
+          // `foundation`=ele e capturava 100% da taxa — os 20% da fundação
+          // eram inexigíveis. A tag continua no cartão como informação, mas
+          // não decide o destino do dinheiro.
+          final foundationAddr = AppConfig.platformLightningAddress;
+          if (card.foundationLnAddress.isNotEmpty &&
+              card.foundationLnAddress != foundationAddr) {
+            broLog('🛡️ v876: cartão ${card.name} anuncia fundação '
+                '${card.foundationLnAddress} — IGNORADO (destino fixo: '
+                '$foundationAddr)');
+          }
+
+          // Arredonda a fatia da fundação para baixo e garante que o
+          // coordinator nunca fique com menos que o combinado. Com taxa de
+          // 1 sat, a fundação fica com 0 e o coordinator com 1 (não dá para
+          // dividir 1 sat; cobrar 2 seria mudar o preço).
+          final foundationSats =
+              (totalFeeSats * CoordinatorCard.foundationShare).floor();
+          final coordinatorSats = totalFeeSats - foundationSats;
+
+          broLog('💼 Taxa roteada: ${card.name} (${card.lnAddress}) '
+              '$coordinatorSats sats + fundação ($foundationAddr) $foundationSats sats');
+
+          return FeeSplit(
+            primaryAddress: card.lnAddress,
+            primarySats: coordinatorSats,
+            foundationAddress: foundationAddr,
+            foundationSats: foundationSats,
+            coordinatorName: card.name,
+          );
         }
       }
     } catch (e) {
-      broLog('⚠️ _resolveFeeDestination: fallback p/ padrão ($e)');
+      broLog('⚠️ resolveFeeSplit: fallback p/ padrão ($e)');
     }
-    return AppConfig.platformLightningAddress;
+    return FeeSplit(
+      primaryAddress: AppConfig.platformLightningAddress,
+      primarySats: totalFeeSats,
+      foundationAddress: '',
+      foundationSats: 0,
+    );
   }
 
   /// Inicializa o serviço carregando ordens já pagas do storage
@@ -253,6 +476,13 @@ class PlatformFeeService {
   /// Registra uma taxa de transação (TRACKING ONLY)
   /// Chamado quando um pagamento é confirmado
   /// A taxa é registrada mas NÃO cobrada do provedor
+  ///
+  /// v856: IDEMPOTENTE por orderId. Antes cada chamada fazia `records.add()`
+  /// sem checar — e há vários call sites que chamam sem guarda
+  /// (payment_screen, lightning_payment_screen, escrow_split_service,
+  /// order_status_screen). A mesma ordem podia gerar 2-3 registros e inflar
+  /// "Total Histórico"/"Taxas Pendentes" no admin. Agora o primeiro registro
+  /// vence e os seguintes são ignorados.
   static Future<void> recordFee({
     required String orderId,
     required double transactionBrl,
@@ -261,6 +491,18 @@ class PlatformFeeService {
     required String clientPubkey,
   }) async {
     final prefs = await SharedPreferences.getInstance();
+
+    // Carregar registros existentes
+    final existingJson = prefs.getString(_feeRecordsKey);
+    List<Map<String, dynamic>> records = [];
+    if (existingJson != null) {
+      records = List<Map<String, dynamic>>.from(jsonDecode(existingJson));
+    }
+
+    if (orderId.isNotEmpty && records.any((r) => r['orderId'] == orderId)) {
+      broLog('💼 Taxa da ordem ${orderId.length > 8 ? orderId.substring(0, 8) : orderId} já registrada — ignorando duplicata');
+      return;
+    }
 
     // Calcular taxa
     final feeBrl = transactionBrl * platformFeePercent;
@@ -278,13 +520,6 @@ class PlatformFeeService {
       'clientPubkey': clientPubkey,
       'collected': false, // Marca se a taxa foi efetivamente transferida
     };
-
-    // Carregar registros existentes
-    final existingJson = prefs.getString(_feeRecordsKey);
-    List<Map<String, dynamic>> records = [];
-    if (existingJson != null) {
-      records = List<Map<String, dynamic>>.from(jsonDecode(existingJson));
-    }
 
     // Adicionar novo registro
     records.add(record);
@@ -552,7 +787,13 @@ class PlatformFeeService {
     broLog('💼 Valor total: $totalSats sats');
     broLog(
         '💼 Taxa (${(feePercent * 100).toStringAsFixed(1)}%): $platformFeeSats sats');
-    broLog('💼 Destino: ${await _resolveFeeDestination()}');
+
+    // v857: split 80/20 quando há coordinator escolhido. Sem coordinator,
+    // split.primarySats == platformFeeSats e foundationSats == 0 (idêntico
+    // ao comportamento anterior).
+    final split = await resolveFeeSplit(totalFeeSats: platformFeeSats);
+    broLog('💼 Destino: ${split.primaryAddress} (${split.primarySats} sats)'
+        '${split.hasSplit ? ' + fundação ${split.foundationAddress} (${split.foundationSats} sats)' : ''}');
     broLog('💼 Backend: $_currentBackend');
     broLog('💼 ════════════════════════════════════════════════');
     broLog('');
@@ -566,7 +807,10 @@ class PlatformFeeService {
     }
 
     try {
-      final platformAddress = await _resolveFeeDestination();
+      final platformAddress = split.primaryAddress;
+      // v857: valor efetivamente enviado ao destino principal (coordinator ou
+      // plataforma). Sem split é igual à taxa cheia.
+      final primaryAmountSats = split.primarySats > 0 ? split.primarySats : platformFeeSats;
 
       // Detectar tipo de endereço Lightning
       if (platformAddress.contains('@')) {
@@ -576,7 +820,7 @@ class PlatformFeeService {
         final lnAddressService = LnAddressService();
         final result = await lnAddressService.getInvoice(
           lnAddress: platformAddress,
-          amountSats: platformFeeSats,
+          amountSats: primaryAmountSats,
           comment:
               'Bro Platform Fee - ${orderId.length > 8 ? orderId.substring(0, 8) : orderId}',
         );
@@ -593,13 +837,28 @@ class PlatformFeeService {
 
         final invoice = result['invoice'] as String;
         broLog('💼 Invoice obtido: ${invoice.substring(0, 50)}...');
+        // v869: RASTREABILIDADE — registra o hash da invoice ANTES de pagar.
+        // Sem isso é impossível correlacionar um recebimento no extrato do
+        // destinatário com a ordem que o gerou (caso 26/11: 8 taxas de 1 sat
+        // sem origem identificável). Formato estável para grep:
+        //   [FEE-TRACE] order=<id> amount=<sats> hash=<paymentHash> dest=<addr>
+        String? invoiceHash;
         if (onAttempt != null) {
           final decoded = await BreezProvider().decodeInvoice(invoice);
           final attemptHash = decoded?['invoice']?['paymentHash'] as String?;
           if (attemptHash != null && attemptHash.isNotEmpty) {
+            invoiceHash = attemptHash;
             await onAttempt(invoice, attemptHash);
           }
         }
+        if (invoiceHash == null) {
+          try {
+            final decoded = await BreezProvider().decodeInvoice(invoice);
+            invoiceHash = decoded?['invoice']?['paymentHash'] as String?;
+          } catch (_) {}
+        }
+        broLog('[FEE-TRACE] order=$orderId amount=$primaryAmountSats '
+            'hash=${invoiceHash ?? "?"} dest=$platformAddress');
         broLog('💼 Pagando via $_currentBackend...');
 
         // A taxa BRIX é um serviço e deve ser cobrada. A reserva de rede só
@@ -628,11 +887,16 @@ class PlatformFeeService {
           broLog('');
           broLog('✅ ════════════════════════════════════════════════');
           broLog('✅ TAXA DA PLATAFORMA PAGA COM SUCESSO!');
-          broLog('✅ Valor: $platformFeeSats sats');
+          broLog('✅ Valor: $primaryAmountSats sats');
           broLog('✅ Destino: $platformAddress');
           broLog('✅ Backend: $_currentBackend');
           broLog('✅ ════════════════════════════════════════════════');
           broLog('');
+
+          // v857: fatia da fundação (20%). Falha aqui NÃO invalida o pagamento
+          // principal — o coordinator já recebeu. Loga e segue; a fundação
+          // pode ser reconciliada depois pelo histórico.
+          await _payFoundationShare(split, orderId);
 
           // Marcar como coletada no tracking
           await markAsCollected([orderId]);

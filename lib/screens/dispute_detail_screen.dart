@@ -12,6 +12,7 @@ import '../services/nostr_order_service.dart';
 import '../services/storage_service.dart';
 import '../services/api_service.dart';
 import '../services/provider_payment_guard.dart';
+import '../config.dart';
 import '../widgets/dispute_chat.dart';
 import '../utils/image_compress.dart';
 
@@ -2957,6 +2958,38 @@ class _DisputeDetailScreenState extends State<DisputeDetailScreen> {
       if (privateKey == null) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('❌ Chave privada não disponível'), backgroundColor: Colors.red),
+        );
+        return;
+      }
+
+      // v856 [SECURITY]: a resolução só vale se assinada pela chave admin.
+      // Todos os clientes validam `event.pubkey == AppConfig.adminPubkey`
+      // (fail-closed). Se a conta logada não for a do mediador, o evento é
+      // publicado e descartado por todos — a tela dizia "resolvida" e a
+      // disputa continuava aberta para as partes. Falha alto e claro.
+      final myPubkey = orderProvider.currentUserPubkey ?? '';
+      if (AppConfig.adminPubkey.isEmpty) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❌ ADMIN_PUBKEY não configurado neste build — resolução seria rejeitada por todos os apps'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 6),
+          ),
+        );
+        return;
+      }
+      if (myPubkey != AppConfig.adminPubkey) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '❌ Esta conta (${myPubkey.length >= 8 ? myPubkey.substring(0, 8) : myPubkey}) não é a chave admin. '
+              'A resolução seria descartada pelos outros apps. Entre com a conta do mediador.',
+            ),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 8),
+          ),
         );
         return;
       }

@@ -306,6 +306,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // v754: verificação no servidor (fail-closed: sem rede ou resposta !=
   // ok:true → NÃO destrava). Rate limit no backend (5/min/IP) mata força
   // bruta — antes dava pra tentar infinito offline contra o hash local.
+  //
+  // v856: o Fly derruba a instância quando fica idle e o primeiro request
+  // paga o cold start (~10-20s). Com timeout de 10s e uma tentativa só, a
+  // Carol via "Sem conexão com o servidor" mesmo com internet boa — e o
+  // retry manual dela caía no rate limit (5/min). Agora: timeout maior,
+  // 2 tentativas com backoff curto, e mensagem que distingue "servidor
+  // acordando" de "sem internet" de "senha errada".
   Future<void> _validateAdminPassword(String password) async {
     if (_verifying) return;
     setState(() => _verifying = true);
@@ -324,13 +331,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return;
       }
 
-      final resp = await http
-          .post(
-            Uri.parse('$backendUrl/admin/verify'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'password': password}),
-          )
-          .timeout(const Duration(seconds: 10));
+      http.Response? resp;
+      Object? lastError;
+      // 2 tentativas: a primeira acorda o servidor, a segunda aproveita.
+      for (var attempt = 1; attempt <= 2; attempt++) {
+        try {
+          resp = await http
+              .post(
+                Uri.parse('$backendUrl/admin/verify'),
+                headers: {'Content-Type': 'application/json'},
+                body: jsonEncode({'password': password}),
+              )
+              .timeout(const Duration(seconds: 25));
+          // 502/503/504 = Fly acordando ou reiniciando — vale tentar de novo.
+          if (resp.statusCode >= 502 && resp.statusCode <= 504 && attempt < 2) {
+            await Future.delayed(const Duration(seconds: 2));
+            continue;
+          }
+          break;
+        } catch (e) {
+          lastError = e;
+          if (attempt < 2) {
+            await Future.delayed(const Duration(seconds: 2));
+            continue;
+          }
+        }
+      }
+
+      if (resp == null) {
+        // Nenhuma resposta HTTP em nenhuma tentativa.
+        if (!mounted) return;
+        final isTimeout = lastError.toString().toLowerCase().contains('timeout');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(isTimeout
+                ? 'O servidor demorou para responder (pode estar acordando). Tente de novo em alguns segundos.'
+                : 'Sem conexão com o servidor. Verifique sua internet e tente de novo.'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+        return;
+      }
 
       // v812: o backend tem rate limit (5/min/IP) e o Fly pode devolver 502.
       // Antes TUDO virava "senha incorreta" — Carol digitava certo, via erro,
@@ -348,6 +390,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         errorMsg = AppLocalizations.of(context).t('settings_wrong_password');
       } else if (resp.statusCode == 429) {
         errorMsg = 'Muitas tentativas. Aguarde 1 minuto.';
+      } else if (resp.statusCode == 503) {
+        errorMsg = 'Verificação admin não configurada no servidor.';
+      } else if (resp.statusCode >= 502 && resp.statusCode <= 504) {
+        errorMsg = 'Servidor reiniciando (${resp.statusCode}). Tente de novo em alguns segundos.';
       } else {
         errorMsg = 'Servidor indisponível (${resp.statusCode}). Tente novamente.';
       }
@@ -357,17 +403,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
         SnackBar(
           content: Text(errorMsg),
           backgroundColor: Colors.red,
-          duration: const Duration(seconds: 2),
+          duration: const Duration(seconds: 3),
         ),
       );
-    } catch (_) {
+    } catch (e) {
       // timeout/rede = SEM acesso (fail-closed, nunca destravar)
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Sem conexão com o servidor. Tente novamente.'),
             backgroundColor: Colors.red,
-            duration: const Duration(seconds: 2),
+            duration: const Duration(seconds: 3),
           ),
         );
       }

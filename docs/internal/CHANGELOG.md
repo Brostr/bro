@@ -1,5 +1,73 @@
 # 📋 Changelog - Bro App
 
+## [1.0.134+877] - 2026-11-26
+
+### 🚨 CRÍTICO — Status terminal não regride mais
+
+- **NIP-40 removido do `bro_update` (kind 30080)**
+  - O status vivia só nesse evento, que expirava em 30d. Quando o relay
+    deletava, a ordem regredia para `pending` (status do `kind 30078`, que
+    nunca muda) e o usuário via "confirme pagamento" numa ordem já paga.
+  - Evidência (26/11): 360 updates no primal e 370 no bro-relay2 ainda tinham
+    `expiration`. Ordem `4e2c858a` tinha `status=pending` no `kind 30078` mas
+    `bro_complete` expirando em 21/12.
+
+- **`bro_complete` (kind 30081) agora carrega `status`**
+  - Como ele não expira (v864), é a âncora permanente que reconstrói o estado
+    terminal mesmo que todos os updates sejam apagados.
+  - Builds antigos sem o campo continuam funcionando (fallback para
+    `awaiting_confirmation`).
+
+### 🐛 Comprovante — 3 causas independentes
+
+- **Cache write-once guardava o MARCADOR, não a imagem**
+  - `getProofImageFromCache` rejeita valores `[encrypted:`
+  - `_loadProofCache` remove marcadores do SharedPreferences
+  - `_fetchProofFromRelayOnce` só aborta se o cache for utilizável
+
+- **`fetchProofFromRelay` só tentava UMA cópia**
+  - Fallback para `fetchProofForOrder`, que tenta as 3 cópias (user, admin,
+    provider-self). Antes falhava com "HMAC inválido" quando o `senderPubkey`
+    não estava no evento.
+
+- **NIP-40 removido do `bro_complete`** (v864, confirmado)
+
+### 🔍 Rastreabilidade de taxas
+
+- **`preimage` no `[PAY-TRACE]`** — é a chave que liga o app ao extrato do
+  destinatário (`SHA256(preimage) == paymentHash == 'ref'` na coinos).
+  - Validado: 11 de 14 recebimentos do CSV batem exatamente.
+  - As 8 taxas de 1 sat de 26/11 **não são duplicadas** — cada uma tem
+    `sparkId`, `htlc` e `preimage` únicos.
+
+- **`[FEE-TRACE]` no caminho BRIX e na reconciliação**
+
+### 🧅 Tor
+
+- `flutter_socks_proxy` vendorizado em `packages/` com 2 patches:
+  - Greeting SOCKS5 só oferece `NoAuth` quando não há credenciais (o Orbot
+    aceitava USERPASS e a lib enviava credenciais vazias → todo tráfego falhava)
+  - `close()` com null check em `_streamFuture`
+
+### 🧪 Testes
+
+- `test/race/d1d_terminal_status_never_regresses_test.dart` (11 testes novos)
+- Total: **175/175** em `test/race test/integration`
+
+### 📚 Documentação
+
+- `docs/internal/LICOES_APRENDIDAS_NOV2026.md` (novo)
+- `docs/internal/RELATORIO_AUDITORIA_NOV2026.md` (novo)
+
+### ⚠️ Pendências conhecidas
+
+- Comprovantes antigos com `expiration` (120 no primal, 119 no bro-relay2) vão
+  expirar de qualquer forma — correção só vale para eventos novos. Carol
+  decidiu não migrar.
+- Ordem `1c2dd29e`: comprovante nasceu corrompido (124 chars). Perda definitiva.
+
+---
+
 ## [1.0.131+254] - 2026-03-01
 
 ### 🔧 Auto-Repair

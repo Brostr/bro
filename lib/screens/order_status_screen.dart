@@ -350,9 +350,19 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       
       final proof = result['proofImage'] as String?;
       final encrypted = result['encrypted'] as bool? ?? false;
-      
-      if (proof != null && proof.isNotEmpty && !encrypted && mounted) {
-        broLog('✅ [PROOF] Comprovante obtido diretamente do relay (${proof.length} chars)');
+
+      // v863 FIX: aceitar o comprovante mesmo quando `encrypted=true` no
+      // resultado agregado. O `encrypted` reflete o ÚLTIMO relay consultado,
+      // não o melhor. Se `proofImage` veio preenchido, é porque ALGUM relay
+      // decifrou — usar. Antes a condição `!encrypted` descartava a prova boa
+      // (ordem 1c2dd29e: found=true, encrypted=false num relay e true no
+      // seguinte; a tela ficava sem comprovante).
+      final hasUsableProof = proof != null &&
+          proof.isNotEmpty &&
+          !proof.startsWith('[encrypted:');
+
+      if (hasUsableProof && mounted) {
+        broLog('✅ [PROOF] Comprovante obtido diretamente do relay (${proof.length} chars, encrypted=$encrypted)');
         
         // Salvar no cache persistente e no OrderProvider
         orderProvider.cacheProofImage(widget.orderId, proof);
@@ -2419,7 +2429,16 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
     _fetchingProofRelay = true;
     try {
       final orderProvider = Provider.of<OrderProvider>(context, listen: false);
-      if (orderProvider.getProofImageFromCache(widget.orderId) != null) return;
+      // v875 [CRÍTICO]: o cache pode conter o MARCADOR '[encrypted:nip44v2]'
+      // em vez da imagem. Antes, qualquer valor não-nulo aqui abortava o
+      // fetch — e a ordem ficava permanentemente sem comprovante mesmo com a
+      // prova disponível nos relays (caso 4e2c858a, 26/11: cache tinha o
+      // marcador de 19 chars, relay tinha a imagem real).
+      final cachedNow = orderProvider.getProofImageFromCache(widget.orderId);
+      final cacheIsUsable = cachedNow != null &&
+          cachedNow.isNotEmpty &&
+          !cachedNow.startsWith('[encrypted:');
+      if (cacheIsUsable) return;
       final privateKey = orderProvider.nostrPrivateKey;
       if (privateKey == null) return;
       final res = await NostrOrderService().fetchProofFromRelay(widget.orderId)
@@ -2442,6 +2461,32 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       }
     } catch (e) {
       broLog('⚠️ v696 fetchProofFromRelay: $e');
+    }
+    // v875 [CRÍTICO]: fallback para o caminho COMPLETO de descriptografia.
+    //
+    // fetchProofFromRelay só devolve proofImage_plain ou proofImage_nip44.
+    // Quando o provedor publicou a cópia do usuário (proofImage_nip44) e o
+    // senderPubkey não está no evento, o decryptBetween acima falha com
+    // "HMAC inválido" — e a imagem existe, mas nunca chega na tela.
+    // fetchProofForOrder tenta TODAS as cópias (user, admin, provider self)
+    // e devolve a imagem já descriptografada. Caso real 4e2c858a (26/11).
+    try {
+      final orderProvider = Provider.of<OrderProvider>(context, listen: false);
+      final cachedNow = orderProvider.getProofImageFromCache(widget.orderId);
+      if (cachedNow == null || cachedNow.isEmpty) {
+        final full = await NostrOrderService()
+            .fetchProofForOrder(widget.orderId)
+            .timeout(const Duration(seconds: 20),
+                onTimeout: () => <String, dynamic>{});
+        final img = full?['proofImage'] as String?;
+        if (img != null && img.isNotEmpty && !img.startsWith('[encrypted:')) {
+          await orderProvider.cacheProofImage(widget.orderId, img);
+          broLog('✅ v875: prova recuperada via fetchProofForOrder (todas as cópias)');
+          if (mounted) setState(() {});
+        }
+      }
+    } catch (e) {
+      broLog('⚠️ v875 fetchProofForOrder fallback: $e');
     }
   }
 
@@ -2468,12 +2513,33 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
         for (final key in orderFromProvider!.metadata!.keys) {
           final existingVal = metadata[key];
           final providerVal = orderFromProvider.metadata![key];
-          // Substituir se local é null, vazio, ou marcador encriptado
-          if (existingVal == null || 
-              (existingVal is String && existingVal.isEmpty) ||
-              (key == 'proofImage' && existingVal is String && existingVal.startsWith('[encrypted:'))) {
-            if (providerVal != null) {
-              metadata[key] = providerVal;
+          // v863 FIX: o merge era assimétrico — só substituía quando o LOCAL
+          // era pior. Se o local tinha `[encrypted:nip44v2]` e o provider tinha
+          // a imagem JÁ DECIFRADA, o marcador vencia e a tela mostrava
+          // "comprovante não disponível" mesmo com a prova em memória.
+          // Agora o valor do provider vence sempre que for MELHOR:
+          //  - local nulo/vazio  -> provider
+          //  - local é marcador de criptografia -> provider (se não for marcador)
+          //  - local é base64 curto/inválido e provider é longo -> provider
+          final existingStr = existingVal is String ? existingVal : null;
+          final providerStr = providerVal is String ? providerVal : null;
+          final existingIsMarker = existingStr == null ||
+              existingStr.isEmpty ||
+              existingStr.startsWith('[encrypted:');
+          final providerIsMarker = providerStr == null ||
+              providerStr.isEmpty ||
+              providerStr.startsWith('[encrypted:');
+          final providerIsBetter = !providerIsMarker &&
+              (existingIsMarker ||
+                  (key == 'proofImage' &&
+                      existingStr != null &&
+                      providerStr != null &&
+                      providerStr.length > existingStr.length * 2));
+          if (providerIsBetter && providerVal != null) {
+            metadata[key] = providerVal;
+            if (key == 'proofImage') {
+              broLog('🔧 v863: proofImage do OrderProvider venceu o local '
+                  '(${existingStr?.length ?? 0} -> ${providerStr?.length ?? 0} chars)');
             }
           }
         }
@@ -2487,6 +2553,14 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       final pi = metadata!['proofImage'] as String;
       broLog('   proofImage length: ${pi.length}');
       broLog('   proofImage preview: ${pi.substring(0, pi.length > 50 ? 50 : pi.length)}');
+      // v868: diagnóstico do CONTEÚDO decifrado. O comprovante da 1c2dd29e
+      // decifra com sucesso mas falha ao decodificar como imagem — precisamos
+      // ver o que realmente veio (base64 de imagem? texto? marcador?).
+      if (!pi.startsWith('[encrypted:') && pi.length > 0) {
+        final head = pi.substring(0, pi.length > 24 ? 24 : pi.length);
+        final isB64 = RegExp(r'^[A-Za-z0-9+/=]+$').hasMatch(head);
+        broLog('   proofImage head="$head" base64chars=$isB64');
+      }
     }
     if (metadata?['paymentProof'] != null) {
       final pp = metadata!['paymentProof'] as String;
@@ -2554,7 +2628,10 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
       final cachedProof = orderProvider.getProofImageFromCache(widget.orderId);
       if (cachedProof != null && cachedProof.isNotEmpty) {
         receiptUrl = cachedProof;
-        broLog('🔓 proofImage recuperado do cache write-once');
+        broLog('🔓 proofImage recuperado do cache write-once (len=${cachedProof.length}, '
+            'preview=${cachedProof.substring(0, cachedProof.length > 24 ? 24 : cachedProof.length)})');
+      } else {
+        broLog('🔍 v875: cache vazio/inválido para ${widget.orderId.substring(0, 8)} — buscando relay');
       }
     }
 
@@ -2814,76 +2891,86 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
     );
   }
 
-  Widget _buildReceiptImageWidget(String imageUrl) {
+  /// v857: decodifica base64 de imagem SEM lançar exceção.
+  ///
+  /// O bug da "tela preta" era exatamente isto: `Image.memory(base64Decode(x))`
+  /// avalia o `base64Decode` ANTES de construir o widget, então um base64
+  /// truncado (NIP-44 de build antigo > 65535 bytes, fragmento de sync, etc.)
+  /// lançava FormatException e derrubava a tela inteira — o `errorBuilder`
+  /// nunca era chamado porque a exceção acontecia no argumento.
+  ///
+  /// Retorna null quando não é possível decodificar; quem chama decide o
+  /// fallback (nunca tela preta).
+  Uint8List? _safeImageBytes(String? value) {
+    if (value == null || value.isEmpty) return null;
+    try {
+      final raw = value.startsWith('data:image') ? value.split(',').last : value;
+      final bytes = base64Decode(raw);
+      if (bytes.length < 12) return null;
+      return bytes;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// v857: renderiza QUALQUER formato de comprovante sem quebrar a tela.
+  /// Base64 puro, data URI, URL http(s) ou caminho de arquivo local.
+  /// Se nada decodificar, mostra aviso legível (nunca tela preta).
+  Widget _buildProofImageSafe(String? raw, {double? height, BoxFit fit = BoxFit.contain}) {
     final l = AppLocalizations.of(context)!;
-    broLog('🖼️ _buildReceiptImageWidget chamado');
-    broLog('   imageUrl length: ${imageUrl.length}');
-    broLog('   imageUrl starts with: ${imageUrl.substring(0, imageUrl.length > 20 ? 20 : imageUrl.length)}');
-    
-    // Verificar se é base64 (vindo do Nostr proofImage)
-    if (imageUrl.startsWith('data:image')) {
-      // Data URI format: data:image/png;base64,xxxxx
-      broLog('   Formato: data:image URI');
-      try {
-        final base64String = imageUrl.split(',').last;
-        final bytes = base64Decode(base64String);
-        return Image.memory(
-          bytes,
-          fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) => _buildImageError(l.tp('order_error_decode_base64', {'error': error.toString()})),
-        );
-      } catch (e) {
-        return _buildImageError(l.tp('order_error_process_base64', {'error': e.toString()}));
-      }
-    } else if (_isBase64Image(imageUrl)) {
-      // Base64 puro (sem prefixo data:) - pode ser JPEG (/9j/), PNG (iVBOR), etc
-      broLog('   Formato: base64 puro detectado');
-      try {
-        final bytes = base64Decode(imageUrl);
-        broLog('   Bytes decodificados: ${bytes.length}');
-        return Image.memory(
-          bytes,
-          fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) => _buildImageError(l.tp('order_error_decode', {'error': error.toString()})),
-        );
-      } catch (e) {
-        broLog('   Erro ao decodificar base64: $e');
-        return _buildImageError(l.tp('order_error_process_image', {'error': e.toString()}));
-      }
-    } else if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
-      // URL HTTP/HTTPS
+    if (raw == null || raw.isEmpty || raw.startsWith('[encrypted:')) {
+      return _buildImageError(l.t('order_error_load_receipt'));
+    }
+
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
       return Image.network(
-        imageUrl,
-        fit: BoxFit.contain,
-        loadingBuilder: (context, child, loadingProgress) {
-          if (loadingProgress == null) return child;
-          return Center(
-            child: CircularProgressIndicator(
-              value: loadingProgress.expectedTotalBytes != null
-                  ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
-                  : null,
-              color: const Color(0xFFFF6B6B),
-            ),
-          );
-        },
-        errorBuilder: (context, error, stackTrace) => _buildImageError(error.toString()),
+        raw,
+        height: height,
+        width: double.infinity,
+        fit: fit,
+        errorBuilder: (_, __, ___) => _buildImageError(l.t('order_error_load_receipt')),
       );
-    } else {
-      // Caminho local - carregar como arquivo
-      final file = File(imageUrl);
+    }
+
+    final bytes = _safeImageBytes(raw);
+    if (bytes != null) {
+      return Image.memory(
+        bytes,
+        height: height,
+        width: double.infinity,
+        fit: fit,
+        // cacheWidth evita decodificar a foto em resolução total na memória
+        // (comprovante de celular = 3-8 MP; isso é o que esquenta o aparelho).
+        cacheWidth: 1080,
+        errorBuilder: (_, __, ___) => _buildImageError(l.t('order_error_decode')),
+      );
+    }
+
+    // Caminho de arquivo local (comprovante salvo no aparelho).
+    try {
+      final file = File(raw);
       if (file.existsSync()) {
         return Image.file(
           file,
-          fit: BoxFit.contain,
-          errorBuilder: (context, error, stackTrace) => _buildImageError(l.tp('order_error_load_file', {'error': error.toString()})),
+          height: height,
+          width: double.infinity,
+          fit: fit,
+          errorBuilder: (_, __, ___) => _buildImageError(l.t('order_error_load_file')),
         );
-      } else {
-        // O valor recebido não é imagem/base64/URL nem um arquivo local existente.
-        // Caso típico: provedor em versão antiga publicou o CAMINHO local da imagem
-        // (que só existe no aparelho dele) em vez dos bytes em base64.
-        return _buildOldVersionProofNotice();
       }
-    }
+    } catch (_) {}
+
+    return _buildOldVersionProofNotice();
+  }
+
+  Widget _buildReceiptImageWidget(String imageUrl) {
+    broLog('🖼️ _buildReceiptImageWidget chamado');
+    broLog('   imageUrl length: ${imageUrl.length}');
+    broLog('   imageUrl starts with: ${imageUrl.substring(0, imageUrl.length > 20 ? 20 : imageUrl.length)}');
+
+    // v857: caminho único e seguro. Antes havia 4 ramos com base64Decode fora
+    // de try/catch — qualquer base64 inválido derrubava a tela (tela preta).
+    return _buildProofImageSafe(imageUrl);
   }
 
   /// Aviso amigável quando o comprovante chegou num formato não exibível
@@ -6177,27 +6264,15 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                     const SizedBox(height: 8),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(8),
-                      child: proofImage.startsWith('http')
-                          ? Image.network(
-                              proofImage,
-                              height: 200,
-                              width: double.infinity,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => Container(
-                                height: 100,
-                                color: Colors.black26,
-                                child: Center(
-                                  child: Text(l.t('order_image_unavailable'), style: const TextStyle(color: Colors.white38)),
-                                ),
-                              ),
-                            )
-                          : Container(
-                              height: 100,
-                              color: Colors.black26,
-                              child: Center(
-                                child: Text(l.t('order_proof_attached'), style: const TextStyle(color: Colors.white38)),
-                              ),
-                            ),
+                      // v857: antes só mostrava um placeholder cinza
+                      // ("comprovante anexado") mesmo com a imagem disponível —
+                      // a mediadora não conseguia ver o comprovante no card de
+                      // disputa. Agora renderiza de verdade, com fallback seguro.
+                      child: _buildProofImageSafe(
+                        proofImage,
+                        height: 200,
+                        fit: BoxFit.cover,
+                      ),
                     ),
                   ],
                 ],
@@ -6228,18 +6303,13 @@ class _OrderStatusScreenState extends State<OrderStatusScreen> {
                     const SizedBox(height: 8),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(8),
-                      child: Image.memory(
-                        base64Decode(_userEvidence!),
+                      // v857: antes era Image.memory(base64Decode(_userEvidence!))
+                      // — o base64Decode rodava ANTES do errorBuilder e um
+                      // base64 truncado derrubava a tela inteira (tela preta).
+                      child: _buildProofImageSafe(
+                        _userEvidence,
                         height: 150,
-                        width: double.infinity,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => Container(
-                          height: 60,
-                          color: Colors.black26,
-                          child: Center(
-                            child: Text(l.t('order_image_attached'), style: const TextStyle(color: Colors.blue)),
-                          ),
-                        ),
                       ),
                     ),
                   ],

@@ -286,7 +286,16 @@ class _PaymentScreenState extends State<PaymentScreen> {
     // o provedor enviava o invoice.
     int walletBalance;
     try {
-      walletBalance = await lightningProvider.getBalance();
+      final bal = await lightningProvider.getBalance();
+      if (bal == null) {
+        // v876: SDK não conseguiu ler o saldo. NUNCA tratar como 0 — isso
+        // bloqueava a compra com "saldo insuficiente" mesmo com sats.
+        if (mounted) setState(() => _isProcessing = false);
+        _showError(AppLocalizations.of(context)
+            .tp('payment_error_check_balance', {'error': 'sem conexão com a carteira'}));
+        return;
+      }
+      walletBalance = bal;
     } catch (e) {
       if (mounted) setState(() => _isProcessing = false);
       _showError(AppLocalizations.of(context).tp('payment_error_check_balance', {'error': e.toString()}));
@@ -895,7 +904,15 @@ class _PaymentScreenState extends State<PaymentScreen> {
     // 1. Verificar saldo DISPONÍVEL (descontando sats já travados em wallet payments)
     int walletBalance;
     try {
-      walletBalance = await lightningProvider.getBalance();
+      final bal = await lightningProvider.getBalance();
+      if (bal == null) {
+        // v876: leitura falhou — não é saldo zero.
+        if (mounted) setState(() => _isProcessing = false);
+        _showError(AppLocalizations.of(context)
+            .tp('payment_error_check_balance', {'error': 'sem conexão com a carteira'}));
+        return;
+      }
+      walletBalance = bal;
     } catch (e) {
       if (mounted) setState(() => _isProcessing = false);
       _showError(AppLocalizations.of(context).tp('payment_error_check_balance', {'error': e.toString()}));

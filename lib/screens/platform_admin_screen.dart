@@ -35,9 +35,7 @@ class PlatformAdminScreen extends StatefulWidget {
 
 class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
   Map<String, dynamic>? _totals;
-  List<Map<String, dynamic>> _pendingRecords = [];
   bool _isLoading = true;
-  bool _isTesting = false;
   
   // Disputas
   final DisputeService _disputeService = DisputeService();
@@ -61,6 +59,12 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
   List<Map<String, dynamic>> _agentAnalyses = [];
   Map<String, dynamic>? _agentStats;
   bool _agentLoading = false;
+
+  // v856: estado REAL da coleta automática. Antes o card de totais exibia
+  // "COLETA AUTOMÁTICA ATIVA" fixo no código, mas isAutoCollectionEnabled()
+  // nunca era lido em lugar nenhum e o default é false — a tela afirmava que
+  // o dinheiro era transferido sozinho quando nada era transferido.
+  bool _autoCollectionEnabled = false;
 
   @override
   void initState() {
@@ -116,7 +120,8 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
     
     try {
       final totals = await PlatformFeeService.getHistoricalTotals();
-      final pending = await PlatformFeeService.getPendingFees();
+      final autoCollection = await PlatformFeeService.isAutoCollectionEnabled();
+      if (mounted) setState(() => _autoCollectionEnabled = autoCollection);
       
       // Carregar disputas locais
       await _disputeService.initialize();
@@ -492,9 +497,9 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
           } catch (_) {}
         }
 
+        if (!mounted) return;
         setState(() {
           _totals = totals;
-          _pendingRecords = pending;
           _openDisputes = openDisputes;
           _allDisputes = allDisputes;
           _nostrDisputes = openNostr;
@@ -506,17 +511,21 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
         _saveDisputesToCache();
       } catch (e) {
         broLog('⚠️ Erro ao buscar disputas do Nostr: $e');
-        setState(() {
-          _totals = totals;
-          _pendingRecords = pending;
-          _openDisputes = openDisputes;
-          _allDisputes = allDisputes;
-        });
+        if (mounted) {
+          setState(() {
+            _totals = totals;
+            _openDisputes = openDisputes;
+            _allDisputes = allDisputes;
+          });
+        }
       }
     } catch (e) {
       broLog('Erro ao carregar dados: $e');
     } finally {
-      setState(() => _isLoading = false);
+      // v856: guarda de mounted — _loadData é chamado do initState e de
+      // callbacks assíncronos longos (relays com timeout de 10s). Sem isso,
+      // sair da tela durante o load disparava "setState after dispose".
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -559,79 +568,6 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Erro: $e'), backgroundColor: Colors.red),
       );
-    }
-  }
-
-  Future<void> _markAllCollected() async {
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Confirmar'),
-        content: Text(
-          'Marcar ${_pendingRecords.length} taxas como coletadas?\n\n'
-          'Faça isso APENAS após transferir os fundos para sua carteira.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancelar'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-            child: const Text('Confirmar'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirm == true) {
-      final count = await PlatformFeeService.markAllAsCollected();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('$count taxas marcadas como coletadas'),
-          backgroundColor: Colors.green,
-        ),
-      );
-      _loadData();
-    }
-  }
-
-  Future<void> _testPlatformFee() async {
-    setState(() => _isTesting = true);
-    
-    try {
-      broLog('🧪 Testando envio de taxa da plataforma...');
-      broLog('📍 Destino: ${AppConfig.platformLightningAddress}');
-      
-      final result = await PlatformFeeService.sendPlatformFee(
-        orderId: 'test_${DateTime.now().millisecondsSinceEpoch}',
-        totalSats: 50, // 2% de 50 = 1 sat
-      );
-      
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(result ? '✅ Taxa enviada com sucesso para ${AppConfig.platformLightningAddress}!' : '❌ Falha - verifique logs'),
-            backgroundColor: result ? Colors.green : Colors.red,
-            duration: const Duration(seconds: 5),
-          ),
-        );
-        
-        // Recarregar para mostrar novos dados
-        await _loadData();
-      }
-    } catch (e) {
-      broLog('❌ Erro no teste: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('❌ Erro: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isTesting = false);
-      }
     }
   }
 
@@ -679,59 +615,37 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Aviso de segurança
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.red.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.red.withOpacity(0.3)),
-                    ),
-                    child: const Row(
-                      children: [
-                        Icon(Icons.security, color: Colors.red, size: 20),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'ÁREA RESTRITA - Dados sensíveis da plataforma',
-                            style: TextStyle(color: Colors.red, fontSize: 12),
-                          ),
-                        ),
-                      ],
-                    ),
+                  // v856: aviso de segurança condensado — era um bloco de 40px
+                  // dizendo o óbvio (a tela já exige senha admin para abrir).
+                  const Row(
+                    children: [
+                      Icon(Icons.lock, color: Colors.white38, size: 14),
+                      SizedBox(width: 6),
+                      Text(
+                        'Área restrita — dados da plataforma',
+                        style: TextStyle(color: Colors.white38, fontSize: 11),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 16),
 
-                  // Card de Totais
-                  _buildTotalsCard(),
-                  const SizedBox(height: 24),
+                  // v856: ESTATÍSTICAS unificadas. Antes eram DOIS cards
+                  // repetindo as mesmas métricas: _buildTotalsCard (topo) e
+                  // _buildHistorySection (fim) mostravam total de transações,
+                  // taxas e valores. Agora é um só.
+                  _buildStatsCard(),
+                  const SizedBox(height: 16),
+
+                  // DISPUTAS (o que a mediadora realmente usa)
+                  _buildDisputesSection(),
+                  const SizedBox(height: 16),
+
+                  // Cobrança de mediação (resolução pós-conclusão)
+                  _buildMediationChargeCard(),
+                  const SizedBox(height: 16),
 
                   // AI DISPUTE AGENT
                   _buildAgentSection(),
-                  const SizedBox(height: 24),
-
-                  // v680: Cobrança de mediação (resolução pós-conclusão)
-                  _buildMediationChargeCard(),
-                  const SizedBox(height: 24),
-
-                  // DISPUTAS ABERTAS
-                  _buildDisputesSection(),
-                  const SizedBox(height: 24),
-
-                  // Endereços para receber
-                  _buildReceiveAddressesCard(),
-                  const SizedBox(height: 24),
-
-                  // Taxas pendentes
-                  _buildPendingFeesCard(),
-                  const SizedBox(height: 24),
-                  
-                  // Recalcular taxas
-                  _buildRecalculateFeesCard(),
-                  const SizedBox(height: 24),
-
-                  // Histórico
-                  _buildHistorySection(),
                 ],
               ),
             ),
@@ -739,17 +653,24 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
     );
   }
 
-  Widget _buildTotalsCard() {
+  /// v856: card único de estatísticas. Consolida o antigo _buildTotalsCard
+  /// (topo) + _buildHistorySection (fim), que repetiam as mesmas métricas e
+  /// deixavam a tela pesada. Removidos também _buildReceiveAddressesCard
+  /// (endereço já validado, nunca usado) e _buildPendingFeesCard (a mediadora
+  /// não usa — a coleta automática está desligada).
+  Widget _buildStatsCard() {
     final totalSats = _totals?['totalSats'] ?? 0;
     final pendingSats = _totals?['pendingSats'] ?? 0;
     final collectedSats = _totals?['collectedSats'] ?? 0;
     final totalBrl = _totals?['totalBrl'] ?? 0.0;
-    final pendingBrl = _totals?['pendingBrl'] ?? 0.0;
     final totalTx = _totals?['totalTransactions'] ?? 0;
+    final openDisputes = _nostrDisputes.length;
+    final resolvedDisputes = _resolvedNostrDisputes.length;
+    final disputedVolume = _disputedVolumeBrl();
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
           colors: [Color(0xFF1A1A2E), Color(0xFF16213E)],
@@ -760,360 +681,159 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
         border: Border.all(color: Colors.amber.withOpacity(0.3)),
       ),
       child: Column(
-        children: [
-          // Status do modo
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            decoration: BoxDecoration(
-              color: Colors.green.withOpacity(0.2),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.green.withOpacity(0.5)),
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.check_circle, color: Colors.green, size: 16),
-                SizedBox(width: 6),
-                Text(
-                  'COLETA AUTOMÁTICA ATIVA',
-                  style: TextStyle(color: Colors.green, fontSize: 11, fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '${(AppConfig.platformFeePercent * 100).toStringAsFixed(0)}% de cada transação é enviado automaticamente\npara ${AppConfig.platformLightningAddress}',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white38, fontSize: 10),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            '💰 TAXAS DA PLATAFORMA (${(AppConfig.platformFeePercent * 100).toStringAsFixed(0)}%)',
-            style: const TextStyle(
-              color: Colors.amber,
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 20),
-          
-          // Total Histórico
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('Total Histórico:', style: TextStyle(color: Colors.white70)),
-              Text(
-                '$totalSats sats',
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              Text(
-                'R\$ ${totalBrl.toStringAsFixed(2)}',
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-            ],
-          ),
-          const Divider(color: Colors.white24, height: 24),
-          
-          // Pendente
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('⏳ Pendente:', style: TextStyle(color: Colors.orange)),
-              Text(
-                '$pendingSats sats',
-                style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 18),
-              ),
-            ],
-          ),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              Text(
-                'R\$ ${pendingBrl.toStringAsFixed(2)}',
-                style: const TextStyle(color: Colors.orange, fontSize: 12),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          
-          // Coletado
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('✅ Coletado:', style: TextStyle(color: Colors.green)),
-              Text(
-                '$collectedSats sats',
-                style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          
-          // Total de transações
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Colors.white.withOpacity(0.05),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              'Total de $totalTx transações processadas',
-              style: const TextStyle(color: Colors.white54, fontSize: 12),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildReceiveAddressesCard() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF333333)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '📥 Endereços para Receber Taxas',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
-          ),
-          const SizedBox(height: 16),
-          
-          // Lightning Address
-          const Text('⚡ Lightning Address:', style: TextStyle(color: Colors.white70, fontSize: 12)),
-          const SizedBox(height: 4),
-          Row(
-            children: [
-              Expanded(
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF0A0A0A),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    AppConfig.platformLightningAddress.isNotEmpty ? AppConfig.platformLightningAddress : 'Não configurado',
-                    style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
-                  ),
-                ),
-              ),
-              if (AppConfig.platformLightningAddress.isNotEmpty)
-                IconButton(
-                  icon: const Icon(Icons.copy, color: Colors.amber),
-                  onPressed: () => _copyToClipboard(AppConfig.platformLightningAddress, 'Lightning Address'),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          
-          // Botão de teste
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _isTesting ? null : _testPlatformFee,
-              icon: _isTesting 
-                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                : const Icon(Icons.send, size: 16),
-              label: Text(_isTesting ? 'Enviando...' : 'Testar Envio (1 sat)'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.purple,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPendingFeesCard() {
-    final pendingSats = _totals?['pendingSats'] ?? 0;
-    
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.orange.withOpacity(0.3)),
-      ),
-      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                '⏳ Taxas Pendentes',
-                style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, fontSize: 16),
+              const Icon(Icons.insights, color: Colors.amber, size: 20),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Estatísticas',
+                  style: TextStyle(
+                    color: Colors.amber,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
+              // v856: estado REAL da coleta (antes era "ATIVA" fixo no código
+              // mesmo com a transferência desligada, que é o default).
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                  color: Colors.orange.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(12),
+                  color: (_autoCollectionEnabled ? Colors.green : Colors.orange)
+                      .withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: (_autoCollectionEnabled ? Colors.green : Colors.orange)
+                        .withOpacity(0.4),
+                  ),
                 ),
                 child: Text(
-                  '${_pendingRecords.length}',
-                  style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
+                  _autoCollectionEnabled ? 'Coleta ON' : 'Coleta OFF',
+                  style: TextStyle(
+                    color: _autoCollectionEnabled ? Colors.green : Colors.orange,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          
-          if (_pendingRecords.isEmpty)
-            const Center(
-              child: Text(
-                'Nenhuma taxa pendente 🎉',
-                style: TextStyle(color: Colors.white54),
-              ),
-            )
-          else ...[
-            // Lista das últimas 5 pendentes
-            ...(_pendingRecords.take(5).map((record) => Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF0A0A0A),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Order: ${(record['orderId'] as String).substring(0, 8)}...',
-                        style: const TextStyle(color: Colors.white70, fontSize: 12),
-                      ),
-                      Text(
-                        _formatDate(record['timestamp']),
-                        style: const TextStyle(color: Colors.white38, fontSize: 10),
-                      ),
-                    ],
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text(
-                        '${record['feeSats']} sats',
-                        style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.bold),
-                      ),
-                      Text(
-                        'R\$ ${(record['feeBrl'] as num).toStringAsFixed(2)}',
-                        style: const TextStyle(color: Colors.white54, fontSize: 10),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ))),
-            
-            if (_pendingRecords.length > 5)
-              Center(
-                child: Text(
-                  '+ ${_pendingRecords.length - 5} mais...',
-                  style: const TextStyle(color: Colors.white38, fontSize: 12),
-                ),
-              ),
-            
-            const SizedBox(height: 16),
-            
-            // Botão para marcar como coletado
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                onPressed: pendingSats > 0 ? _markAllCollected : null,
-                icon: const Icon(Icons.check_circle, color: Colors.white),
-                label: Text(
-                  'Marcar $pendingSats sats como coletados',
-                  style: const TextStyle(color: Colors.white),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
+          const SizedBox(height: 14),
 
-  Widget _buildHistorySection() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            '📊 Estatísticas',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+          // Disputas — o que importa para a mediação
+          Row(
+            children: [
+              _buildMetricTile('Abertas', '$openDisputes',
+                  openDisputes > 0 ? Colors.red : Colors.white54),
+              const SizedBox(width: 8),
+              _buildMetricTile('Resolvidas', '$resolvedDisputes', Colors.green),
+              const SizedBox(width: 8),
+              _buildMetricTile(
+                'Volume',
+                disputedVolume > 0 ? 'R\$ ${disputedVolume.toStringAsFixed(0)}' : '—',
+                Colors.orange,
+              ),
+            ],
           ),
-          const SizedBox(height: 16),
-
-          // v630: contagens vindas do Nostr — sempre disponíveis, não dependem
-          // dos registros locais de taxa (que zeram ao reinstalar/trocar identidade).
-          _buildStatRow('Disputas abertas', '${_nostrDisputes.length}'),
-          _buildStatRow('Disputas resolvidas', '${_resolvedNostrDisputes.length}'),
-          _buildStatRow('Total de disputas', '${_nostrDisputes.length + _resolvedNostrDisputes.length}'),
-          if (_disputedVolumeBrl() > 0)
-            _buildStatRow('Volume em disputa', 'R\$ ${_disputedVolumeBrl().toStringAsFixed(2)}'),
 
           const Divider(color: Color(0x22FFFFFF), height: 24),
 
-          _buildStatRow('Total de Transações', '${_totals?['totalTransactions'] ?? 0}'),
-          // v648: modelo de taxa real = 3% provedor + 2% coordinator (antes
-          // mostrava só a da plataforma). Detalhado para não confundir.
-          _buildStatRow('Taxa do Provedor', '${(AppConfig.providerFeePercent * 100).toStringAsFixed(0)}%'),
-          _buildStatRow('Taxa do Coordinator', '${(AppConfig.platformFeePercent * 100).toStringAsFixed(0)}%'),
+          // Taxas da plataforma
+          _buildStatRow('Transações', '$totalTx'),
+          _buildStatRow('Taxa do Provedor',
+              '${(AppConfig.providerFeePercent * 100).toStringAsFixed(0)}%'),
+          _buildStatRow('Taxa do Coordinator',
+              '${(AppConfig.platformFeePercent * 100).toStringAsFixed(0)}%'),
           _buildStatRow('Taxa Média', _calculateAverageFee()),
-          
-          const SizedBox(height: 16),
-          
-          // Botão de exportar
-          OutlinedButton.icon(
-            onPressed: _exportData,
-            icon: const Icon(Icons.download, color: Colors.amber),
-            label: const Text('Exportar Dados Completos', style: TextStyle(color: Colors.amber)),
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: Colors.amber),
-              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-            ),
+
+          const Divider(color: Color(0x22FFFFFF), height: 24),
+
+          _buildStatRow('Total histórico', '$totalSats sats'),
+          _buildStatRow('R\$ total', 'R\$ ${totalBrl.toStringAsFixed(2)}'),
+          if (pendingSats > 0)
+            _buildStatRow('Pendente', '$pendingSats sats', color: Colors.orange),
+          if (collectedSats > 0)
+            _buildStatRow('Coletado', '$collectedSats sats', color: Colors.green),
+
+          const SizedBox(height: 14),
+
+          // Ações
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _exportData,
+                  icon: const Icon(Icons.download, size: 16, color: Colors.amber),
+                  label: const Text('Exportar', style: TextStyle(color: Colors.amber, fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.amber),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _recalculateFeesFromOrders,
+                  icon: const Icon(Icons.refresh, size: 16, color: Colors.cyan),
+                  label: const Text('Recalcular', style: TextStyle(color: Colors.cyan, fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.cyan),
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _buildStatRow(String label, String value) {
+  /// v856: tile compacto de métrica (usado no card de estatísticas).
+  Widget _buildMetricTile(String label, String value, Color color) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withOpacity(0.25)),
+        ),
+        child: Column(
+          children: [
+            Text(
+              value,
+              style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 16),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 2),
+            Text(label, style: const TextStyle(color: Colors.white54, fontSize: 10)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatRow(String label, String value, {Color? color}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: const TextStyle(color: Colors.white70)),
-          Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          Text(label, style: const TextStyle(color: Colors.white70, fontSize: 12)),
+          Text(
+            value,
+            style: TextStyle(
+              color: color ?? Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
         ],
       ),
     );
@@ -1139,24 +859,14 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
     );
   }
 
-  String _formatDate(String? timestamp) {
-    if (timestamp == null) return '';
-    try {
-      final date = DateTime.parse(timestamp);
-      return '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
-    } catch (_) {
-      return timestamp;
-    }
-  }
-
   /// Análise heurística local para disputas (versão dashboard — dados limitados)
   /// Princípio: provedor que alega ter pago TEM que provar. Na dúvida, escrow volta ao usuário.
   Map<String, dynamic>? _runLocalDisputeHeuristic(Map<String, dynamic> dispute) {
     final disputeOpenedBy = dispute['openedBy'] as String? ?? 'user';
     final disputeReason = dispute['reason'] as String? ?? '';
     final disputeDescription = dispute['description'] as String? ?? '';
-    final hasEvidence = (dispute['user_evidence_nip44'] as String?)?.isNotEmpty == true &&
-        (dispute['user_evidence_nip44'] as String).length > 100;
+    final evidenceRaw = dispute['user_evidence_nip44'];
+    final hasEvidence = evidenceRaw is String && evidenceRaw.length > 100;
     final orderId = dispute['orderId'] as String? ?? '';
     final isPix = (dispute['payment_type'] as String? ?? '').toLowerCase().contains('pix') ||
         (dispute['pix_key'] as String? ?? '').isNotEmpty;
@@ -1490,7 +1200,11 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
         // Espera ele publicar o invoice nos relays (bro_admin_payment_invoice)
         for (var i = 0; i < 9; i++) {
           await Future.delayed(const Duration(seconds: 10));
-          final offer = await NostrOrderService().fetchAdminPaymentInvoice(orderId);
+          // v856 [SECURITY]: só aceita invoice assinado pelo provedor acionado.
+          final offer = await NostrOrderService().fetchAdminPaymentInvoice(
+            orderId,
+            expectedPubkey: selected!,
+          );
           final inv = offer?['invoice']?.toString() ?? '';
           if (inv.isNotEmpty) {
             setD(() { requestingInvoice = false; offeredInvoice = inv; status = '✅ Invoice dele chegou!'; });
@@ -1765,7 +1479,6 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
     final recommendation = analysis['suggestion'] ?? 'unknown';
     final tier = analysis['tier'] ?? 0;
     final reason = analysis['reason'] ?? '';
-    final timestamp = analysis['analyzedAt'] ?? '';
 
     Color confidenceColor;
     if (confidence >= 0.9) {
@@ -1940,92 +1653,14 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
     );
   }
 
-  Future<void> _approveAnalysis(String disputeId) async {
-    setState(() => _agentLoading = true);
-    try {
-      final success = await ApiService().approveAgentAnalysis(disputeId);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(success
-                ? '✅ Resolução aprovada e executada'
-                : '❌ Falha ao aprovar'),
-            backgroundColor: success ? Colors.green : Colors.red,
-          ),
-        );
-        if (success) await _loadData();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _agentLoading = false);
-    }
-  }
-
-  Future<void> _rejectAnalysis(String orderId) async {
-    final humanDecision = await showDialog<String>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF1A1A1A),
-          title: const Text('Rejeitar Sugestão do Agente', style: TextStyle(color: Colors.white)),
-          content: const Text(
-            'Qual é a sua decisão como mediador?',
-            style: TextStyle(color: Colors.white70),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancelar'),
-            ),
-            ElevatedButton.icon(
-              onPressed: () => Navigator.pop(context, 'resolved_user'),
-              icon: const Icon(Icons.person, size: 16, color: Colors.white),
-              label: const Text('Favor do Usuário', style: TextStyle(color: Colors.white)),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade700),
-            ),
-            ElevatedButton.icon(
-              onPressed: () => Navigator.pop(context, 'resolved_provider'),
-              icon: const Icon(Icons.storefront, size: 16, color: Colors.white),
-              label: const Text('Favor do Provedor', style: TextStyle(color: Colors.white)),
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade700),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (humanDecision == null) return;
-
-    setState(() => _agentLoading = true);
-    try {
-      final success = await ApiService().rejectAgentAnalysis(
-        orderId,
-        humanDecision: humanDecision,
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(success ? 'Análise rejeitada — decisão humana registrada' : '❌ Falha ao rejeitar'),
-            backgroundColor: success ? Colors.orange : Colors.red,
-          ),
-        );
-        if (success) await _loadData();
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Erro: $e'), backgroundColor: Colors.red),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _agentLoading = false);
-    }
-  }
+  // v856: REMOVIDOS _approveAnalysis e _rejectAnalysis. Eram código morto
+  // (nenhum botão os chamava) e ENGANOSOS: o backend /agent/approve e
+  // /agent/reject só marcam a análise como revisada em memória
+  // (disputeAgentService.approveAnalysis → analysis.resolvedBy = 'agent_approved')
+  // — NÃO resolvem a disputa, NÃO movem sats e NÃO publicam nada no Nostr.
+  // Se alguém religasse esses botões, a mediadora acharia que resolveu o caso
+  // e o dinheiro ficaria parado. O caminho correto é "Abrir Análise Forense
+  // Completa" → DisputeDetailScreen, que publica a resolução assinada.
 
   // ========== SEÇÃO DE DISPUTAS ==========
 
@@ -2608,6 +2243,44 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
               ),
             ),
             
+            // v856: botões de resolução direta. O diálogo _showNostrResolveDialog
+            // e o _resolveNostrDispute existiam mas NENHUM botão os chamava —
+            // a mediadora só conseguia resolver abrindo a análise forense.
+            // Agora resolve em 2 toques direto da lista (mesmo caminho de
+            // publicação assinada do DisputeDetailScreen).
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => _showNostrResolveDialog(dispute, 'resolved_user'),
+                    icon: const Icon(Icons.person, size: 15, color: Colors.white),
+                    label: const FittedBox(
+                      child: Text('Usuário', style: TextStyle(fontSize: 12, color: Colors.white)),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue.shade700,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () => _showNostrResolveDialog(dispute, 'resolved_provider'),
+                    icon: const Icon(Icons.storefront, size: 15, color: Colors.white),
+                    label: const FittedBox(
+                      child: Text('Provedor', style: TextStyle(fontSize: 12, color: Colors.white)),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green.shade700,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+
             // Indicador de toque
             const SizedBox(height: 8),
             const Row(
@@ -2918,6 +2591,41 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('❌ Chave privada não disponível'), backgroundColor: Colors.red),
+          );
+        }
+        return;
+      }
+
+      // v856 [SECURITY]: a resolução TEM que ser assinada pela chave admin.
+      // Todos os clientes validam `event.pubkey == AppConfig.adminPubkey`
+      // (fail-closed) — se a conta logada não for a do admin, o evento é
+      // publicado mas TODO MUNDO descarta. Antes isso acontecia em silêncio:
+      // a tela dizia "resolvida e publicada" e a disputa continuava aberta
+      // para as partes. Falhar aqui, alto e claro, é o comportamento correto.
+      final myPubkey = orderProvider.currentUserPubkey ?? '';
+      if (AppConfig.adminPubkey.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('❌ ADMIN_PUBKEY não configurado neste build — resolução seria rejeitada por todos os apps'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 6),
+            ),
+          );
+        }
+        return;
+      }
+      if (myPubkey != AppConfig.adminPubkey) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '❌ Esta conta (${myPubkey.length >= 8 ? myPubkey.substring(0, 8) : myPubkey}) não é a chave admin. '
+                'A resolução seria descartada pelos outros apps. Entre com a conta do mediador.',
+              ),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 8),
+            ),
           );
         }
         return;
@@ -3251,51 +2959,6 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
 
   // ========== RECALCULAR TAXAS ==========
   
-  Widget _buildRecalculateFeesCard() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF333333)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Row(
-            children: [
-              Icon(Icons.calculate, color: Colors.cyan, size: 24),
-              SizedBox(width: 8),
-              Text(
-                'Recalcular Taxas',
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          const Text(
-            'Recalcula o total de taxas com base em todas as ordens completadas registradas no dispositivo.',
-            style: TextStyle(color: Colors.white54, fontSize: 12),
-          ),
-          const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: _recalculateFeesFromOrders,
-              icon: const Icon(Icons.refresh, size: 18, color: Colors.white),
-              label: const Text('Recalcular a partir das Ordens', style: TextStyle(color: Colors.white)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.cyan.shade700,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-  
   Future<void> _recalculateFeesFromOrders() async {
     setState(() => _isLoading = true);
     
@@ -3309,16 +2972,22 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
       ).toList();
       
       int recordedCount = 0;
-      
+
+      // v856: carregar os registros UMA vez. Antes o loop chamava
+      // getAllFeeRecords() dentro da iteração (O(n²) de I/O) e o `alreadyRecorded`
+      // ficava sempre falso para ordens novas no mesmo lote — recordFee agora é
+      // idempotente, mas o contador precisa do set atualizado localmente.
+      final existingRecords = await PlatformFeeService.getAllFeeRecords();
+      final recordedIds = existingRecords
+          .map((r) => r['orderId']?.toString() ?? '')
+          .where((s) => s.isNotEmpty)
+          .toSet();
+
       for (final order in completedOrders) {
         try {
-          // Verificar se já foi registrada
-          final existingRecords = await PlatformFeeService.getAllFeeRecords();
-          final alreadyRecorded = existingRecords.any((r) => r['orderId'] == order.id);
-          
           final amountSats = (order.btcAmount * 100000000).round();
-          
-          if (!alreadyRecorded && amountSats > 0) {
+
+          if (!recordedIds.contains(order.id) && amountSats > 0) {
             await PlatformFeeService.recordFee(
               orderId: order.id,
               transactionBrl: order.amount,
@@ -3326,6 +2995,7 @@ class _PlatformAdminScreenState extends State<PlatformAdminScreen> {
               providerPubkey: order.providerId ?? 'unknown',
               clientPubkey: order.userPubkey ?? 'unknown',
             );
+            recordedIds.add(order.id);
             recordedCount++;
           }
         } catch (e) {

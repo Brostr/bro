@@ -826,6 +826,12 @@ class BrixRelayService {
           feeNetworkReserveSats: feeNetworkReserveSats);
       String? feePaymentHash;
       if (feeSats > 0) {
+        // v874: RASTREABILIDADE — o orderId do BRIX e unico por envio
+        // ('brix_send_<paymentHash>'), entao o lock _paidOrderIds nunca
+        // bloqueia reenvio. A deduplicacao real e o settled/pending acima.
+        // Este trace liga a taxa ao envio BRIX que a originou.
+        broLog('[FEE-TRACE] brix_send order=brix_send_$paymentHash '
+            'amount=$amountSats fee=$feeSats pct=${AppConfig.brixFeePercent}');
         final charged = chargeOutgoingFeeOverride != null
             ? await chargeOutgoingFeeOverride!(
                 orderId: 'brix_send_$paymentHash',

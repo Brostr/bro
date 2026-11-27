@@ -112,12 +112,18 @@ class LightningProvider with ChangeNotifier {
   }
 
   /// Obter saldo total
-  Future<int> getBalance() async {
+  ///
+  /// v876: retorna `null` quando o SDK não conseguiu ler o saldo (rede caiu,
+  /// Tor bloqueando, leitura parcial). Antes devolvia 0, e a UI mostrava
+  /// "0 sats" como se o usuário tivesse perdido tudo (caso real 27/11:
+  /// 32.177 sats reais exibidos como 0).
+  Future<int?> getBalance() async {
     if (_sparkProvider.isInitialized) {
       final sparkResult = await _sparkProvider.getBalance();
-      return int.tryParse(sparkResult['balance']?.toString() ?? '0') ?? 0;
+      if (sparkResult['ok'] == false) return null;
+      return int.tryParse(sparkResult['balance']?.toString() ?? '');
     }
-    return 0;
+    return null;
   }
   
   /// Obter saldo separado por backend
@@ -126,7 +132,10 @@ class LightningProvider with ChangeNotifier {
     
     if (_sparkProvider.isInitialized) {
       final sparkResult = await _sparkProvider.getBalance();
-      result[LightningBackend.spark] = int.tryParse(sparkResult['balance']?.toString() ?? '0') ?? 0;
+      if (sparkResult['ok'] != false) {
+        final v = int.tryParse(sparkResult['balance']?.toString() ?? '');
+        if (v != null) result[LightningBackend.spark] = v;
+      }
     }
     
     return result;

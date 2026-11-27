@@ -604,6 +604,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           // eb547393/c705cc55 nunca quitavam, em qualquer versão).
           PlatformFeeService.setWalletHistoryFetcher(() => breezProvider.getAllPayments());
           broLog('💼 PlatformFeeService callback + history fetcher configurados');
+
+          // v876: reprocessa fatias da fundação que falharam em sessões
+          // anteriores. Sem isso, uma falha de rede no split deixava os 20%
+          // órfãos para sempre (só um log registrava).
+          unawaited(PlatformFeeService.retryPendingFoundationShares()
+              .then((n) {
+            if (n > 0) broLog('✅ [Fundação] $n pendência(s) quitada(s) no boot');
+          }).catchError((_) {}));
         }
 
         if (!success && mounted) {

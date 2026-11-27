@@ -1,7 +1,7 @@
 name: bro_app
 description: "Bro - Plataforma P2P para pagamento de contas com Bitcoin via Lightning Network"
 publish_to: 'none'
-version: 1.0.134+855
+version: 1.0.134+879
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -75,6 +75,11 @@ dependencies:
   # Version & URL
   package_info_plus: ^8.0.0
   url_launcher: ^6.2.5
+  # v859: vendorizado com fix de auth SOCKS5 (Orbot aceita USERPASS e a lib
+  # enviava credenciais vazias -> todo trafego falhava). Ver
+  # packages/flutter_socks_proxy/lib/http_impl.dart.
+  flutter_socks_proxy:
+    path: packages/flutter_socks_proxy
 
 dev_dependencies:
   flutter_test:

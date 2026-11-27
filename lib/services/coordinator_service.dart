@@ -15,6 +15,18 @@ class CoordinatorCard {
   final List<String> relays;
   final int createdAt;
 
+  /// v857: endereço da FUNDAÇÃO que recebe a fatia obrigatória da taxa do
+  /// coordinator. Anunciado no cartão (tag `foundation`).
+  ///
+  /// v876 [SEGURANÇA]: este campo é **apenas informativo**. O destino real da
+  /// fatia da fundação é SEMPRE `AppConfig.platformLightningAddress`.
+  ///
+  /// Motivo: o cartão é um evento Nostr público (kind 30082) que qualquer um
+  /// publica. Um coordinator malicioso anuncia `ln`=ele e `foundation`=ele e
+  /// captura 100% da taxa — os 20% da fundação viram inexigíveis. Ver
+  /// `PlatformFeeService.resolveFeeSplit`.
+  final String foundationLnAddress;
+
   const CoordinatorCard({
     required this.pubkey,
     required this.name,
@@ -22,7 +34,15 @@ class CoordinatorCard {
     required this.lnAddress,
     required this.relays,
     required this.createdAt,
+    this.foundationLnAddress = '',
   });
+
+  /// v857: fração da taxa que fica com a FUNDAÇÃO (desenvolvimento do código).
+  /// Decisão da Carol (26/11): o coordinator fica com 80% do que recebe.
+  static const double foundationShare = 0.20;
+
+  /// Fração que fica com o coordinator.
+  static const double coordinatorShare = 1.0 - foundationShare;
 
   Map<String, dynamic> toJson() => {
         'pubkey': pubkey,
@@ -31,6 +51,7 @@ class CoordinatorCard {
         'lnAddress': lnAddress,
         'relays': relays,
         'createdAt': createdAt,
+        if (foundationLnAddress.isNotEmpty) 'foundationLnAddress': foundationLnAddress,
       };
 
   factory CoordinatorCard.fromJson(Map<String, dynamic> j) => CoordinatorCard(
@@ -40,6 +61,7 @@ class CoordinatorCard {
         lnAddress: j['lnAddress'] as String? ?? '',
         relays: (j['relays'] as List?)?.map((e) => e.toString()).toList() ?? const [],
         createdAt: j['createdAt'] as int? ?? 0,
+        foundationLnAddress: j['foundationLnAddress'] as String? ?? '',
       );
 }
 
@@ -333,6 +355,7 @@ class CoordinatorService {
       String name = 'Coordinator';
       String fee = '';
       String ln = '';
+      String foundationLn = '';
       final List<String> relays = [];
       for (final t in tags) {
         if (t is! List || t.length < 2) continue;
@@ -345,6 +368,10 @@ class CoordinatorService {
             break;
           case 'ln':
             ln = t[1].toString();
+            break;
+          case 'foundation':
+            // v857: endereço da fundação anunciado pelo coordinator.
+            foundationLn = t[1].toString();
             break;
           case 'relay':
             relays.add(t[1].toString());
@@ -360,6 +387,7 @@ class CoordinatorService {
         lnAddress: ln,
         relays: relays,
         createdAt: createdAt,
+        foundationLnAddress: foundationLn,
       );
     } catch (e) {
       broLog('⚠️ CoordinatorService._parseCard: $e');

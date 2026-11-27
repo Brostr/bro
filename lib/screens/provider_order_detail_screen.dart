@@ -1944,6 +1944,9 @@ class _ProviderOrderDetailScreenState extends State<ProviderOrderDetailScreen> {
   
   void _showProofImage(String base64Image) {
     try {
+      // v857: base64Decode pode lançar FormatException em prova truncada
+      // (NIP-44 de build antigo > 65535 bytes). Antes a exceção subia e a
+      // tela ficava preta; agora cai no aviso legível.
       final imageBytes = base64Decode(base64Image);
       final screenHeight = MediaQuery.of(context).size.height;
       showDialog(

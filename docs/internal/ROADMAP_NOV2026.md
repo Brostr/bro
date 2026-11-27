@@ -5,6 +5,30 @@
 
 Prazo: tudo entregue e aprovado até **30/nov**.
 
+## Estabilização v879 — Tor no pagamento, saldo real e split seguro (27/11)
+
+> **Leia `LICOES_APRENDIDAS_NOV2026.md` seção 9 antes de mexer em Tor ou saldo.**
+
+- **Tor suspenso só durante o pagamento.** O SDK Spark (Rust) não passa pelo proxy SOCKS do Dart; com Tor ligado, todo pagamento falhava (`PermissionDenied`, CloudFront). `TorService.withTorBypassed` desliga o proxy apenas durante o envio e restaura no `finally`. A publicação do resultado nos relays acontece DEPOIS, já com o Tor de volta — o relay vê o IP do Tor, não o real. Validado no aparelho: `Tor: suspendendo` → `PaymentStatus.completed` → `Tor: restaurado` → `publicado em 5/5 relays`.
+- **Saldo nunca mais é 0 em falha.** `getBalance` devolvia `{'balance': 0}` no catch; com o Orbot em modo VPN bloqueando o SDK, a carteira exibia "0 sats" com o usuário tendo 32.177. Agora devolve `{'ok': false, 'balance': null}` e `lightning_provider.getBalance()` retorna `int?` — `null` significa "não consegui ler", nunca "zero".
+- **Forja de `completed` pelo provedor (BLOQUEADOR).** O v875 passou a publicar `status` no `bro_complete`; ler esse valor como autoridade permitia que um provedor malicioso publicasse `status: 'completed'` e a ordem virasse concluída sem o comprador confirmar (e o reconcile pagava o invoice sozinho). O consumo agora SEMPRE resulta em `awaiting_confirmation`; o campo continua publicado (forense), mas não é autoridade.
+- **Split 80/20 — self-dealing fechado.** O endereço da fundação vinha da tag `foundation` do cartão Nostr (kind 30082, qualquer um publica). Um coordinator malicioso anunciava `ln`=ele e `foundation`=ele e capturava 100%. Agora o destino é SEMPRE `AppConfig.platformLightningAddress`; a tag é ignorada com log.
+- **Split 80/20 — retry da fundação.** Falha na fatia de 20% só logava. Agora há fila persistente (`platform_fee_pending_foundation`), idempotente por orderId, com retry no boot e limite de 5 tentativas.
+- **R3 confirmado ausente.** Varredura completa: só havia um comentário órfão em `order_provider.dart` (removido). Nenhuma lógica de expiração de aceite. O "accept expired" do provedor iOS v855 é regra local dele.
+- **Validação:** `flutter analyze lib/` 0 erros; `flutter test test/race test/integration` **200/200**; build 879 validado no aparelho com Tor ligado (saldo real 31.934 sats, pagamento concluído).
+
+## Estabilização v877 — comprovante, status terminal e rastreabilidade (26/11)
+
+> **Leia `LICOES_APRENDIDAS_NOV2026.md` antes de mexer nestas áreas.**
+
+- **Status terminal não regride mais.** NIP-40 removido do `bro_update` (kind 30080) — o status vivia só nesse evento, que expirava em 30d; quando o relay deletava, a ordem regredia para `pending` (status do kind 30078, que nunca muda) e o usuário via "confirme pagamento" numa ordem já paga. Evidência: 360 updates no primal e 370 no bro-relay2 ainda tinham `expiration`; ordem `4e2c858a` tinha `status=pending` no kind 30078 mas `bro_complete` expirando em 21/12.
+- **`bro_complete` agora carrega `status`.** Como não expira (v864), é a âncora permanente que reconstrói o estado terminal mesmo que todos os updates sejam apagados. Builds antigos sem o campo continuam funcionando (fallback para `awaiting_confirmation`).
+- **Comprovante — 3 causas independentes corrigidas.** (a) NIP-40 removido do `bro_complete` (v864); (b) cache write-once guardava o marcador `[encrypted:nip44v2]` em vez da imagem — agora rejeitado no getter, removido do storage e o fetch não aborta com cache inválido; (c) `fetchProofFromRelay` só tentava uma cópia — fallback para `fetchProofForOrder` (user, admin, provider-self).
+- **Rastreabilidade de taxas.** `[PAY-TRACE]` agora inclui `preimage` — é a chave que liga o app ao extrato do destinatário (`SHA256(preimage) == paymentHash == 'ref'` na coinos). Validado: 11 de 14 recebimentos do CSV batem exatamente. As 8 taxas de 1 sat de 26/11 **não são duplicadas** (sparkId/htlc/preimage únicos; 8 envios BRIX a 0,5%).
+- **Tor real.** `flutter_socks_proxy` vendorizado com 2 patches: greeting SOCKS5 só oferece `NoAuth` sem credenciais (o Orbot aceitava USERPASS e a lib enviava credenciais vazias → todo tráfego falhava) e `close()` com null check.
+- **Validação:** `flutter analyze` 0 erros; `flutter test test/race test/integration` **175/175**; build 877 validado no aparelho (comprovante da `4e2c858a` renderiza, `preview=/9j/4AAQ`).
+- **Pendências conhecidas:** comprovantes antigos com `expiration` (120 no primal, 119 no bro-relay2) vão expirar de qualquer forma — Carol decidiu não migrar. Ordem `1c2dd29e`: comprovante nasceu corrompido (124 chars), perda definitiva.
+
 ## Estabilização v854 — BRIX e taxas (25/11)
 
 - Envio BRIX manual: o valor digitado é o **débito total**. A taxa BRIX (0,5%, mínimo 1 sat) e a taxa de rede Spark são descontadas desse total; a confirmação mostra débito, taxas e valor líquido ao destinatário antes do pagamento.
@@ -96,15 +120,46 @@ Prazo: tudo entregue e aprovado até **30/nov**.
 
 ---
 
-## R4 — Revisão geral da tela de Admin 🧹
-**Sintoma (Carol):** "parece que nenhuma mediação funciona ali, nem as estatísticas".
+## R4 — Revisão geral da tela de Admin ✅ CONCLUÍDO (25/11)
 
-**O que fazer:**
-- Auditoria ponta a ponta de `platform_admin_screen.dart` × rotas admin do backend: lista de disputas, detalhe/evidências, estatísticas, usuários/ordens. Pra CADA painel: de onde vem o dado → a rota responde? → o widget renderiza?
-- Consertar o que estiver morto (rota 404/500, campo renomeado, auth) e REMOVER o que for enfeite sem backend.
-- Regla da casa: admin não pode depender de relay específico — dados de mediação vêm do backend (`bro-api`) como fonte da verdade, relay só pra evidência NIP-44.
+**Sintoma original (Carol):** "parece que nenhuma mediação funciona ali, nem as estatísticas".
 
-**Critério de aceite:** cada painel com dado real demonstrado em teste manual guiado (checklist no PR); zero seções "em breve" fantasmas.
+### O que foi feito
+
+**Segurança (3 falhas fechadas):**
+1. `fetchAllDisputeResolutions` aceitava resolução de QUALQUER assinante — um terceiro podia "resolver" a disputa de outro e ela sumia da aba Abertas. Agora fail-closed em `adminPubkey`.
+2. `fetchAdminPaymentInvoice` devolvia o invoice mais recente da d-tag sem checar autor — qualquer um publicava invoice falso e a admin pagava pro atacante. Agora `expectedPubkey` obrigatório.
+3. Resolução assinada com a conta logada sem verificar se é a chave admin — publicava e todos os apps descartavam em silêncio ("resolvi" mas a disputa seguia aberta). Agora bloqueia antes de publicar, nas duas telas.
+
+**Bugs funcionais (4 corrigidos):**
+4. "COLETA AUTOMÁTICA ATIVA" era texto fixo no código; `isAutoCollectionEnabled()` nunca era lido e o default é `false`. Agora reflete o estado real.
+5. `recordFee()` não era idempotente — 5 call sites geravam 2-3 registros da mesma ordem e inflavam os totais. Agora dedup por `orderId`.
+6. Crash por `(record['orderId'] as String).substring(0,8)` em registro legado sem ID.
+7. `setState` após dispose em `_loadData` (relays com timeout de 10s).
+
+**UX / limpeza (pedido da Carol):**
+8. **Estatísticas unificadas** — `_buildTotalsCard` (topo) e `_buildHistorySection` (fim) repetiam as mesmas métricas. Viraram um `_buildStatsCard` só.
+9. **Removidos:** `_buildReceiveAddressesCard` (endereço já validado, nunca usado), `_buildPendingFeesCard` (não usada; coleta desligada), `_buildRecalculateFeesCard` (virou botão no card de stats), `_testPlatformFee`, `_markAllCollected`.
+10. **Removidos** `_approveAnalysis`/`_rejectAnalysis` — código morto e enganoso: o backend só marcava "revisado", não resolvia nem movia sats.
+11. **Religado** `_showNostrResolveDialog` — existia completo sem nenhum botão chamando. Agora resolve em 2 toques direto do card.
+12. Aviso de segurança condensado de bloco de 40px para uma linha.
+
+**Login admin (pedido da Carol):**
+13. Timeout 10s → 25s + 2 tentativas com backoff. O Fly derruba a instância idle e o cold start passava dos 10s, gerando "Sem conexão" com internet boa — e o retry manual caía no rate limit (5/min). Mensagens agora distinguem timeout / sem internet / servidor reiniciando (502-504) / senha errada / rate limit.
+
+**Agente de disputas (pedido da Carol):**
+14. **Viés de má-fé corrigido.** O prompt agora abre com "a maioria das disputas NÃO é má-fé" e lista as causas reais em ordem: bug do app → confusão do usuário → problema real de pagamento → má-fé (minoria). Inclui listas explícitas de sinais de bug do app e de confusão, e proíbe usar "fraude"/"má-fé"/"fabricado" sem pelo menos um sinal objetivo.
+15. **Aprendizado histórico.** Novo `_buildLearningContext()` alimenta o prompt com as últimas 12 resoluções reais (motivo, sugestão do agente, decisão humana, acertou/errou) + precisão acumulada. O agente agora calibra contra o que a mediadora decidiu de fato.
+
+### Verificação
+- `flutter analyze` nos arquivos alterados: **0 erros**
+- `flutter test test/race test/integration`: **122/122**
+- `node --check` no `disputeAgentService.js`: OK; prompt gerado validado (4305 chars, blocos de aprendizado e guarda anti-má-fé presentes)
+
+### Pendências conhecidas (não bloqueiam)
+- Registros de taxa já duplicados no aparelho continuam lá; totais só zeram com "Recalcular".
+- `EscrowSplitService`/`PlatformWalletService` são código morto com bug contábil (`providerAmount` reportado ≠ enviado). Sugerido deletar.
+- Deploy do backend (`bro-api`) necessário para o agente novo valer em produção.
 
 ---
 
@@ -116,6 +171,6 @@ Prazo: tudo entregue e aprovado até **30/nov**.
 | 14–16/nov | **R1** (tela preta do comprovante) |
 | 16–20/nov | **R2** (tabela de garantia; HODL T2 consome essa tabela — série T do HODL já está pronta na branch local, merge após R5+R1 estabilizarem no main) |
 | 21–26/nov | ~~**R3** (timeout 2h)~~ — **SUSPENSO em 25/11** (complexidade/bugs/suporte) |
-| 27–30/nov | **R4** (admin) + merge HODL (se Carol aprovar) + regressão completa + build candidato |
+| 27–30/nov | ~~**R4** (admin)~~ — **CONCLUÍDO em 25/11** + merge HODL (se Carol aprovar) + regressão completa + build candidato |
 
 **Régua de liberação:** cada item só vai pros testadores quando (1) agente implementou + testou, (2) Copilot revisou + rodou testes independentes, (3) Carol retestou no aparelho e aprovou. 💜

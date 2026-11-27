@@ -137,6 +137,50 @@ class NostrOrderService {
     }
   }
 
+  /// v864: remove da blocklist as ordens que NÃO são mais terminais.
+  ///
+  /// A blocklist é persistida em SharedPreferences e sobrevive a updates do
+  /// app. Quando a regra muda (como agora: `awaiting_confirmation` deixou de
+  /// ser terminal), as entradas antigas continuam escondendo ordens legítimas
+  /// do usuário — caso 2646d74f, que ficou invisível em "Minhas Trocas" mesmo
+  /// após o fix porque o ID já estava gravado no disco.
+  ///
+  /// Chamado no boot, depois de `_loadBlockedOrders`. Só remove IDs cuja ordem
+  /// o app conhece E cujo status atual NÃO é terminal. IDs desconhecidos ficam
+  /// (não temos como julgar).
+  Future<int> pruneBlocklistForNonTerminalOrders(
+      Iterable<String> knownOrderIdsWithStatus) async {
+    await _loadBlockedOrders();
+    if (_blockedOrderIds.isEmpty) return 0;
+
+    // Mapa orderId -> status, montado pelo caller (OrderProvider).
+    final statusById = <String, String>{};
+    for (final entry in knownOrderIdsWithStatus) {
+      final sep = entry.indexOf('|');
+      if (sep <= 0) continue;
+      statusById[entry.substring(0, sep)] = entry.substring(sep + 1);
+    }
+
+    const terminal = {'accepted', 'completed', 'cancelled', 'liquidated', 'disputed'};
+    final toUnblock = <String>{};
+    for (final id in _blockedOrderIds) {
+      final status = statusById[id];
+      if (status == null) continue; // desconhecida — não julgar
+      if (!terminal.contains(status)) toUnblock.add(id);
+    }
+    if (toUnblock.isEmpty) return 0;
+
+    _blockedOrderIds.removeAll(toUnblock);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(_blockedOrdersKey, _blockedOrderIds.toList());
+    } catch (e) {
+      broLog('⚠️ Erro ao salvar blocklist após prune: $e');
+    }
+    broLog('🧹 Blocklist: ${toUnblock.length} ordem(ns) desbloqueada(s) por status não-terminal');
+    return toUnblock.length;
+  }
+
   /// v437: Público para que OrderProvider possa bloquear ordens canceladas localmente
   Future<void> addToBlocklistPublic(Set<String> orderIds) => _addToBlocklist(orderIds);
 
@@ -432,7 +476,20 @@ class NostrOrderService {
         ['t', 'status-$newStatus'], // Tag pesquisável por status
         ['r', orderId], // CRÍTICO: Tag 'r' (reference) para busca por orderId nos relays
         ['orderId', orderId], // Tag customizada (não filtrável por relays, só para leitura)
-        _expirationTag(30), // v580: NIP-40 — status updates expire in 30d
+        // v875 [CRÍTICO]: NIP-40 REMOVIDO do status update.
+        //
+        // O status update É o histórico do ciclo de vida da ordem. Expirá-lo em
+        // 30d fazia o relay DELETAR o evento, e a ordem REGREDIA para o status
+        // do kind 30078 original ('pending') — o usuário via "confirme
+        // pagamento" numa ordem que ele já tinha confirmado e cujo comprovante
+        // já tinha sido apagado. Regressão de status terminal é inaceitável:
+        // o dinheiro já mudou de mãos.
+        //
+        // Varredura nos relays (26/11): 360 updates no primal e 370 no
+        // bro-relay2 ainda carregavam expiration. Mesma decisão já tomada para
+        // kind 30078 (vSEC-fix) e kind 30081 (v864): histórico não expira.
+        // Só eventos realmente transitórios (invoice_refresh, republish)
+        // mantêm expiração.
       ];
       
       // v257: CORREÇÃO CRÍTICA — Garantir que AMBAS as partes (provedor E usuário)
@@ -486,7 +543,10 @@ class NostrOrderService {
       
       // Adicionar à blocklist se status é terminal
       if (successCount > 0) {
-        const terminalStatuses = ['accepted', 'awaiting_confirmation', 'completed', 'cancelled', 'liquidated', 'disputed'];
+        // v864 FIX: `awaiting_confirmation` removido — ver comentário em
+        // fetchPendingOrders. Bloquear esse status escondia a ordem do próprio
+        // criador enquanto ele aguardava o comprovante (caso 2646d74f).
+        const terminalStatuses = ['accepted', 'completed', 'cancelled', 'liquidated', 'disputed'];
         if (terminalStatuses.contains(newStatus)) {
           _addToBlocklist({orderId});
           _statusUpdatesCache = null;
@@ -2357,6 +2417,15 @@ class NostrOrderService {
         'userPubkey': effectiveUserPubkey ?? '', // v512: Include for watchtower routing
         'recipientPubkey': effectiveUserPubkey, // Para quem é destinado
         'completedAt': DateTime.now().toIso8601String(),
+        // v875 [CRÍTICO]: o comprovante carrega o STATUS junto.
+        //
+        // O bro_complete NÃO expira (v864), então ele é o único registro
+        // permanente de que a ordem chegou ao fim. Antes o status vivia só no
+        // kind 30080, que expirava em 30d — quando ele sumia, a ordem regredia
+        // para 'pending' e o usuário via "confirme pagamento" numa ordem já
+        // concluída. Com o status aqui, o evento permanente reconstrói o
+        // estado terminal mesmo que todos os updates tenham sido apagados.
+        'status': 'awaiting_confirmation',
       };
       
       // Adicionar proofImage (criptografado ou plaintext como fallback)
@@ -2393,7 +2462,17 @@ class NostrOrderService {
         ['t', broTag],
         ['t', 'bro-complete'],
         ['orderId', order.id],
-        _expirationTag(30), // v580: NIP-40 — complete event expires in 30d
+        // v864 [CRÍTICO]: NIP-40 REMOVIDO do bro_complete.
+        //
+        // O comprovante é a PROVA DE PAGAMENTO — é o que garante o histórico
+        // do usuário se ele trocar de dispositivo e recuperar a conta. Expirar
+        // em 30 dias fazia relays (Damus/Primal/nos.lol) DELETAREM o evento, e
+        // o comprovante sumia para sempre. Ordens de 21/11 (4e2c858a) e de
+        // 19/11 (1c2dd29e) já estavam com expiration vencendo em 21/12.
+        //
+        // Mesma decisão já tomada para kind 30078 (vSEC-fix acima): histórico
+        // legítimo não expira. Só eventos transitórios (updates, refresh,
+        // republish) mantêm expiração.
       ];
       // Só adicionar tag 'e' se eventId for válido (64 chars hex)
       if (order.eventId != null && order.eventId!.length == 64) {
@@ -2742,7 +2821,15 @@ class NostrOrderService {
       // filtrar IMEDIATAMENTE sem precisar da query de status separada.
       // Isso resolve o bug onde orders aceitas/completadas continuavam aparecendo
       // quando a query de status (kind 30079/30080/30081) falhava por timeout.
-      const terminalInEvent = ['accepted', 'awaiting_confirmation', 'completed', 'cancelled', 'liquidated', 'disputed'];
+      //
+      // v864 FIX: `awaiting_confirmation` NÃO é terminal para o CRIADOR da ordem.
+      // A blocklist existe para esconder ordens já pegas por outro provedor da
+      // lista de DISPONÍVEIS. Mas `fetchPendingOrders` também alimenta o
+      // histórico do usuário — e bloquear `awaiting_confirmation` fazia a ordem
+      // 2646d74f DESAPARECER da lista "Minhas Trocas" do próprio dono, mesmo
+      // com userPubkey == currentUser. O dono precisa ver a ordem que ele criou
+      // enquanto aguarda o comprovante.
+      const terminalInEvent = ['accepted', 'completed', 'cancelled', 'liquidated', 'disputed'];
       if (terminalInEvent.contains(order.status)) {
         _addToBlocklist({order.id});
         blockedCount++;
@@ -2815,11 +2902,12 @@ class NostrOrderService {
     }
     
     // PASSO 3: Salvar ordens com status terminal na blocklist local
+    // v864 FIX: `awaiting_confirmation` NÃO entra — ver fetchPendingOrders.
     final newBlockedIds = <String>{};
     for (final entry in statusUpdates.entries) {
       final status = entry.value['status'] as String?;
-      if (status == 'accepted' || status == 'awaiting_confirmation' || 
-          status == 'completed' || status == 'liquidated' || 
+      if (status == 'accepted' ||
+          status == 'completed' || status == 'liquidated' ||
           status == 'cancelled' || status == 'disputed') {
         newBlockedIds.add(entry.key);
       }
@@ -4059,6 +4147,27 @@ class NostrOrderService {
             if (eventKind == kindBroAccept) {
               newStatus = 'accepted';
             } else if (eventKind == kindBroComplete) {
+              // v876 [CRÍTICO — BLOQUEADOR]: o `bro_complete` NUNCA pode
+              // ditar 'completed'.
+              //
+              // O v875 passou a publicar `status` dentro do bro_complete (para
+              // ser a âncora permanente que sobrevive à expiração do
+              // bro_update). Mas LER esse valor como autoridade abriu uma
+              // forja: um provedor malicioso publica kind 30081 com
+              // `status: 'completed'` + o próprio invoice, e:
+              //   1. pending → completed passa em _isStatusProgression;
+              //   2. a validação de autor acima só exige
+              //      eventPubkey == contentProviderId — que o próprio
+              //      provedor controla;
+              //   3. a ordem vira "concluída" SEM o comprador confirmar;
+              //   4. o reconcile completed-unpaid paga o invoice sozinho.
+              //
+              // A âncora correta é `awaiting_confirmation`: o provedor declara
+              // "paguei", e SÓ o comprador (bro_update assinado por ele) ou
+              // uma resolução de admin pode levar a 'completed'.
+              //
+              // O campo `status` continua sendo publicado (documentação e
+              // forense), mas o consumo o ignora de propósito.
               newStatus = 'awaiting_confirmation';
             } else if (eventKind == kindBroPaymentProof) {
               final contentStatus = content['status'] as String?;
@@ -4911,9 +5020,24 @@ class NostrOrderService {
     // Deduplicar por orderId, mantendo o mais recente
     final bestByOrderId = <String, Map<String, dynamic>>{};
     
+    // v856 [SECURITY]: só o ADMIN pode resolver disputa. Antes este método
+    // aceitava qualquer evento com assinatura válida — bastava um terceiro
+    // publicar um `bro_dispute_resolution` falso para a disputa desaparecer
+    // da aba "Abertas" do admin (e ser persistida localmente como resolvida
+    // por markDisputeResolved). fetchDisputeResolution já fazia essa checagem;
+    // este caminho em massa não fazia. Fail-closed: sem adminPubkey, nada vale.
+    if (AppConfig.adminPubkey.isEmpty) {
+      broLog('🚨 [SECURITY] adminPubkey NÃO configurado — fetchAllDisputeResolutions retorna vazio');
+      return allResolutions;
+    }
+
     for (final events in results) {
       for (final event in events) {
         try {
+          if (event['pubkey'] != AppConfig.adminPubkey) {
+            broLog('⚠️ REJEITADA resolução de não-admin: ${(event['pubkey'] as String?)?.substring(0, 8) ?? '?'}');
+            continue;
+          }
           final content = jsonDecode(event['content'] as String) as Map<String, dynamic>;
           if (content['type'] != 'bro_dispute_resolution') continue;
           final orderId = content['orderId'] as String? ?? '';
@@ -5034,7 +5158,21 @@ class NostrOrderService {
   }
 
   /// v728: admin busca o invoice que o provedor publicou (mais recente).
-  Future<Map<String, dynamic>?> fetchAdminPaymentInvoice(String orderId) async {
+  ///
+  /// v856 [SECURITY]: `expectedPubkey` é OBRIGATÓRIO. Antes este método
+  /// devolvia o evento mais recente com `#d: <orderId>_admin_payment` sem
+  /// olhar quem assinou — qualquer pessoa podia publicar um invoice falso
+  /// nessa d-tag e a admin pagaria para o atacante (o valor sai da carteira
+  /// dela). Agora só aceita o evento assinado pelo provedor que ela mesma
+  /// acionou via push.
+  Future<Map<String, dynamic>?> fetchAdminPaymentInvoice(
+    String orderId, {
+    required String expectedPubkey,
+  }) async {
+    if (expectedPubkey.isEmpty) {
+      broLog('🚨 [SECURITY] fetchAdminPaymentInvoice sem expectedPubkey — recusando');
+      return null;
+    }
     final allRelays = <String>[..._relays, ..._fallbackRelays];
     final results = await Future.wait(allRelays.map((relay) async {
       try {
@@ -5048,6 +5186,12 @@ class NostrOrderService {
         var bestTs = 0;
         for (final ev in events) {
           try {
+            // _fetchFromRelay já validou a assinatura (Event.fromJson verify:true),
+            // então ev['pubkey'] é autêntico — basta exigir que seja o provedor.
+            if (ev['pubkey'] != expectedPubkey) {
+              broLog('⚠️ [SECURITY] invoice de admin_payment de autor inesperado: ${(ev['pubkey'] as String?)?.substring(0, 8) ?? '?'} (esperado ${expectedPubkey.substring(0, 8)})');
+              continue;
+            }
             final content = ev['parsedContent'] ?? jsonDecode(ev['content']);
             if (content['type'] != 'bro_admin_payment_invoice') continue;
             final ts = ev['created_at'] as int? ?? 0;
@@ -6207,6 +6351,13 @@ class NostrOrderService {
       for (final relay in allRelays) {
         try {
           final channel = WebSocketChannel.connect(Uri.parse(relay));
+          // v858: `WebSocketChannel.connect` NÃO lança de forma síncrona — a
+          // falha de socket chega como erro ASSÍNCRONO no stream. Sem este
+          // `ready` aguardado, um relay morto (nostr.mom, nos.lol, damus 503)
+          // gerava "Unhandled Exception: SocketException: Connection timed
+          // out" no logcat e o `catch` abaixo nunca via o erro. O `ready`
+          // converte a falha em exceção aguardável, que o catch trata.
+          await channel.ready.timeout(const Duration(seconds: 8));
           final subId = 'proof_${orderId.substring(0, 8)}_${DateTime.now().millisecondsSinceEpoch % 10000}';
           
           // Buscar kind 30081 (complete) e kind 30080 (payment proof)
@@ -6313,6 +6464,17 @@ class NostrOrderService {
                   result['encrypted'] = false;
                   broLog('✅ Comprovante plaintext encontrado para ${orderId.substring(0, 8)}');
                 } else if (privateKey != null) {
+                  // v863 FIX: NÃO sobrescrever um comprovante JÁ OBTIDO.
+                  // O loop percorre TODOS os relays e agrega. Antes, um relay
+                  // posterior cujo evento não decifrava (ou vinha sem proof)
+                  // fazia `result['encrypted'] = true` e zerava o resultado bom
+                  // do relay anterior. Sintoma exato da ordem 1c2dd29e:
+                  //   found=true, encrypted=false   (relay A decifrou)
+                  //   found=true, encrypted=true    (relay B sobrescreveu)
+                  // e a tela mostrava "comprovante não disponível".
+                  if (result['proofImage'] != null) {
+                    continue;
+                  }
                   // Tentar descriptografar com a chave privada fornecida
                   final proofImageNip44Admin = content['proofImage_nip44_admin'] as String?;
                   final senderPubkey = content['providerId'] as String? ?? (eventData['pubkey'] as String?);

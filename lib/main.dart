@@ -48,6 +48,7 @@ import 'providers/platform_balance_provider.dart';
 import 'services/storage_service.dart';
 import 'services/notification_service.dart';
 import 'services/api_service.dart';
+import 'services/tor_service.dart';
 import 'services/cache_service.dart';
 import 'services/platform_fee_service.dart';
 import 'services/provider_payment_guard.dart';
@@ -383,6 +384,10 @@ void main() async {
 
   // Inicializar ApiService (Dio + NIP-98 interceptor)
   await ApiService().init();
+
+  // v857: Tor REAL. Precisa rodar ANTES de qualquer cliente HTTP ser criado
+  // (relays, API, BRIX) — o SocksProxy instala um HttpOverrides global.
+  await TorService.instance.initialize();
 
   // Verificar se ja esta logado
   final storage = StorageService();

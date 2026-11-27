@@ -224,7 +224,16 @@ class OrderProvider with ChangeNotifier {
       // Apenas ordens que EU criei (n�?£o ordens aceitas como provedor)
       return o.userPubkey == _currentUserPubkey && o.status != 'draft';
     }).toList();
-    
+
+    // v864: diagnostico - ordens do usuario que NAO entraram na lista.
+    if (_orders.isNotEmpty) {
+      final mine = _orders.where((o) => o.userPubkey == _currentUserPubkey).toList();
+      final drafts = mine.where((o) => o.status == 'draft').length;
+      final notMine = _orders.where((o) => o.userPubkey != _currentUserPubkey).length;
+      broLog('myCreatedOrders: ${result.length} visiveis, $drafts draft, '
+          '$notMine de outros, ${_orders.length} total em memoria');
+    }
+
     return result;
   }
   
@@ -817,6 +826,21 @@ class OrderProvider with ChangeNotifier {
       await _saveOrders(); // Salvar lista limpa
     }
 
+    // v864: limpar a blocklist de ordens que NÃO são mais terminais.
+    // A blocklist é persistida e sobrevive a updates do app — entradas antigas
+    // (gravadas quando `awaiting_confirmation` era tratado como terminal)
+    // continuavam escondendo ordens legítimas do usuário (caso 2646d74f).
+    try {
+      final statusPairs = _orders.map((o) => '${o.id}|${o.status}').toList();
+      final unblocked = await _nostrOrderService
+          .pruneBlocklistForNonTerminalOrders(statusPairs);
+      if (unblocked > 0) {
+        broLog('🧹 v864: $unblocked ordem(ns) voltaram a ser visíveis');
+      }
+    } catch (e) {
+      broLog('⚠️ v864 prune blocklist: $e');
+    }
+
     // v519: CLEANUP — Remove ghost provider orders from dispute-resolution bug.
     // Runs BEFORE AND AFTER syncOrdersFromNostr so both cached and re-synced ghosts
     // are removed. A REAL provider always has providerInvoice in metadata — without it,
@@ -1255,9 +1279,6 @@ class OrderProvider with ChangeNotifier {
     }
   }
 
-  /// Expirar ordens pendentes antigas (> 2 horas sem aceite)
-  /// Ordens que ficam muito tempo pendentes provavelmente foram abandonadas
-  
   // v406: Cache write-once de proofImage — uma vez decriptografado, NUNCA perde
   static const String _proofCachePrefix = 'proof_cache_';
   
@@ -1274,7 +1295,14 @@ class OrderProvider with ChangeNotifier {
   
   /// Recuperar proof do cache persistente (sync, do mapa em memória)
   String? getProofImageFromCache(String orderId) {
-    return _proofImageCache[orderId];
+    final v = _proofImageCache[orderId];
+    // v875 [CRÍTICO]: builds antigos gravavam o MARCADOR no cache. Ele é
+    // write-once, então o marcador ficava para sempre e bloqueava toda
+    // recuperação futura (o guard de _fetchProofFromRelayOnce só checava
+    // não-nulo). Caso real 4e2c858a (26/11): cache com '[encrypted:nip44v2]'
+    // de 19 chars, imagem real disponível nos relays, tela sem comprovante.
+    if (v == null || v.isEmpty || v.startsWith('[encrypted:')) return null;
+    return v;
   }
   
   /// Recuperar proof do cache persistente (async, do SharedPreferences)
@@ -1305,8 +1333,17 @@ class OrderProvider with ChangeNotifier {
         if (key.startsWith(_proofCachePrefix)) {
           final orderId = key.substring(_proofCachePrefix.length);
           final cached = prefs.getString(key);
-          if (cached != null && cached.isNotEmpty) {
+          // v875: NÃO carregar o marcador de criptografia no cache. Builds
+          // antigos o gravaram; como o cache é write-once, ele nunca mais
+          // seria substituído pela imagem real e a ordem ficaria sem
+          // comprovante para sempre (caso 4e2c858a, 26/11).
+          if (cached != null &&
+              cached.isNotEmpty &&
+              !cached.startsWith('[encrypted:')) {
             _proofImageCache[orderId] = cached;
+          } else if (cached != null && cached.startsWith('[encrypted:')) {
+            broLog('🧹 v875: descartando marcador do cache de proof ($orderId)');
+            await prefs.remove(key);
           }
         }
       }
@@ -5029,6 +5066,10 @@ class OrderProvider with ChangeNotifier {
             continue;
           }
           broLog('[FeeReconcile] Ordem $shortId: taxa de $feeSats sats NUNCA saiu — pagando agora');
+          // v874: RASTREABILIDADE — registra a origem da taxa antes de pagar.
+          // Sem isso nao da para saber qual ordem gerou um recebimento.
+          broLog('[FEE-TRACE] reconcile order=${order.id} amount=$baseSats '
+              'fee=$feeSats ref=${reference.toIso8601String()}');
           final ok = await PlatformFeeService.sendPlatformFee(orderId: order.id, totalSats: baseSats);
           if (ok) paidCount++;
           continue;

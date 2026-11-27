@@ -103,6 +103,18 @@ class OrderRealtimeService {
       final channel = WebSocketChannel.connect(Uri.parse(url));
       _connections[url] = channel;
 
+      // v860: `WebSocketChannel.connect` NÃO lança de forma síncrona — a falha
+      // chega como erro ASSÍNCRONO. Sem este `ready` aguardado, um relay morto
+      // (damus 503, nos.lol timeout) gerava "Unhandled Exception:
+      // WebSocketException" no logcat a cada tentativa de reconexão (a cada
+      // 30s), poluindo o log e mascarando erros reais.
+      // NÃO re-lançar: o erro já é tratado aqui e o `onError` do stream cobre
+      // o resto. Re-lançar dentro do catchError vira Unhandled Exception.
+      unawaited(channel.ready.catchError((Object e) {
+        broLog('[RT] Falha ao conectar em $url: $e');
+        _connections.remove(url);
+      }));
+
       channel.stream.listen(
         (message) => _handleMessage(url, message),
         onError: (error) {

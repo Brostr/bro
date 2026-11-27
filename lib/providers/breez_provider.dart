@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/breez_config.dart';
 import '../services/storage_service.dart';
 import '../services/brix_relay_service.dart';
+import '../services/tor_service.dart';
 
 /// Self-custodial Lightning provider using Breez SDK Spark (Nodeless)
 class BreezProvider with ChangeNotifier {
@@ -390,10 +391,16 @@ class BreezProvider with ChangeNotifier {
 
       // Extrair paymentHash do pagamento para identificação precisa
       String? paymentHash;
+      // v874: preimage = prova criptografica (sha256(preimage) == paymentHash).
+      // E a UNICA chave que o destinatario tambem consegue ver no extrato dele
+      // (a coinos expoe sha256(preimage) como 'ref'). Persistir aqui permite
+      // cruzar qualquer recebimento com o envio que o originou.
+      String? preimage;
       if (payment.details is spark.PaymentDetails_Lightning) {
-        paymentHash = (payment.details as spark.PaymentDetails_Lightning)
-            .htlcDetails
-            .paymentHash;
+        final htlc = (payment.details as spark.PaymentDetails_Lightning)
+            .htlcDetails;
+        paymentHash = htlc.paymentHash;
+        preimage = htlc.preimage;
         broLog('🔑 PaymentHash (Lightning): $paymentHash');
       } else if (payment.details is spark.PaymentDetails_Spark) {
         final sparkDetails = payment.details as spark.PaymentDetails_Spark;
@@ -410,7 +417,7 @@ class BreezProvider with ChangeNotifier {
 
       // CRÍTICO: Persistir pagamento IMEDIATAMENTE para não perder
       _persistPayment(payment.id, payment.amount.toInt(),
-          paymentHash: paymentHash);
+          paymentHash: paymentHash, preimage: preimage);
 
       // Also persist BRIX payments locally for wallet fallback
       String? desc;
@@ -538,7 +545,7 @@ class BreezProvider with ChangeNotifier {
 
   /// Persistir pagamento no SharedPreferences para nunca perder
   Future<void> _persistPayment(String paymentId, int amountSats,
-      {String? paymentHash}) async {
+      {String? paymentHash, String? preimage}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
 
@@ -557,6 +564,9 @@ class BreezProvider with ChangeNotifier {
         'id': paymentId,
         'amountSats': amountSats,
         'paymentHash': paymentHash, // IMPORTANTE para reconciliação precisa
+        // v874: preimage permite cruzar com o extrato do destinatário
+        // (sha256(preimage) == paymentHash == 'ref' no extrato da coinos).
+        if (preimage != null) 'preimage': preimage,
         'receivedAt': DateTime.now().toIso8601String(),
         'reconciled': false,
       });
@@ -995,19 +1005,38 @@ class BreezProvider with ChangeNotifier {
   /// Get wallet balance
   Future<Map<String, dynamic>> getBalance() async {
     if (!_isInitialized || _sdk == null) {
-      return {'balance': 0, 'error': 'SDK n�o inicializado'};
+      // v876: NÃO devolver balance 0 — isso fazia a UI mostrar "0 sats" como
+      // se o usuário tivesse perdido tudo. `ok: false` obriga o chamador a
+      // exibir erro em vez de um número inventado.
+      return {
+        'ok': false,
+        'balance': null,
+        'error': 'SDK não inicializado',
+      };
     }
 
     try {
       final info = await _sdk!.getInfo(request: spark.GetInfoRequest());
       return {
+        'ok': true,
         'balance': info.balanceSats.toString(),
         // Spark SDK GetInfoResponse does not expose pending fields here
         'pendingReceive': '0',
         'pendingSend': '0',
       };
     } catch (e) {
-      return {'balance': 0, 'error': e.toString()};
+      // v876 [CRÍTICO]: falha de rede NÃO é saldo zero.
+      //
+      // Caso real 27/11: Orbot em modo VPN bloqueou o SDK Spark. O getInfo
+      // falhou, este catch devolvia balance '0', e a carteira exibia
+      // "0 sats" com o usuário tendo 32.177 sats. Pânico desnecessário.
+      // Leituras parciais (Failed to select leaves) também caem aqui.
+      broLog('❌ getBalance falhou (NÃO é saldo zero): $e');
+      return {
+        'ok': false,
+        'balance': null,
+        'error': e.toString(),
+      };
     }
   }
 
@@ -1385,6 +1414,29 @@ class BreezProvider with ChangeNotifier {
       broLog('   Amount (manual): $amountSats sats');
     }
 
+    // v876 [CRÍTICO]: o SDK Spark (Rust) NÃO passa pelo proxy SOCKS do Dart.
+    // Com o Tor ligado, todo pagamento falhava (PermissionDenied / CloudFront).
+    // Suspende o proxy SÓ durante o envio e restaura no finally — a publicação
+    // do resultado nos relays acontece depois, já com o Tor de volta.
+    return TorService.instance.withTorBypassed(
+      () => _payInvoiceInner(
+        bolt11,
+        amountSats: amountSats,
+        escrowCoverSats: escrowCoverSats,
+        idempotencyKey: idempotencyKey,
+        preparedPayment: preparedPayment,
+      ),
+      reason: 'pagamento Lightning',
+    );
+  }
+
+  Future<Map<String, dynamic>?> _payInvoiceInner(
+    String bolt11, {
+    int? amountSats,
+    int escrowCoverSats = 0,
+    String? idempotencyKey,
+    dynamic preparedPayment,
+  }) async {
     try {
       // Verificar se é Lightning Address ou LNURL
       final lowerInput = bolt11.toLowerCase();
@@ -1715,7 +1767,7 @@ class BreezProvider with ChangeNotifier {
       broLog(
           '📊 Payment types: Lightning=$lightningCount, Spark=$sparkCount, Other=$otherCount');
 
-      return resp.payments.map((payment) {
+      final result = resp.payments.map((payment) {
         String? paymentHash;
         String? description;
         DateTime? timestamp;
@@ -1736,11 +1788,24 @@ class BreezProvider with ChangeNotifier {
         // Extrair detalhes específicos por tipo
         bool internalConversion = false;
         String? preimage; // v823a: prova criptográfica quando liquidado
+        // v874: RASTREABILIDADE — guardar TODOS os identificadores que o SDK
+        // expõe, para cruzar com o extrato do destinatário.
+        //   sparkId  = payment.id (id interno Spark)
+        //   htlcHash = hash do HTLC (o que o SDK chama de paymentHash)
+        //   invoice  = bolt11 (contém o payment_hash REAL da invoice)
+        // Sem isso é impossível provar de onde veio um recebimento: o hash
+        // que o Spark devolve NÃO é o mesmo que o destinatário vê no extrato
+        // (caso 26/11: 8 taxas de 1 sat, 0 hashes em comum com a coinos).
+        final String? sparkId = payment.id;
+        String? invoiceBolt11;
         if (payment.details is spark.PaymentDetails_Lightning) {
           final details = payment.details as spark.PaymentDetails_Lightning;
           paymentHash = details.htlcDetails.paymentHash;
           description = details.description;
           preimage = details.htlcDetails.preimage;
+          try {
+            invoiceBolt11 = details.invoice;
+          } catch (_) {}
         } else if (payment.details is spark.PaymentDetails_Spark) {
           final details = payment.details as spark.PaymentDetails_Spark;
           description = details.invoiceDetails?.description;
@@ -1780,6 +1845,9 @@ class BreezProvider with ChangeNotifier {
           'amountSats': amountSats,
           'fees': feeSats,
           'paymentHash': paymentHash,
+          // v874: identificadores para cruzamento com o extrato do destino
+          'sparkId': sparkId,
+          'invoice': invoiceBolt11,
           'description': description ?? '', // NOVO: Incluir descrição
           'preimage':
               preimage, // v823a: atestado de entrega (liquidação tardia)
@@ -1789,6 +1857,68 @@ class BreezProvider with ChangeNotifier {
           'createdAt': timestamp,
         };
       }).toList();
+
+      // v869: RASTREABILIDADE — dump dos ENVIOS das últimas 48h com hash.
+      // Sem isso é impossível provar de onde veio um recebimento no extrato
+      // do destinatário (caso 26/11: 8 taxas de 1 sat sem origem). Formato
+      // estável para grep: [PAY-TRACE] <iso> <sats> <hash> <desc>
+      // v872: 'timestamp' no mapa e DateTime (nao int). Helper tolerante.
+      int tsMsOf(Map<String, dynamic> p) {
+        final v = p['timestamp'];
+        if (v is DateTime) return v.millisecondsSinceEpoch;
+        if (v is num) return v.toInt();
+        return 0;
+      }
+
+      try {
+        final cutoff = DateTime.now().subtract(const Duration(hours: 48));
+        final recentSent = result.where((p) {
+          if (p['direction'] != 'outgoing') return false;
+          final ms = tsMsOf(p);
+          if (ms <= 0) return false;
+          return DateTime.fromMillisecondsSinceEpoch(ms).isAfter(cutoff);
+        }).toList();
+        // Diagnostico: contar por direcao para validar o filtro
+        final outCount = result.where((p) => p['direction'] == 'outgoing').length;
+        final inCount = result.where((p) => p['direction'] == 'incoming').length;
+        final otherDir = result.length - outCount - inCount;
+        broLog('[PAY-TRACE] total=${result.length} outgoing=$outCount incoming=$inCount other=$otherDir');
+        // Diagnostico: os 5 envios mais recentes (qualquer data).
+        // ATENCAO: 'timestamp' no mapa e int (ms epoch) ? ver montagem acima.
+        final allOut = result.where((p) => p['direction'] == 'outgoing').toList();
+        allOut.sort((a, b) => tsMsOf(b).compareTo(tsMsOf(a)));
+        for (final p in allOut.take(5)) {
+          final dt = DateTime.fromMillisecondsSinceEpoch(tsMsOf(p));
+          broLog('[PAY-TRACE] RECENTE ${dt.toIso8601String()} ${p['amountSats']} sats hash=${p['paymentHash'] ?? "?"}');
+        }
+        broLog('[PAY-TRACE] ${recentSent.length} envios nas ultimas 48h');
+        for (final p in recentSent) {
+          final dt = DateTime.fromMillisecondsSinceEpoch(tsMsOf(p));
+          // v874: linha completa para cruzar com o extrato do destinatario.
+          // invoiceHash = payment_hash extraido do bolt11 (o que o destino ve).
+          String invHash = '?';
+          final inv = p['invoice'] as String?;
+          if (inv != null && inv.isNotEmpty) {
+            try {
+              final dec = await decodeInvoice(inv);
+              invHash = dec?['invoice']?['paymentHash'] as String? ?? '?';
+            } catch (_) {}
+          }
+          // v874: preimage e a UNICA chave que o destinatario tambem ve.
+          // A coinos expoe sha256(preimage) como 'ref' do recebimento, e o
+          // paymentHash da invoice e exatamente esse sha256. Sem o preimage
+          // nao da para provar de onde veio um recebimento.
+          final pre = p['preimage'] as String?;
+          broLog('[PAY-TRACE] ${dt.toIso8601String()} ${p['amountSats']} sats '
+              'sparkId=${p['sparkId'] ?? "?"} htlc=${p['paymentHash'] ?? "?"} '
+              'invoiceHash=$invHash preimage=${pre ?? "?"} '
+              'desc="${p['description'] ?? ""}"');
+        }
+      } catch (e) {
+        broLog('[PAY-TRACE] ERRO no dump: $e');
+      }
+
+      return result;
     } catch (e) {
       broLog('❌ Erro ao listar pagamentos: $e');
       return [];
