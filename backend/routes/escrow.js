@@ -38,6 +38,15 @@ router.post('/create', async (req, res) => {
     if (isNaN(btcAmountParsed) || btcAmountParsed <= 0 || btcAmountParsed > 1) {
       return res.status(400).json({ error: 'btcAmount deve ser entre 0 e 1 BTC' });
     }
+
+    const order = orders.get(orderId);
+    if (!order || order.userId !== userId) {
+      return res.status(404).json({ error: 'Ordem não encontrada' });
+    }
+    if (escrows.has(orderId)) {
+      return res.status(409).json({ error: 'Escrow já existe para esta ordem' });
+    }
+
     const escrow = {
       id: orderId,
       userId,
