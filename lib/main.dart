@@ -667,19 +667,49 @@ Future<void> _restoreNostrKeys(StorageService storage) async {
 }
 
 /// Agendar reconciliacao automatica quando o SDK estiver pronto
+///
+/// v881 [PERF-UI-2]: antes, o listener chamava `_tryReconciliation` a CADA
+/// notify com `isInitialized == true`. Como o BreezProvider notifica em
+/// qualquer evento de carteira, a "reconciliação de inicialização" rodava
+/// dezenas de vezes por sessão (5 em 7 minutos na medição de 18/11), cada uma
+/// lendo até 1.000 pagamentos do SDK. Isso era parte do aquecimento.
+///
+/// Agora: executa UMA vez na transição real false→true, com guard
+/// single-flight, e remove o listener depois de cumprir sua finalidade.
 void _scheduleReconciliationOnStartup(
     BreezProvider breezProvider, OrderProvider orderProvider) {
-  // Tentar reconciliacao inicial apos 5 segundos
-  Future.delayed(const Duration(seconds: 5), () async {
-    await _tryReconciliation(breezProvider, orderProvider);
-  });
+  bool ran = false;
+  bool running = false;
 
-  // Adicionar listener para quando o SDK inicializar depois
-  breezProvider.addListener(() async {
-    if (breezProvider.isInitialized) {
+  Future<void> runOnce() async {
+    if (ran || running) return;
+    if (!breezProvider.isInitialized) return;
+    running = true;
+    try {
       await _tryReconciliation(breezProvider, orderProvider);
+      ran = true;
+    } finally {
+      running = false;
     }
-  });
+  }
+
+  // Tentar reconciliacao inicial apos 5 segundos (caso o SDK ja esteja pronto)
+  Future.delayed(const Duration(seconds: 5), runOnce);
+
+  // Listener para quando o SDK inicializar depois. Remove-se sozinho na
+  // primeira execução bem-sucedida — não fica pendurado no provider.
+  void listener() {
+    if (!breezProvider.isInitialized) return;
+    runOnce().then((_) {
+      if (ran) {
+        try {
+          breezProvider.removeListener(listener);
+        } catch (_) {}
+      }
+    });
+  }
+
+  breezProvider.addListener(listener);
 }
 
 /// Tentar reconciliacao completa com pagamentos do Breez

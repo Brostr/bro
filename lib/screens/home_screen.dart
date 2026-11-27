@@ -54,6 +54,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   int _unreadMessages = 0;
   StreamSubscription<int>? _unreadSub;
 
+  // v881 [PERF-UI-1]: cache do histórico de pagamentos para a seção de
+  // Marketplace. Antes, `_buildMarketplaceActivity` criava
+  // `FutureBuilder(future: breezProvider.listPayments())` DENTRO do build —
+  // cada rebuild da Home (qualquer notify de carteira/ordem) disparava uma
+  // nova leitura de até 1.000 pagamentos no SDK. Medição de 18/11: 30 leituras
+  // em 7 minutos, CPU a 113%, temperatura 30→37 °C.
+  //
+  // Agora o Future vive no estado, é criado uma vez e só é invalidado em
+  // eventos que realmente mudam pagamentos (pull-to-refresh, pagamento novo).
+  Future<List<Map<String, dynamic>>>? _marketplacePaymentsFuture;
+  BreezProvider? _marketplacePaymentsProvider;
+  VoidCallback? _marketplacePaymentsListener;
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +79,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _fetchBitcoinPrice();
       _startPricePolling();
       _startOrdersPolling(); // Iniciar polling de ordens
+      _listenNewPaymentsForMarketplace(); // v881: invalidar cache do Marketplace
       _startBreezRetry(); // v599: retry Breez init periodically if it fails
       _checkSeedRecoveryStatus();
       _checkAndShowBackupReminder();
@@ -657,6 +671,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _ordersUpdateTimer?.cancel();
     _breezRetryTimer?.cancel();
     _unreadSub?.cancel();
+    // v881: remover o listener do Marketplace para não vazar referência.
+    final l = _marketplacePaymentsListener;
+    if (l != null) {
+      try {
+        _marketplacePaymentsProvider?.removeListener(l);
+      } catch (_) {}
+      _marketplacePaymentsListener = null;
+    }
     super.dispose();
   }
 
@@ -718,6 +740,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         }
       }
     });
+  }
+
+  /// v881 [PERF-UI-1]: invalida o cache do Marketplace quando um pagamento
+  /// novo chega. Sem isso, o cache ficaria congelado até o pull-to-refresh —
+  /// e a seção deixaria de refletir vendas do Marketplace.
+  ///
+  /// O listener observa `lastPaymentId` (muda a cada pagamento recebido) em
+  /// vez de qualquer notify, então não reintroduz o problema de reler o SDK
+  /// a cada rebuild.
+  void _listenNewPaymentsForMarketplace() {
+    final breez = context.read<BreezProvider>();
+    String? lastSeen = breez.lastPaymentId;
+    void listener() {
+      final current = breez.lastPaymentId;
+      if (current != null && current != lastSeen) {
+        lastSeen = current;
+        if (mounted) {
+          setState(() => _marketplacePaymentsFuture = null);
+        }
+      }
+    }
+
+    breez.addListener(listener);
+    _marketplacePaymentsListener = listener;
   }
 
   Future<void> _loadData({bool force = false}) async {
@@ -832,6 +878,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       appBar: _buildAppBar(),
       body: RefreshIndicator(
         onRefresh: () async {
+          // v881 [PERF-UI-1]: pull-to-refresh é um dos poucos eventos que
+          // devem reler o histórico de pagamentos (o cache do Marketplace
+          // existe justamente para não reler a cada rebuild).
+          _marketplacePaymentsFuture = null;
           await _loadData(force: true);
           await _fetchBitcoinPrice();
         },
@@ -1516,9 +1566,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   /// v246: Seção de atividade recente do Marketplace na dashboard
+  ///
+  /// v881 [PERF-UI-1]: o Future é cacheado no estado. Antes era criado dentro
+  /// do build, então cada rebuild da Home relia até 1.000 pagamentos do SDK.
   Widget _buildMarketplaceActivity(BreezProvider breezProvider) {
+    // Recria o Future só quando o provider muda (login/logout) ou quando o
+    // cache foi invalidado explicitamente.
+    if (_marketplacePaymentsFuture == null ||
+        !identical(_marketplacePaymentsProvider, breezProvider)) {
+      _marketplacePaymentsProvider = breezProvider;
+      _marketplacePaymentsFuture = breezProvider.listPayments();
+    }
+
     return FutureBuilder<List<Map<String, dynamic>>>(
-      future: breezProvider.listPayments(),
+      future: _marketplacePaymentsFuture,
       builder: (context, snapshot) {
         if (!snapshot.hasData) return const SizedBox.shrink();
         
