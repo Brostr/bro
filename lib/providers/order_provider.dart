@@ -4438,64 +4438,46 @@ class OrderProvider with ChangeNotifier {
   /// mostrava c4bc52b5 (iPhone da Carol, aceite tardio) mas quem pagou e
   /// comprovou foi 95a800b7.
   Future<void> _healProviderIdFromProof() async {
-    var changed = false;
-    final healedOrders = <Order>[];
-    var checked = 0;
-    for (var i = 0; i < _orders.length; i++) {
-      final o = _orders[i];
-      // v717d: ordens TERMINAIS não reescrevemos (história liquidada fica como
-      // está — correção financeira é via mediação, não retroativa local).
-      const terminal = ['completed', 'liquidated', 'cancelled'];
-      if (terminal.contains(o.status)) continue;
-      var sender = o.metadata?['proofImage_senderPubkey']?.toString();
-      // v717d: a metadata pode ter o autor POLUÍDO pelo merge accept×complete
-      // (58ebf198: proofImage_senderPubkey=c4bc52b5, autor real=95a800b7).
-      // O relay é autoridade: o evento que TEM o comprovante, assinado.
-      if (o.status == 'awaiting_confirmation' || o.metadata?['proofReceivedAt'] != null) {
-        try {
-          final proof = await _nostrOrderService.fetchProofFromRelay(o.id)
-              .timeout(const Duration(seconds: 6), onTimeout: () => null);
-          if (proof?['senderPubkey'] != null && proof!['senderPubkey']!.isNotEmpty) {
-            sender = proof['senderPubkey'];
-          }
-        } catch (_) {}
-      }
-      if (sender == null || sender.isEmpty) continue;
-      checked++;
-      if (o.providerId == sender) continue;
-      // v798: trava de ouro — providerId já congelado no canônico; a cura v716
-      // não pode sobrescrever (o lock foi gravado com prova do canônico).
-      if (o.metadata?['billcode_locked'] == true) {
-        broLog('🔒 v798: cura v716 de ${o.id.substring(0, 8)} BLOQUEADA — trava de ouro ativa (canônico=${(o.metadata?['billcode_locked_to']?.toString() ?? "?").substring(0, 8)}).');
-        continue;
-      }
-            // v781 (H2): a republicacao da cura serializa o objeto LOCAL inteiro.
-            // Se a metadata carrega o proofImage_senderPubkey POLUIDO (causa raiz
-            // do caso 58ebf198), o publish sobrescreve o campo bom do relay com o
-            // ruim e a cura se desfaz no proximo sync. O relay e autoridade: o
-            // autor da prova fresco que curou o providerId tambem curah a metadata.
-            final healedMeta = Map<String, dynamic>.from(o.metadata ?? {});
-            if (healedMeta['proofImage_senderPubkey'] != null &&
-                healedMeta['proofImage_senderPubkey'] != sender) {
-              healedMeta['proofImage_senderPubkey'] = sender;
-              healedMeta['proofSenderHealedAt'] = DateTime.now().toIso8601String();
-              broLog('v781-H2: proofImage_senderPubkey de ${o.id.substring(0, 8)} realinhado ao autor do relay (${sender.substring(0, 8)})');
-            }
-            _orders[i] = o.copyWith(providerId: sender, metadata: healedMeta);
-            healedOrders.add(_orders[i]);
-      changed = true;
-      broLog('🩹 v716: providerId de ${o.id.substring(0, 8)} curado pro autor do comprovante (${sender.substring(0, 8)})');
-    }
-    broLog('🩹 v717: cura de providerId rodou — $checked ordem(ns) com prova, ${healedOrders.length} curada(s)');
-    if (changed) {
-      _saveOnlyUserOrders();
-      _immediateNotify();
-      // v717: REPUBLICAR o 30078 corrigido — senão o relay segue com o
-      // providerId errado e re-corrompe o local a cada sync (caso 58ebf198:
-      // a tela mostrava o aceite tardio mesmo após a cura local).
-      for (final healed in healedOrders) {
-        _publishOrderToNostr(healed).then((_) =>
-            broLog('🩹 v717: ordem ${healed.id.substring(0, 8)} republicada com providerId curado'));
+    const terminal = {'completed', 'liquidated', 'cancelled'};
+    final account = _currentUserPubkey;
+    if (account == null || account.isEmpty) return;
+
+    for (final order in List<Order>.of(_orders)) {
+      if (terminal.contains(order.status) ||
+          order.metadata?['billcode_locked'] == true) continue;
+      if (order.status != 'awaiting_confirmation' &&
+          order.metadata?['proofReceivedAt'] == null &&
+          order.metadata?['proofImage_senderPubkey'] == null) continue;
+
+      try {
+        final proof = await _nostrOrderService.fetchProofFromRelay(order.id)
+            .timeout(const Duration(seconds: 6));
+        final sender = proof?['senderPubkey'];
+        if (sender == null || sender.isEmpty || proof?['conflict'] != null ||
+            sender == order.providerId) continue;
+
+        final acceptance = await ApiService().get('/canonical/${Uri.encodeComponent(order.id)}')
+            .timeout(const Duration(seconds: 6));
+        if (acceptance?['known'] != true || acceptance?['canonical'] != sender) continue;
+
+        // Sync or an account switch may have replaced the order during either lookup.
+        if (_currentUserPubkey != account) return;
+        final index = _orders.indexWhere((current) => identical(current, order));
+        if (index < 0 || order.metadata?['billcode_locked'] == true) continue;
+        final healed = order.copyWith(providerId: sender, metadata: {
+          ...?order.metadata,
+          'proofImage_senderPubkey': sender,
+          'proofSenderHealedAt': DateTime.now().toIso8601String(),
+        });
+        _orders[index] = healed;
+        _immediateNotify();
+        await _saveOnlyUserOrders();
+        if (_currentUserPubkey == account && healed.userPubkey == account &&
+            _orders.any((current) => identical(current, healed))) {
+          await _publishOrderToNostr(healed);
+        }
+      } catch (e) {
+        broLog('Provider reconciliation deferred for ${order.id}: $e');
       }
     }
   }
