@@ -1331,6 +1331,13 @@ class NostrWatchtowerService {
   }
 
   /**
+   * Retorna o comprador registrado a partir de eventos Nostr verificados.
+   */
+  getBuyerForOrder(orderId) {
+    return this._orderUsers.get(orderId) || null;
+  }
+
+  /**
    * v688: expõe o provedor registrado p/ a ordem (quem assinou o aceite).
    * Usado pela rota /billcode-fallback p/ validar o pareamento antes de
    * empurrar push.

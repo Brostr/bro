@@ -10,8 +10,7 @@ import 'storage_service.dart';
 ///
 /// Mesmo formato do BrixService: header `Authorization: Nostr <base64(event)>`
 /// kind 27235 com tags u/method (+ payload = sha256 do corpo quando houver).
-/// O backend valida passivamente (req.verifiedPubkey) — rollout em 2 fases:
-/// app assina já; backend passa a EXIGIR quando BILLCODE_FALLBACK_AUTH=required.
+/// O backend exige a assinatura e valida o hash do corpo no POST do fallback.
 Future<Map<String, String>> nip98Headers({
   required String url,
   required String method,

@@ -4392,17 +4392,18 @@ class OrderProvider with ChangeNotifier {
       final meta = Map<String, dynamic>.from(_orders[idx].metadata ?? {});
       final existing = (meta['billCode'] as String?) ?? '';
       if (existing.isNotEmpty && existing != '[encrypted]') return true; // já tem
-      meta['billCode_nip44'] = res['blob'];
-      // Descriptografar já (lado provedor): ECDH(myPriv, senderPub)
+      final buyer = _orders[idx].userPubkey?.toLowerCase();
+      final sender = res['senderPubkey']?.toLowerCase();
       final myPriv = nostrPrivateKey;
-      if (myPriv != null) {
-        try {
-          final plain = _nostrOrderService.decryptNip44(res['blob']!, myPriv, res['senderPubkey']!);
-          if (plain.isNotEmpty) meta['billCode'] = plain;
-        } catch (e) {
-          broLog('⚠️ v688 fallback decrypt falhou: $e');
-        }
+      final blob = res['blob'];
+      if (buyer == null || buyer.isEmpty || buyer != sender ||
+          myPriv == null || blob == null) {
+        return false;
       }
+      final plain = _nostrOrderService.decryptNip44(blob, myPriv, buyer);
+      if (plain.isEmpty) return false;
+      meta['billCode_nip44'] = blob;
+      meta['billCode'] = plain;
       _orders[idx] = _orders[idx].copyWith(metadata: meta);
       await _saveOrders();
       notifyListeners();

@@ -647,8 +647,6 @@ class NostrOrderService {
           connectTimeout: const Duration(seconds: 8),
           receiveTimeout: const Duration(seconds: 8),
         ));
-        // v747 (auditoria B3): assina NIP-98 — o backend passa a exigir quando
-        // BILLCODE_FALLBACK_AUTH=required (2 fases, padrão v566/v615).
         final headers = await nip98Headers(
           url: '${AppConfig.defaultBackendUrl}/billcode-fallback',
           method: 'POST',

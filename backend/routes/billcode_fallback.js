@@ -12,14 +12,13 @@
  *
  * Anti-abuso:
  * - blob limitado a 100KB (imagem não passa aqui, só código)
- * - pareamento validado contra o cache do watchtower quando disponível
- *   (orderId → provedor que aceitou). Se o watchtower não conhece a ordem
- *   (ex.: pós-deploy), armazena mas NÃO empurra push (evita spam de push).
+ * - comprador e provedor validados contra o Watchtower antes de gravar ou ler
  * - 1 entrada por orderId (última vence), TTL 48h, máx 500 entradas.
  */
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { requireAuth } = require('../middleware/verifyNip98Auth');
 
 const FALLBACK_FILE = process.env.NODE_ENV === 'production'
   ? '/data/billcode_fallback.json'
@@ -31,12 +30,7 @@ const MAX_BLOB = 100 * 1024;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 
-// v747 (auditoria B3): auth NIP-98 em 2 fases (mesmo padrão v566/v615).
-//   off      → (default) comportamento antigo
-//   optional → aceita sem auth; se vier ASSINADO errado → 403 (assinante confere)
-//   required → POST exige assinante = senderPubkey; GET exige = providerPubkey
-// Ligar 'optional' quando o app v747+ estiver em campo; 'required' ~30 dias depois.
-const AUTH_MODE = (process.env.BILLCODE_FALLBACK_AUTH || 'off').toLowerCase();
+const ORDER_ID = /^[a-zA-Z0-9-]{8,64}$/;
 
 function loadStore() {
   try {
@@ -74,10 +68,10 @@ module.exports = function createBillcodeFallbackRouter(watchtower) {
   const store = loadStore();
 
   // Comprador publica o blob cifrado (NIP-44) destinado ao provedor
-  router.post('/billcode-fallback', async (req, res) => {
+  router.post('/billcode-fallback', requireAuth, async (req, res) => {
     try {
       const { orderId, providerPubkey, senderPubkey, blob } = req.body || {};
-      if (typeof orderId !== 'string' || !/^[a-zA-Z0-9-]{8,64}$/.test(orderId)) {
+      if (typeof orderId !== 'string' || !ORDER_ID.test(orderId)) {
         return res.status(400).json({ ok: false, error: 'orderId inválido' });
       }
       if (typeof providerPubkey !== 'string' || !HEX64.test(providerPubkey) ||
@@ -88,37 +82,21 @@ module.exports = function createBillcodeFallbackRouter(watchtower) {
         return res.status(400).json({ ok: false, error: 'blob inválido' });
       }
 
-      // v747 (B3): auth em 2 fases
-      if (AUTH_MODE !== 'off') {
-        const signer = req.verifiedPubkey || null;
-        if (signer && signer !== senderPubkey) {
-          console.log(`🚨 [BillcodeFallback] POST ${orderId.substring(0, 8)}: assinante ≠ senderPubkey — rejeitado`);
-          return res.status(403).json({ ok: false, error: 'assinante não confere' });
-        }
-        if (!signer && AUTH_MODE === 'required') {
-          return res.status(401).json({ ok: false, error: 'auth NIP-98 obrigatória' });
-        }
+      if (!req.verifiedPayload) {
+        return res.status(401).json({ ok: false, error: 'payload NIP-98 obrigatório' });
       }
-
-      // Pareamento: se o watchtower conhece a ordem, o provedor tem que bater
-      const knownProvider = watchtower && typeof watchtower.getProviderForOrder === 'function'
-        ? watchtower.getProviderForOrder(orderId)
-        : null;
-      if (knownProvider && knownProvider !== providerPubkey) {
-        console.log(`🚨 [BillcodeFallback] ${orderId.substring(0, 8)}: provider ${providerPubkey.substring(0, 8)} != aceitante conhecido — rejeitado`);
-        return res.status(403).json({ ok: false, error: 'provider não confere com o aceite' });
+      if (req.verifiedPubkey !== senderPubkey ||
+          watchtower.getBuyerForOrder(orderId) !== senderPubkey ||
+          watchtower.getProviderForOrder(orderId) !== providerPubkey ||
+          senderPubkey === providerPubkey) {
+        return res.status(403).json({ ok: false, error: 'participantes não conferem com a ordem' });
       }
 
       store[orderId] = { providerPubkey, senderPubkey, blob, ts: Date.now() };
       scheduleSave(store);
       console.log(`📦 [BillcodeFallback] ${orderId.substring(0, 8)}: blob de ${senderPubkey.substring(0, 8)} → ${providerPubkey.substring(0, 8)} (${blob.length}ch)`);
 
-      // Acorda o provedor (silencioso). Só empurra quando o pareamento é
-      // conhecido — evita spam de push contra pubkeys arbitrárias.
-      let pushed = false;
-      if (knownProvider && watchtower && typeof watchtower.pushBillcodeFallback === 'function') {
-        pushed = await watchtower.pushBillcodeFallback(providerPubkey, senderPubkey, orderId);
-      }
+      const pushed = await watchtower.pushBillcodeFallback(providerPubkey, senderPubkey, orderId);
       return res.json({ ok: true, pushed });
     } catch (e) {
       console.error(`[BillcodeFallback] POST erro: ${e.message}`);
@@ -126,22 +104,15 @@ module.exports = function createBillcodeFallbackRouter(watchtower) {
     }
   });
 
-  // Provedor busca o blob (ciphertext — mesmo nível de exposição de um relay)
-  router.get('/billcode-fallback/:orderId', (req, res) => {
-    const entry = store[req.params.orderId];
-    if (!entry || Date.now() - entry.ts > TTL_MS) {
+  router.get('/billcode-fallback/:orderId', requireAuth, (req, res) => {
+    const { orderId } = req.params;
+    const entry = ORDER_ID.test(orderId) && store[orderId];
+    if (!entry || Date.now() - entry.ts > TTL_MS ||
+        req.verifiedPubkey !== entry.providerPubkey ||
+        watchtower.getProviderForOrder(orderId) !== entry.providerPubkey ||
+        watchtower.getBuyerForOrder(orderId) !== entry.senderPubkey ||
+        entry.senderPubkey === entry.providerPubkey) {
       return res.status(404).json({ ok: false, error: 'não encontrado' });
-    }
-    // v747 (B3): em optional/required, assinante tem que ser o destinatário.
-    // 404 (não 403) pra não vazar a existência da ordem.
-    if (AUTH_MODE !== 'off') {
-      const signer = req.verifiedPubkey || null;
-      if (signer && signer !== entry.providerPubkey) {
-        return res.status(404).json({ ok: false, error: 'não encontrado' });
-      }
-      if (!signer && AUTH_MODE === 'required') {
-        return res.status(401).json({ ok: false, error: 'auth NIP-98 obrigatória' });
-      }
     }
     return res.json({
       ok: true,
