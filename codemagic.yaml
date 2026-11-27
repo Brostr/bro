@@ -440,9 +440,15 @@ workflows:
       cocoapods: default
       java: 17
 
-    # Build interno somente manual: pushes de correção não consomem minutos
-    # macOS nem publicam um TestFlight antes da validação local.
-    triggering: {}
+    # TEMPORARIO (v879): dispara build 879 no branch de testes para validacao
+    # em multiplos dispositivos. REVERTER para `triggering: {}` no proximo push
+    # (mesmo padrao dos commits b77dc22/c87aac4 do build 855).
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: 'test/v827-no-expiry'
+          include: true
 
     scripts:
       - name: Generate env.json from CI variables
