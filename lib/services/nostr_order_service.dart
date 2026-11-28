@@ -1518,6 +1518,29 @@ class NostrOrderService {
     );
   }
 
+  /// v888: divide uma lista de ids em chunks de tamanho fixo.
+  ///
+  /// Extraido para producao (era inline em 2 loops) para poder ser testado
+  /// de verdade. O bug do v812/v815d era exatamente aqui:
+  ///   ids.sublist(i, i + 15 > ids.length ? ids.length : i)   // errado
+  /// Quando o chunk estava CHEIO, o ternario caia no else = i, entao
+  /// sublist(i, i) = lista vazia. E '#d': [] e tratado como SEM FILTRO por
+  /// relays nostr-rs (apexcord, bro-relay2) -> 50 eventos alheios por relay.
+  ///
+  /// Garantias: nenhum chunk vazio, uniao == ids, cada chunk <= size.
+  @visibleForTesting
+  static List<List<String>> chunkIds(List<String> ids, int size) {
+    if (ids.isEmpty || size <= 0) return const [];
+    final chunks = <List<String>>[];
+    for (var i = 0; i < ids.length; i += size) {
+      final end = i + size > ids.length ? ids.length : i + size;
+      final chunk = ids.sublist(i, end);
+      if (chunk.isEmpty) continue; // defesa: nunca enviar '#d': []
+      chunks.add(chunk);
+    }
+    return chunks;
+  }
+
   /// v886 [PERF-SYNC-2]: busca MÚLTIPLOS filtros numa ÚNICA conexão WebSocket.
   ///
   /// ## O problema
@@ -1540,6 +1563,15 @@ class NostrOrderService {
   /// - Relay que falha retorna listas vazias (nunca lança)
   ///
   /// Retorna uma lista de resultados, na MESMA ORDEM dos filtros pedidos.
+  /// v888: exposto para teste real (o integrador apontou que o teste anterior
+  /// testava o relay falso, nao o nosso cliente).
+  @visibleForTesting
+  Future<List<List<Map<String, dynamic>>>> fetchMultipleFromRelayForTest(
+    String relayUrl,
+    List<Map<String, dynamic>> filters,
+  ) =>
+      _fetchMultipleFromRelay(relayUrl, filters);
+
   Future<List<List<Map<String, dynamic>>>> _fetchMultipleFromRelay(
     String relayUrl,
     List<Map<String, dynamic>> filters,
@@ -4155,16 +4187,11 @@ class NostrOrderService {
           // o complete sai com #p VAZIO e a estratégia 1 (#p=eu) nunca o vê.
           // #d={id}_complete é indexado e não depende de #p nenhum.
           final ids = activeOrderIdSet.toList();
-          for (var i = 0; i < ids.length; i += 15) {
-            final batch = ids.sublist(i, i + 15 > ids.length ? ids.length : i + 15)
-                .map((id) => '${id}_complete').toList();
-            // v887 [DEFESA]: '#d': [] é tratado como SEM FILTRO por relays
-            // nostr-rs (apexcord, bro-relay2) — devolvem 50 eventos alheios
-            // (2,7 MB) por relay. Nunca enviar batch vazio.
-            if (batch.isEmpty) continue;
+          // v888: chunkIds garante nenhum chunk vazio (bug do v812/v815d).
+          for (final chunk in chunkIds(ids, 15)) {
             filters.add({
               'kinds': [kindBroComplete],
-              '#d': batch,
+              '#d': chunk.map((id) => '${id}_complete').toList(),
               'limit': 50,
             });
           }
@@ -4173,13 +4200,10 @@ class NostrOrderService {
           // #p VAZIO → a estratégia 1 (#p=eu) perde o aceite → a ordem fica
           // presa em "aguardando Bro" mesmo aceita (o push chega, o status
           // não anda). #d={id}_accept é indexado e não depende de #p.
-          for (var i = 0; i < ids.length; i += 15) {
-            final batchA = ids.sublist(i, i + 15 > ids.length ? ids.length : i + 15)
-                .map((id) => '${id}_accept').toList();
-            if (batchA.isEmpty) continue; // v887: idem — '#d': [] = sem filtro
+          for (final chunk in chunkIds(ids, 15)) {
             filters.add({
               'kinds': [kindBroAccept],
-              '#d': batchA,
+              '#d': chunk.map((id) => '${id}_accept').toList(),
               'limit': 50,
             });
           }

@@ -313,7 +313,9 @@ class BrixRelayService {
   void _scheduleNextPoll({bool immediate = false}) {
     _pollTimer?.cancel();
     if (!_running) return;
-    final delay = immediate ? const Duration(seconds: 5) : _nextPollDelay();
+    // v888: immediate = Duration.zero (antes eram 5s, entao start/resume
+    // nao eram realmente imediatos — o integrador apontou).
+    final delay = immediate ? Duration.zero : _nextPollDelay();
     _pollTimer = Timer(delay, () async {
       // v887 [BLOQUEADOR 1]: reagendar SEMPRE, mesmo se _poll() lan?ar.
       // Antes, uma exce??o em _retryPendingOutgoingFees (fora do try/catch do
@@ -396,12 +398,38 @@ class BrixRelayService {
 
   int _pollCount = 0;
 
+  /// v888: gancho de teste no padrao da casa (`...Override`).
+  /// Permite testar que a cadeia de timers sobrevive a uma excecao no corpo
+  /// do poll (bloqueador 1 da auditoria). Sem isso, o teste so poderia
+  /// verificar a escada de intervalos.
+  @visibleForTesting
+  static Future<void> Function()? pollBodyOverride;
+
+  /// v888: liga o servico sem precisar de BuildContext (para teste).
+  @visibleForTesting
+  void startForTest() {
+    _running = true;
+    _lastActivityAt = DateTime.now();
+    _scheduleNextPoll(immediate: true);
+  }
+
+  /// v888: expoe o agendamento para o teste avancar o tempo.
+  @visibleForTesting
+  void scheduleNextPollForTest({bool immediate = false}) =>
+      _scheduleNextPoll(immediate: immediate);
+
   /// v884 [PERF-DETAILS]: ultima vez que houve atividade real (FCM, invoice,
   /// claim, pagamento). Usado pelo backoff adaptativo do poll.
   DateTime _lastActivityAt = DateTime.now();
   bool _polling = false;
 
   Future<void> _poll() async {
+    // v888: gancho de teste — roda antes do check de _context.
+    final override = pollBodyOverride;
+    if (override != null) {
+      await override();
+      return;
+    }
     if (!_running || _context == null) return;
     if (_polling) return; // Prevent concurrent polls
     _polling = true;
