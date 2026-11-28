@@ -70,20 +70,7 @@ function requireAuth(req, res, next) {
   
   // Pubkey verificada criptograficamente — usar como identidade do usuário
   req.verifiedPubkey = result.pubkey;
-  next();
-}
-
-/**
- * Middleware opcional: adiciona pubkey se auth presente, mas não rejeita sem auth.
- * Útil para rotas que funcionam para anônimos mas dão mais dados a autenticados.
- */
-function optionalAuth(req, res, next) {
-  const result = verifyRequest(req);
-  
-  if (result.valid) {
-    req.verifiedPubkey = result.pubkey;
-  }
-  
+  req.verifiedPayload = result.payloadVerified;
   next();
 }
 
@@ -257,7 +244,11 @@ function verifyNip98Event(event, req) {
     }
   }
 
-  return { valid: true, pubkey: event.pubkey };
+  return {
+    valid: true,
+    pubkey: event.pubkey,
+    payloadVerified: Boolean(payloadTag && req.rawBody?.length),
+  };
 }
 
 /**
@@ -270,4 +261,4 @@ function verifyLegacyHeaders(pubkey, signature, eventId) {
   return { valid: false, reason: 'Formato legado descontinuado. Use NIP-98 padrão (Authorization: Nostr <base64-event>)' };
 }
 
-module.exports = { requireAuth, optionalAuth, verifyRequest };
+module.exports = { requireAuth, verifyRequest };

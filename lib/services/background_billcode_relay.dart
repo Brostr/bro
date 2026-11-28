@@ -66,14 +66,7 @@ Future<bool> handleBillcodeFallbackInBackground(Map<String, dynamic> data) async
     final forProvider = (resp.data['providerPubkey'] as String? ?? '').toLowerCase();
     if (forProvider != myPubkey) return false;
     final blob = resp.data['blob'] as String;
-    final senderPubkey = resp.data['senderPubkey'] as String;
-
-    String plain = '';
-    try {
-      plain = NostrOrderService().decryptNip44(blob, privKey, senderPubkey);
-    } catch (e) {
-      broLog('[BG-Fallback] decrypt falhou: $e');
-    }
+    final senderPubkey = (resp.data['senderPubkey'] as String?)?.toLowerCase();
 
     final prefs = await SharedPreferences.getInstance();
     final ordersJson = await OrdersStorage.read(prefs, myPubkey);
@@ -83,9 +76,13 @@ Future<bool> handleBillcodeFallbackInBackground(Map<String, dynamic> data) async
     bool found = false;
     for (final item in decoded) {
       if (item is Map && item['id']?.toString() == orderId) {
+        final buyer = (item['userPubkey'] ?? item['pubkey'])?.toString().toLowerCase();
+        if (buyer == null || buyer.isEmpty || buyer != senderPubkey) return false;
+        final plain = NostrOrderService().decryptNip44(blob, privKey, buyer);
+        if (plain.isEmpty) return false;
         final meta = Map<String, dynamic>.from(item['metadata'] ?? {});
         meta['billCode_nip44'] = blob;
-        if (plain.isNotEmpty) meta['billCode'] = plain;
+        meta['billCode'] = plain;
         item['metadata'] = meta;
         found = true;
         break;

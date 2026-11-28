@@ -6,7 +6,7 @@ const cron = require('node-cron');
 const rateLimit = require('express-rate-limit');
 
 // Middleware de autenticação Nostr (NIP-98)
-const { requireAuth, optionalAuth } = require('./middleware/verifyNip98Auth');
+const { requireAuth } = require('./middleware/verifyNip98Auth');
 
 // Rotas
 const ordersRoutes = require('./routes/orders');
@@ -199,9 +199,7 @@ app.get('/watchtower/available-orders', watchtowerReadLimiter, requireAuth, (req
 // v688: canal redundante do billCode (blob NIP-44 via backend+FCM quando os
 // relays falham no aparelho do comprador — caso 72d248d8). O blob é ciphertext
 // inútil pra terceiros e o pareamento é validado no watchtower.
-// v747 (auditoria B3): optionalAuth passivo — quem assina ganha verifiedPubkey;
-// a EXIGÊNCIA fica na rota via BILLCODE_FALLBACK_AUTH=optional|required.
-app.use('/', optionalAuth, require('./routes/billcode_fallback')(watchtower));
+app.use('/', require('./routes/billcode_fallback')(watchtower));
 
 // Job para verificar ordens expiradas (roda a cada 5 minutos)
 cron.schedule('*/5 * * * *', async () => {
