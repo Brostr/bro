@@ -291,14 +291,40 @@ class BrixRelayService {
     _brixNotAUser =
         false; // vSEC-fix: re-tentar BRIX — usuário pode ter criado conta
     _pollTimer?.cancel();
-    // v535: intervalo de 5s (antes 1.5s). 1.5s era excessivo e causava
-    // lentidao na UI por fazer 2 chamadas HTTP a cada polling (invoice requests
-    // + pending payments). FCM push faz triggerPoll() imediato quando chega
-    // pagamento, entao 5s de fallback eh suficiente.
-    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
-    _poll(); // immediate first check
+    // v884 [PERF-DETAILS]: backoff adaptativo. Antes era 5s fixo, 24h por dia,
+    // mesmo ocioso — 17.280 chamadas HTTP/dia por usuário sem nada acontecendo.
+    //
+    // Agora: 5s quando há atividade recente (FCM, invoice, claim), e sobe
+    // gradualmente até 60s quando ocioso. `triggerPoll()` (FCM) reseta para 5s
+    // imediatamente, então a reação a pagamento continua instantânea.
+    _scheduleNextPoll(immediate: true);
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service started');
+  }
+
+  /// v884: agenda o próximo poll com backoff adaptativo.
+  ///
+  /// - Atividade recente (< 2 min): 5s (comportamento original)
+  /// - Ocioso: dobra até o teto de 60s
+  /// - `triggerPoll()` (FCM) reseta para 5s
+  void _scheduleNextPoll({bool immediate = false}) {
+    _pollTimer?.cancel();
+    if (!_running) return;
+    final delay = immediate ? const Duration(seconds: 5) : _nextPollDelay();
+    _pollTimer = Timer(delay, () async {
+      await _poll();
+      _scheduleNextPoll();
+    });
+  }
+
+  Duration _nextPollDelay() {
+    final idle = DateTime.now().difference(_lastActivityAt);
+    if (idle.inMinutes < 2) return const Duration(seconds: 5);
+    // Backoff: 5s → 10s → 20s → 40s → 60s (teto)
+    final steps = idle.inMinutes ~/ 2; // a cada 2 min ociosos, sobe um degrau
+    const ladder = [5, 10, 20, 40, 60];
+    final idx = steps.clamp(0, ladder.length - 1);
+    return Duration(seconds: ladder[idx]);
   }
 
   /// Restart the relay (e.g. after app resumes from background).
@@ -311,8 +337,7 @@ class BrixRelayService {
     _backendFcmRegistered = false;
     _brixNotAUser =
         false; // vSEC-fix: re-tentar BRIX — usuário pode ter criado conta
-    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _poll());
-    _poll();
+    _scheduleNextPoll(immediate: true);
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service restarted (resume)');
   }
@@ -330,7 +355,10 @@ class BrixRelayService {
   void triggerPoll() {
     if (_running && _context != null) {
       broLog('[BRIX-RELAY] FCM wake-up → immediate poll');
+      // v884: FCM é atividade real — reseta o backoff para 5s.
+      _lastActivityAt = DateTime.now();
       _poll();
+      _scheduleNextPoll(immediate: true);
     }
   }
 
@@ -344,6 +372,10 @@ class BrixRelayService {
   }
 
   int _pollCount = 0;
+
+  /// v884 [PERF-DETAILS]: ultima vez que houve atividade real (FCM, invoice,
+  /// claim, pagamento). Usado pelo backoff adaptativo do poll.
+  DateTime _lastActivityAt = DateTime.now();
   bool _polling = false;
 
   Future<void> _poll() async {
@@ -477,6 +509,8 @@ class BrixRelayService {
       if (!_brixNotAUser) {
         await _loadClaimedPayments(); // v661: garantir que o set veio do disco
         final pendingPayments = await _brixService.getPendingPayments(_pubkey!);
+        // v884: se há pagamento pendente, é atividade real — mantém poll rápido.
+        if (pendingPayments.isNotEmpty) _lastActivityAt = DateTime.now();
         for (final payment in pendingPayments) {
           if (_claimedPayments.contains(payment.id)) continue;
           _claimedPayments.add(payment.id);
