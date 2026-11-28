@@ -342,28 +342,56 @@ class OrderProvider with ChangeNotifier {
     // onde o usuario eh o PROVIDER tem paymentHash do invoice gerado pelo Bro
     // para receber pagamento (sats RECEBIDOS, nao a pagar) e nao devem ser
     // travados aqui.
+    //
+    // v882 [FAIL-CLOSED — caso 9d4c8dbf]: antes, exigir `paymentHash != null`
+    // deixava passar ordens PAGAS sem hash gravado. O `paymentHash` é dado
+    // LOCAL (não vai para o Nostr), então uma ordem paga em outro aparelho —
+    // ou cujo `setOrderPaymentHashAndStatusLocal` falhou — ficava com
+    // `committedSats = 0` e os sats disponíveis para GASTO DUPLO.
+    //
+    // Agora: ordens em estado que implica pagamento feito (payment_received,
+    // accepted, processing, awaiting_confirmation) travam `totalInvoiceSats`
+    // MESMO sem hash. Direção do erro é sempre travar mais, nunca menos.
 
     if (_currentUserPubkey == null || _currentUserPubkey!.isEmpty) return 0;
     const terminalStatuses = ['completed', 'cancelled', 'liquidated'];
+
+    // Estados em que o comprador JÁ pagou (ou está pagando) e os sats precisam
+    // ficar travados até a ordem terminar.
+    const paidStatuses = [
+      'payment_received',
+      'accepted',
+      'processing',
+      'awaiting_confirmation',
+      'completing',
+    ];
 
     int locked = 0;
     for (final o in _filteredOrders) {
       // v560: SO travar ordens onde sou o buyer (vou pagar ao Bro)
       if (o.userPubkey != _currentUserPubkey) continue;
 
-      // Precisa ter pagamento associado (wallet_* sintetico OU Lightning real)
-      if (o.paymentHash == null || o.paymentHash!.isEmpty) continue;
-
       // Nao contar ordens terminais (ja foram resolvidas)
       if (terminalStatuses.contains(o.status)) continue;
+
+      final hasHash = o.paymentHash != null && o.paymentHash!.isNotEmpty;
+      final isPaidStatus = paidStatuses.contains(o.status);
+
+      // v882: trava se tem hash (wallet_* ou Lightning) OU se o status já
+      // implica pagamento feito. Sem hash e sem status pago = ordem ainda
+      // não paga (pending/draft) → não trava.
+      if (!hasHash && !isPaidStatus) continue;
 
       // v560: usar total = base + fee canonica (mesmo valor que o consumidor
       // ve como "Total Pago" e que sera pago ao Bro)
       final sats = o.totalInvoiceSats;
       if (sats > 0) {
         locked += sats;
-        final kind = o.paymentHash!.startsWith('wallet_') ? 'wallet' : 'lightning';
-        broLog('LOCKED[$kind]: ordem=${o.id.substring(0, 8)} status=${o.status} sats=$sats');
+        final kind = !hasHash
+            ? 'sem-hash'
+            : (o.paymentHash!.startsWith('wallet_') ? 'wallet' : 'lightning');
+        broLog('LOCKED[$kind]: ordem=${o.id.substring(0, 8)} '
+            'status=${o.status} sats=$sats');
       }
     }
 
