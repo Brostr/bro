@@ -204,12 +204,12 @@ git merge-tree (merge-base) origin/main HEAD
 
 ---
 
-## 7. Bug REAL encontrado: ordem `9d4c8dbf` pagou mas não travou os sats
+## 7. Bug corrigido: ordem `9d4c8dbf` pagou mas não travou os sats
 
 **Sintoma (Carol):** "pagou sim, mas com saldo da própria carteira" — e os sats
 não aparecem como bloqueados.
 
-### Investigação concluída — **É BUG**
+### Investigação — **era bug, corrigido no v882**
 
 **Estado real da ordem (logcat 28/11):**
 
@@ -219,77 +219,52 @@ não aparecem como bloqueados.
    providerId=6b79131baebcb3ec...
 ```
 
-**Nenhum log `LOCKED[...]`** — `committedSats` retorna 0.
-**Nenhum log `wallet_`** — o `paymentHash` não tem o prefixo sintético.
-**Nenhum log `setOrderPaymentHashAndStatusLocal`** — a ordem nunca passou por
-`payment_received`.
+**Nenhum log `LOCKED[...]`** · **Nenhum log `wallet_`** ·
+**Nenhum log `setOrderPaymentHashAndStatusLocal`**
 
 ### Causa raiz
 
-O fluxo de pagamento com saldo da carteira (`payment_screen.dart:1029`) faz:
-
-```dart
-orderProvider.setOrderPaymentHashAndStatusLocal(
-  orderId: order.id,
-  paymentHash: paymentHash,   // ← deveria ser 'wallet_<uuid>'
-  invoice: invoice,
-  status: 'payment_received',
-);
-```
-
-E `committedSats` (`order_provider.dart:330`) exige:
+`committedSats` (`order_provider.dart:330`) exigia:
 
 ```dart
 if (o.paymentHash == null || o.paymentHash!.isEmpty) continue;
 ```
 
-**A ordem está `accepted` sem `paymentHash`.** Isso significa que:
+O `paymentHash` é dado **LOCAL** — não vai para o Nostr. Uma ordem paga em
+outro aparelho (ou cujo `setOrderPaymentHashAndStatusLocal` falhou) ficava sem
+hash → `committedSats = 0` → **sats disponíveis para gasto duplo**.
 
-1. O pagamento com saldo **aconteceu** (a Carol confirmou)
-2. Mas o `paymentHash` **não foi gravado** na ordem
-3. Sem `paymentHash`, `committedSats` não trava nada
-4. Os sats ficam **disponíveis para gasto duplo**
+### Correção (v882, commit `0db1bb2`)
 
-### Por que isso é grave
+```dart
+const paidStatuses = [
+  'payment_received', 'accepted', 'processing',
+  'awaiting_confirmation', 'completing',
+];
 
-| Cenário | Consequência |
+final hasHash = o.paymentHash != null && o.paymentHash!.isNotEmpty;
+final isPaidStatus = paidStatuses.contains(o.status);
+
+// v882: trava se tem hash OU se o status já implica pagamento feito.
+if (!hasHash && !isPaidStatus) continue;
+```
+
+**Direção do erro: sempre travar mais, nunca menos (fail-closed).**
+
+### Comportamento preservado
+
+| Situação | Trava? |
 |---|---|
-| Usuário paga ordem com saldo | Sats saem do saldo disponível |
-| `paymentHash` não é gravado | `committedSats` = 0 |
-| Usuário cria outra ordem | Saldo "disponível" inclui os sats já comprometidos |
-| Segunda ordem falha | "Saldo insuficiente" — ou pior, gasta o que era do Bro |
+| `pending`/`draft` sem hash | ❌ não (ordem não paga) |
+| `completed`/`cancelled`/`liquidated` | ❌ não (terminal) |
+| `payment_received`/`accepted`/`processing`/`awaiting_confirmation`/`completing` **sem hash** | ✅ **sim (novo)** |
+| Qualquer status pago **com hash** | ✅ sim (como antes) |
 
-**É a mesma classe do bug v560** (que motivou o `committedSats` existir), mas
-por um caminho diferente: o `paymentHash` não está sendo persistido.
+### Testes
 
-### Hipóteses a investigar
-
-1. **`setOrderPaymentHashAndStatusLocal` falhou silenciosamente** — o guard
-   `if (paymentHash.isEmpty || invoice.isEmpty) return;` loga erro, mas não
-   vi esse log. Pode ser que a ordem não estava em `_orders` no momento
-   (`index == -1`).
-2. **A ordem foi criada em outro dispositivo** e sincronizada via Nostr sem o
-   `paymentHash` (que é local, não vai para o relay).
-3. **O status `accepted` veio do provedor** e sobrescreveu o `payment_received`
-   local antes do `paymentHash` ser gravado.
-
-**Hipótese 2 é a mais provável:** a ordem foi criada em 21/11 (7 dias atrás).
-Se o pagamento foi feito em outro aparelho, o `paymentHash` ficou lá — ele não
-é publicado no Nostr (é dado local).
-
-### Ação recomendada
-
-**NÃO mergear sem investigar.** Este bug permite gasto duplo.
-
-**Correção mínima sugerida:**
-- `committedSats` deve também contar ordens `accepted`/`payment_received` do
-  usuário **mesmo sem `paymentHash`**, usando `totalInvoiceSats` como valor
-  conservador (fail-closed: trava mais, nunca menos).
-- Ou: persistir o `paymentHash` no Nostr (metadata) para sobreviver a troca de
-  dispositivo.
-
-**Teste obrigatório:** ordem paga com saldo → `committedSats > 0` → segunda
-ordem bloqueada por saldo insuficiente.
+`test/race/v882_committed_sats_failclosed_test.dart` — **17 testes**:
+caso real `9d4c8dbf`, todos os estados pagos, os não-pagos, os terminais, e a
+direção fail-closed.
 
 ---
 
