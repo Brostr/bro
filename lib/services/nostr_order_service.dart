@@ -1518,6 +1518,132 @@ class NostrOrderService {
     );
   }
 
+  /// v886 [PERF-SYNC-2]: busca MÚLTIPLOS filtros numa ÚNICA conexão WebSocket.
+  ///
+  /// ## O problema
+  ///
+  /// Cada `_fetchFromRelay` abre uma conexão WebSocket nova, faz handshake,
+  /// envia 1 REQ, espera EOSE e fecha. Com 18 ordens ativas, um passe chegava
+  /// a ~68 conexões de leitura. Cada handshake custa ~500ms e o relay vê N
+  /// conexões do mesmo IP.
+  ///
+  /// ## A correção
+  ///
+  /// Um socket, N REQ (cada um com seu subscription id), um EOSE por
+  /// subscription. É o padrão do `nostr-tools` e do Amethyst.
+  ///
+  /// ## O que NÃO muda
+  ///
+  /// - Filtros idênticos (kinds, authors, tags, since, until, limit)
+  /// - Verificação de assinatura em cada evento
+  /// - Timeout por subscription (8s) e global (10s)
+  /// - Relay que falha retorna listas vazias (nunca lança)
+  ///
+  /// Retorna uma lista de resultados, na MESMA ORDEM dos filtros pedidos.
+  Future<List<List<Map<String, dynamic>>>> _fetchMultipleFromRelay(
+    String relayUrl,
+    List<Map<String, dynamic>> filters,
+  ) async {
+    if (filters.isEmpty) return const [];
+    final results =
+        List.generate(filters.length, (_) => <Map<String, dynamic>>[]);
+    final subIds = List.generate(
+      filters.length,
+      (_) => const Uuid().v4().substring(0, 8),
+    );
+    final subIndex = <String, int>{
+      for (var i = 0; i < subIds.length; i++) subIds[i]: i,
+    };
+    final eoseSeen = <int>{};
+
+    final zoneCompleter = Completer<List<List<Map<String, dynamic>>>>();
+
+    runZonedGuarded(() async {
+      WebSocketChannel? channel;
+      Timer? timeout;
+      final completer = Completer<void>();
+
+      try {
+        channel = WebSocketChannel.connect(Uri.parse(relayUrl));
+        final ch = channel!;
+
+        timeout = Timer(const Duration(seconds: 8), () {
+          if (!completer.isCompleted) completer.complete();
+        });
+
+        ch.stream.listen(
+          (message) {
+            try {
+              final response = jsonDecode(message);
+              if (response is! List || response.isEmpty) return;
+              final type = response[0];
+              if (type == 'EVENT' && response.length >= 3) {
+                final idx = subIndex[response[1]?.toString()];
+                if (idx == null) return;
+                final eventData = response[2] as Map<String, dynamic>;
+
+                // SEGURANÇA: mesma verificação de assinatura do caminho único.
+                try {
+                  Event.fromJson(eventData, verify: true);
+                } catch (e) {
+                  broLog('⚠️ REJEITADO evento com assinatura inválida: '
+                      '${eventData['id']?.toString().substring(0, 8) ?? '?'} - $e');
+                  return;
+                }
+
+                try {
+                  eventData['parsedContent'] = jsonDecode(eventData['content']);
+                } catch (_) {}
+
+                results[idx].add(eventData);
+              } else if (type == 'EOSE' && response.length >= 2) {
+                final idx = subIndex[response[1]?.toString()];
+                if (idx != null) eoseSeen.add(idx);
+                // Só encerra quando TODAS as subscriptions deram EOSE.
+                if (eoseSeen.length >= filters.length &&
+                    !completer.isCompleted) {
+                  completer.complete();
+                }
+              }
+            } catch (_) {}
+          },
+          onError: (e) {
+            if (!completer.isCompleted) completer.complete();
+          },
+          onDone: () {
+            if (!completer.isCompleted) completer.complete();
+          },
+        );
+
+        for (var i = 0; i < filters.length; i++) {
+          ch.sink.add(jsonEncode(['REQ', subIds[i], filters[i]]));
+        }
+
+        await completer.future;
+        if (!zoneCompleter.isCompleted) zoneCompleter.complete(results);
+      } catch (e) {
+        if (!zoneCompleter.isCompleted) zoneCompleter.complete(results);
+      } finally {
+        timeout?.cancel();
+        for (final id in subIds) {
+          try {
+            channel?.sink.add(jsonEncode(['CLOSE', id]));
+          } catch (_) {}
+        }
+        try {
+          channel?.sink.close();
+        } catch (_) {}
+      }
+    }, (error, stack) {
+      if (!zoneCompleter.isCompleted) zoneCompleter.complete(results);
+    });
+
+    return zoneCompleter.future.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () => results,
+    );
+  }
+
   /// Converte evento Nostr para Order model
   /// RETORNA NULL se ordem inválida (amount=0 e não é evento de update)
   Order? eventToOrder(Map<String, dynamic> event) {
@@ -3997,21 +4123,31 @@ class NostrOrderService {
     // resolveu). Mesmo modelo v646 de _fetchTargetedStatusUpdates.
     final relayTasks = <String>[..._relays, ..._fallbackRelays].map((relay) async {
       try {
-        // 2 core strategies per relay (reduced from 5)
-        final strategies = <Future<List<Map<String, dynamic>>>>[
+        // v886 [PERF-SYNC-2]: TODOS os filtros numa ÚNICA conexão WebSocket.
+        // Antes, cada filtro abria seu próprio socket (handshake ~500ms cada).
+        // Com 18 ordens ativas isso chegava a ~49 conexões só neste fetch.
+        // Agora: 1 socket, N REQ, 1 EOSE por subscription.
+        final filters = <Map<String, dynamic>>[
           // 1. Eventos direcionados ao usuário (accept/complete/proof)
-          _fetchFromRelay(relay, kinds: [kindBroAccept, kindBroPaymentProof, kindBroComplete], tags: {'#p': [userPubkey]}, limit: 200)
-            .catchError((_) => <Map<String, dynamic>>[]),
+          {
+            'kinds': [kindBroAccept, kindBroPaymentProof, kindBroComplete],
+            '#p': [userPubkey],
+            'limit': 200,
+          },
           // 2. Eventos do PRÓPRIO USUÁRIO (kind 30080 — status updates publicados por mim)
-          _fetchFromRelay(relay, kinds: [kindBroPaymentProof], authors: [userPubkey], limit: 100)
-            .catchError((_) => <Map<String, dynamic>>[]),
+          {
+            'kinds': [kindBroPaymentProof],
+            'authors': [userPubkey],
+            'limit': 100,
+          },
         ];
         // 3. Buscar por #r (orderId) para updates do provedor sem tag #p
         if (activeOrderIdSet != null && activeOrderIdSet.isNotEmpty) {
-          strategies.add(
-            _fetchFromRelay(relay, kinds: [kindBroPaymentProof], tags: {'#r': activeOrderIdSet.toList()}, limit: 100)
-              .catchError((_) => <Map<String, dynamic>>[]),
-          );
+          filters.add({
+            'kinds': [kindBroPaymentProof],
+            '#r': activeOrderIdSet.toList(),
+            'limit': 100,
+          });
           // v812: 4. COMPLETES por #d — RAIZ do "travado em Bro encontrado" /
           // "concluída sem comprovante" (casos ac6ae697/cdbd6089, 16/11).
           // O publish do complete tagueia #p=order.userPubkey, mas ordens
@@ -4022,10 +4158,11 @@ class NostrOrderService {
           for (var i = 0; i < ids.length; i += 15) {
             final batch = ids.sublist(i, i + 15 > ids.length ? ids.length : i)
                 .map((id) => '${id}_complete').toList();
-            strategies.add(
-              _fetchFromRelay(relay, kinds: [kindBroComplete], tags: {'#d': batch}, limit: 50)
-                .catchError((_) => <Map<String, dynamic>>[]),
-            );
+            filters.add({
+              'kinds': [kindBroComplete],
+              '#d': batch,
+              'limit': 50,
+            });
           }
           // v815d: ACEITES por #d — o IRMÃO do bug do complete (prova na ordem
           // e752ad89, 17/11): aceite publicado de ordem API-sourced sai com
@@ -4035,13 +4172,15 @@ class NostrOrderService {
           for (var i = 0; i < ids.length; i += 15) {
             final batchA = ids.sublist(i, i + 15 > ids.length ? ids.length : i)
                 .map((id) => '${id}_accept').toList();
-            strategies.add(
-              _fetchFromRelay(relay, kinds: [kindBroAccept], tags: {'#d': batchA}, limit: 50)
-                .catchError((_) => <Map<String, dynamic>>[]),
-            );
+            filters.add({
+              'kinds': [kindBroAccept],
+              '#d': batchA,
+              'limit': 50,
+            });
           }
         }
-        final results = await Future.wait(strategies);
+        // v886: 1 socket, N REQ.
+        final results = await _fetchMultipleFromRelay(relay, filters);
         final combined = <Map<String, dynamic>>[];
         for (final eventList in results) {
           combined.addAll(eventList);
