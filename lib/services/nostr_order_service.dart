@@ -1952,6 +1952,7 @@ class NostrOrderService {
   /// (caso 04/11, ordem 2ee6ddd0). Retorna {proofImage_nip44, senderPubkey}.
   Future<Map<String, String>?> fetchProofFromRelay(String orderId) async {
     final allRelays = <String>[..._relays, ..._fallbackRelays];
+    final distinctSenders = <String>{};
     final results = await Future.wait(
       allRelays.map((relay) async {
         try {
@@ -1980,6 +1981,7 @@ class NostrOrderService {
                   plainProof.isNotEmpty &&
                   !plainProof.startsWith('[encrypted:');
               if (!hasEnc && !hasPlain) continue;
+              distinctSenders.add(event['pubkey'] as String);
               final ts = event['created_at'] as int? ?? 0;
               if (ts >= bestTs) {
                 bestTs = ts;
@@ -1996,10 +1998,6 @@ class NostrOrderService {
     // v781 (H1): detectar provas CONFLITANTES - 2+ participantes distintos
         // da corrida provaram pagamento pra mesma ordem. Devolve a mais nova
         // (compatibilidade) + flag 'conflict' pro caller decidir pausar.
-        final distinctSenders = <String>{
-          for (final ev in results)
-            if (ev != null) ev['pubkey'] as String,
-        };
         for (final ev in results) {
           if (ev == null) continue;
           final content = ev['parsedContent'] ?? jsonDecode(ev['content']);
