@@ -22,7 +22,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// Ordens em estado que **implica pagamento feito** travam `totalInvoiceSats`
 /// mesmo sem hash. A direção do erro é sempre travar mais, nunca menos.
 void main() {
-  /// Simula a decisão do `committedSats` (v882).
+  /// Simula a decisão do `committedSats` (v882 + v883).
   bool shouldLock({
     required String status,
     String? paymentHash,
@@ -34,6 +34,7 @@ void main() {
       'processing',
       'awaiting_confirmation',
       'completing',
+      'disputed', // v883
     ];
 
     if (terminalStatuses.contains(status)) return false;
@@ -123,6 +124,7 @@ void main() {
         'processing',
         'awaiting_confirmation',
         'completing',
+        'disputed',
       ];
       for (final s in paidStatuses) {
         expect(shouldLock(status: s, paymentHash: null), isTrue,
@@ -138,6 +140,20 @@ void main() {
       final lockedA = shouldLock(status: 'accepted', paymentHash: null);
       expect(lockedA, isTrue,
           reason: 'sem isso, B usaria sats que já são do Bro');
+    });
+
+    test('v883: disputed sem hash trava (gap da auditoria)', () {
+      // Ordem paga em outro aparelho (sem hash local) que entra em disputa.
+      // Se a resolução for a favor do provedor, o pagamento é devido.
+      expect(
+        shouldLock(status: 'disputed', paymentHash: null),
+        isTrue,
+        reason: 'disputed não é terminal — os sats seguem comprometidos',
+      );
+    });
+
+    test('v883: disputed com hash também trava', () {
+      expect(shouldLock(status: 'disputed', paymentHash: 'wallet_x'), isTrue);
     });
   });
 }

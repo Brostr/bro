@@ -358,12 +358,22 @@ class OrderProvider with ChangeNotifier {
 
     // Estados em que o comprador JÁ pagou (ou está pagando) e os sats precisam
     // ficar travados até a ordem terminar.
+    //
+    // v883 [gap apontado na auditoria do merge]: `disputed` incluído.
+    // Uma ordem paga em OUTRO aparelho (sem hash local) que entra em disputa
+    // ficava sem trava. Se a resolução for a favor do provedor, o pagamento é
+    // devido com sats possivelmente já gastos. Janela estreita (exige
+    // cross-device + disputa), mas a direção fail-closed pede incluir.
+    //
+    // `disputed` NÃO é terminal: a ordem ainda vai ser resolvida (completed ou
+    // cancelled). Até lá, os sats continuam comprometidos.
     const paidStatuses = [
       'payment_received',
       'accepted',
       'processing',
       'awaiting_confirmation',
       'completing',
+      'disputed',
     ];
 
     int locked = 0;

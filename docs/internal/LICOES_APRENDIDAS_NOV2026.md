@@ -344,7 +344,96 @@ janela, e a publicação do resultado volta pelo Tor.
 
 ---
 
-## 10. Arquivos tocados nesta sessão
+## 11. v882/v883 — Sats comprometidos NUNCA podem ficar disponíveis
+
+> **Este é o aprendizado mais caro da sessão.** Leia antes de mexer em
+> `committedSats`, saldo, ou qualquer coisa que decida "quanto o usuário pode
+> gastar".
+
+### 11.1 O bug (caso `9d4c8dbf`)
+
+Carol: *"tem a ordem 9d4c8dbf em andamento como comprador e não aparece que os
+sats estão bloqueados nela"* — e depois: *"pagou sim, mas com saldo da própria
+carteira"*.
+
+**Estado real:**
+
+```
+order 9d4c8dbf: status=accepted, paymentHash=null
+logs LOCKED: 0
+```
+
+**Causa raiz:** `committedSats` exigia `paymentHash != null` para travar sats:
+
+```dart
+if (o.paymentHash == null || o.paymentHash!.isEmpty) continue;
+```
+
+**O `paymentHash` é dado LOCAL.** Ele não vai para o Nostr. Então:
+
+| Cenário | `paymentHash` | `committedSats` | Resultado |
+|---|---|---|---|
+| Pago no mesmo aparelho | gravado | correto | ✅ |
+| Pago em **outro aparelho** | `null` | **0** | 🔴 **gasto duplo** |
+| `setOrderPaymentHashAndStatusLocal` falhou | `null` | **0** | 🔴 **gasto duplo** |
+
+### 11.2 A regra que fica
+
+> **Nunca use um identificador LOCAL como única condição para travar dinheiro.**
+
+Se o dado que prova o compromisso pode não existir (troca de dispositivo,
+falha de escrita, sync parcial), a condição precisa ter um **fallback baseado
+no estado**, não no identificador.
+
+### 11.3 A correção (v882)
+
+```dart
+const paidStatuses = [
+  'payment_received', 'accepted', 'processing',
+  'awaiting_confirmation', 'completing', 'disputed',  // disputed = v883
+];
+
+final hasHash = o.paymentHash != null && o.paymentHash!.isNotEmpty;
+final isPaidStatus = paidStatuses.contains(o.status);
+
+// Trava se tem hash OU se o status já implica pagamento feito.
+if (!hasHash && !isPaidStatus) continue;
+```
+
+**Direção do erro: sempre travar MAIS, nunca menos (fail-closed).**
+
+### 11.4 O gap que a auditoria pegou (v883)
+
+O auditor notou: `'disputed'` não estava em `paidStatuses`.
+
+**Por que importa:** uma ordem paga em outro aparelho (sem hash local) que
+entra em disputa ficava sem trava. Se a resolução for a favor do provedor, o
+pagamento é devido com sats possivelmente já gastos.
+
+**Janela:** estreita (exige cross-device + disputa), mas a direção fail-closed
+pede incluir. `disputed` **não é terminal** — a ordem ainda vai ser resolvida.
+
+### 11.5 Checklist antes de mexer em `committedSats`
+
+- [ ] A condição de trava depende de dado LOCAL? (se sim, precisa fallback)
+- [ ] Todos os estados "pagos mas não terminais" estão na lista?
+      (`payment_received`, `accepted`, `processing`, `awaiting_confirmation`,
+      `completing`, `disputed`)
+- [ ] Estados terminais (`completed`, `cancelled`, `liquidated`) continuam fora?
+- [ ] `pending`/`draft` sem hash continuam destravados? (ordem não paga)
+- [ ] Pode haver dupla contagem? (condição OR + um `+=` por ordem)
+- [ ] O valor travado é o "Total Pago" canônico (`totalInvoiceSats`)?
+- [ ] Teste cobre o caso "pago sem hash"?
+
+### 11.6 Teste de regressão
+
+`test/race/v882_committed_sats_failclosed_test.dart` — **19 testes**:
+caso real `9d4c8dbf`, todos os estados pagos, os não-pagos, os terminais,
+`disputed` (v883) e a direção fail-closed.
+
+---
+
+## 12. Arquivos tocados nesta sessão
 
 ### Comprovante / status
 - `lib/services/nostr_order_service.dart` — NIP-40 removido do `bro_complete`

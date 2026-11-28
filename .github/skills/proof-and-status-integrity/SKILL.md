@@ -212,6 +212,76 @@ definitiva** — o evento nasceu quebrado em 19/11, antes das correções.
 
 5. **Assumir que `proofImage` contém a imagem.** Ele contém o marcador.
 
+6. **Usar identificador LOCAL como única condição para travar dinheiro.**
+   `committedSats` exigia `paymentHash != null`, mas o hash é local (não vai
+   para o Nostr). Ordem paga em outro aparelho ficava sem trava → **gasto
+   duplo**. Ver seção abaixo.
+
+---
+
+## Sats comprometidos NUNCA podem ficar disponíveis
+
+### A regra
+
+> **Nunca use um identificador LOCAL como única condição para travar dinheiro.**
+
+Se o dado que prova o compromisso pode não existir (troca de dispositivo,
+falha de escrita, sync parcial), a condição precisa ter um **fallback baseado
+no estado**, não no identificador.
+
+### O bug real (caso `9d4c8dbf`, v882)
+
+```dart
+// ERRADO — paymentHash é local, pode não existir
+if (o.paymentHash == null || o.paymentHash!.isEmpty) continue;
+```
+
+| Cenário | `paymentHash` | `committedSats` | Resultado |
+|---|---|---|---|
+| Pago no mesmo aparelho | gravado | correto | ✅ |
+| Pago em **outro aparelho** | `null` | **0** | 🔴 gasto duplo |
+| Escrita do hash falhou | `null` | **0** | 🔴 gasto duplo |
+
+### A correção (fail-closed)
+
+```dart
+const paidStatuses = [
+  'payment_received', 'accepted', 'processing',
+  'awaiting_confirmation', 'completing', 'disputed',
+];
+
+final hasHash = o.paymentHash != null && o.paymentHash!.isNotEmpty;
+final isPaidStatus = paidStatuses.contains(o.status);
+
+// Trava se tem hash OU se o status já implica pagamento feito.
+if (!hasHash && !isPaidStatus) continue;
+```
+
+**Direção do erro: sempre travar MAIS, nunca menos.**
+
+### Checklist antes de mexer em `committedSats`
+
+- [ ] A condição de trava depende de dado LOCAL? (se sim, precisa fallback)
+- [ ] Todos os estados "pagos mas não terminais" estão na lista?
+- [ ] Estados terminais (`completed`, `cancelled`, `liquidated`) continuam fora?
+- [ ] `pending`/`draft` sem hash continuam destravados? (ordem não paga)
+- [ ] Pode haver dupla contagem? (condição OR + um `+=` por ordem)
+- [ ] O valor travado é o "Total Pago" canônico (`totalInvoiceSats`)?
+- [ ] Teste cobre o caso "pago sem hash"?
+
+### Por que `disputed` está na lista (v883)
+
+Uma ordem paga em outro aparelho (sem hash local) que entra em disputa ficava
+sem trava. Se a resolução for a favor do provedor, o pagamento é devido com
+sats possivelmente já gastos. `disputed` **não é terminal** — a ordem ainda vai
+ser resolvida.
+
+### Teste de regressão
+
+`test/race/v882_committed_sats_failclosed_test.dart` — 19 testes cobrindo o
+caso real, todos os estados pagos, os não-pagos, os terminais, `disputed` e a
+direção fail-closed.
+
 ---
 
 ## Referências
