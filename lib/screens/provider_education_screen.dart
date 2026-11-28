@@ -144,10 +144,10 @@ class ProviderEducationScreen extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // 🧪 Tier Trial para testar
+          // 🌱 Tier 1 — "Meus Primeiros Sats" (R2): SEM garantia.
           _buildTierRow(
             tier: l.t('prov_edu_tier_trial'),
-            guarantee: 'R\$ 10',
+            guarantee: l.t('prov_edu_tier_trial_guarantee'),
             maxOrder: 'até R\$ 10',
             color: Colors.green,
             isHeader: false,

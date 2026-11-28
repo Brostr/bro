@@ -2779,6 +2779,12 @@ class OrderProvider with ChangeNotifier {
   // Sem isso, cada sync re-publicava o 30078 terminal da mesma ordem,
   // alimentando o loop zumbi e o rate-limit do damus.
   final Map<String, DateTime> _terminalRepublishThrottle = {};
+
+  /// v885 [PERF-SYNC-3]: cooldown de republicacao de completion.
+  /// Sem isso, toda ordem completed das ultimas 48h era republicada a
+  /// CADA sync (~45s) — 69 execucoes e 8 republicacoes da mesma ordem
+  /// em 10 min (medicao 28/11, ordem 561f1e17).
+  final Map<String, DateTime> _completionRepublishThrottle = {};
   static const int _terminalRepublishCooldownMinutes = 1;
 
   Future<void> _republishOrderEventWithTerminalStatus(Order order, String newStatus) async {
@@ -6889,10 +6895,28 @@ class OrderProvider with ChangeNotifier {
     }).toList();
     
     if (candidates.isEmpty) return;
-    
-    broLog('🔄 _republishUnconfirmedCompletions: ${candidates.length} ordens completed para re-publicar');
-    
-    for (final order in candidates) {
+
+    // v885 [PERF-SYNC-3]: cooldown por ordem. Antes, TODA ordem completed das
+    // ultimas 48h era republicada a CADA sync (a cada ~45s). Medicao 28/11:
+    // 69 execucoes em ~10 min, 8 republicacoes da mesma ordem (561f1e17).
+    // Isso e parte do aquecimento e do trafego de relay.
+    //
+    // Agora: no maximo 1 republicacao por ordem a cada 30 min. O evento
+    // replaceable (#d unico) ja garante que republicar nao duplica no relay ?
+    // o problema era o volume de escritas, nao a corretude.
+    final now = DateTime.now();
+    final toRepublish = candidates.where((o) {
+      final last = _completionRepublishThrottle[o.id];
+      if (last != null && now.difference(last).inMinutes < 30) return false;
+      return true;
+    }).toList();
+
+    if (toRepublish.isEmpty) return;
+
+    broLog('🔄 _republishUnconfirmedCompletions: ${toRepublish.length} de ${candidates.length} ordens completed para re-publicar');
+
+    for (final order in toRepublish) {
+      _completionRepublishThrottle[order.id] = now;
                 try {
         // v779 (M1): validar PROVA antes de republicar completion. Sem prova,
         // a republicacao e amplificador: um 'completed' sem comprovante

@@ -352,11 +352,13 @@ For details, see [SECURITY.md](SECURITY.md). To report a vulnerability, see [SEC
 
 ## Collateral Tiers
 
-Providers deposit collateral (in BRL equivalent via Lightning) to unlock higher order limits:
+Providers deposit collateral (in BRL equivalent via Lightning) to unlock higher order limits.
+
+**The first tier requires NO collateral** — anyone can start earning sats using fiat liquidity, then climb the tiers as they accumulate.
 
 | Tier | Collateral | Max Order |
 |------|-----------|-----------|
-| 🧪 Trial | R$ 10 | R$ 10 |
+| 🌱 Meus Primeiros Sats | **None** | R$ 10 |
 | 🥉 Starter | R$ 50 | R$ 50 |
 | 🥈 Basic | R$ 200 | R$ 200 |
 | 🥇 Intermediate | R$ 500 | R$ 500 |
