@@ -297,6 +297,9 @@ class BrixRelayService {
     // Agora: 5s quando há atividade recente (FCM, invoice, claim), e sobe
     // gradualmente até 60s quando ocioso. `triggerPoll()` (FCM) reseta para 5s
     // imediatamente, então a reação a pagamento continua instantânea.
+    // v887: ao iniciar, tratar como atividade recente — quem abre o app
+    // precisa de poll rápido, não do degrau de 60s de quem estava ocioso.
+    _lastActivityAt = DateTime.now();
     _scheduleNextPoll(immediate: true);
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service started');
@@ -312,13 +315,30 @@ class BrixRelayService {
     if (!_running) return;
     final delay = immediate ? const Duration(seconds: 5) : _nextPollDelay();
     _pollTimer = Timer(delay, () async {
-      await _poll();
-      _scheduleNextPoll();
+      // v887 [BLOQUEADOR 1]: reagendar SEMPRE, mesmo se _poll() lan?ar.
+      // Antes, uma exce??o em _retryPendingOutgoingFees (fora do try/catch do
+      // _pollInner) matava a cadeia de timers e o poll parava de vez —
+      // parando claim offline e captura de invoice request até o próximo
+      // resume/FCM. O Timer.periodic antigo nunca morria; a cadeia pode.
+      try {
+        await _poll();
+      } catch (e) {
+        broLog('[BRIX-RELAY] poll lançou (cadeia continua): $e');
+      } finally {
+        _scheduleNextPoll();
+      }
     });
   }
 
-  Duration _nextPollDelay() {
-    final idle = DateTime.now().difference(_lastActivityAt);
+  /// v887: exposto para teste real (o integrador apontou que os testes
+  /// anteriores eram tautologias que nao importavam o app).
+  @visibleForTesting
+  Duration nextPollDelayForTest(DateTime now) => _nextPollDelayAt(now);
+
+  Duration _nextPollDelay() => _nextPollDelayAt(DateTime.now());
+
+  Duration _nextPollDelayAt(DateTime now) {
+    final idle = now.difference(_lastActivityAt);
     if (idle.inMinutes < 2) return const Duration(seconds: 5);
     // Backoff: 5s → 10s → 20s → 40s → 60s (teto)
     final steps = idle.inMinutes ~/ 2; // a cada 2 min ociosos, sobe um degrau
@@ -337,6 +357,9 @@ class BrixRelayService {
     _backendFcmRegistered = false;
     _brixNotAUser =
         false; // vSEC-fix: re-tentar BRIX — usuário pode ter criado conta
+    // v887: resume = atividade recente. Sem isso, quem volta de 30 min em
+    // background cai direto no degrau de 60s justo quando abre o app.
+    _lastActivityAt = DateTime.now();
     _scheduleNextPoll(immediate: true);
     _ensureFcmRegistered();
     broLog('[BRIX-RELAY] Service restarted (resume)');

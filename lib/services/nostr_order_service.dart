@@ -4156,8 +4156,12 @@ class NostrOrderService {
           // #d={id}_complete é indexado e não depende de #p nenhum.
           final ids = activeOrderIdSet.toList();
           for (var i = 0; i < ids.length; i += 15) {
-            final batch = ids.sublist(i, i + 15 > ids.length ? ids.length : i)
+            final batch = ids.sublist(i, i + 15 > ids.length ? ids.length : i + 15)
                 .map((id) => '${id}_complete').toList();
+            // v887 [DEFESA]: '#d': [] é tratado como SEM FILTRO por relays
+            // nostr-rs (apexcord, bro-relay2) — devolvem 50 eventos alheios
+            // (2,7 MB) por relay. Nunca enviar batch vazio.
+            if (batch.isEmpty) continue;
             filters.add({
               'kinds': [kindBroComplete],
               '#d': batch,
@@ -4170,8 +4174,9 @@ class NostrOrderService {
           // presa em "aguardando Bro" mesmo aceita (o push chega, o status
           // não anda). #d={id}_accept é indexado e não depende de #p.
           for (var i = 0; i < ids.length; i += 15) {
-            final batchA = ids.sublist(i, i + 15 > ids.length ? ids.length : i)
+            final batchA = ids.sublist(i, i + 15 > ids.length ? ids.length : i + 15)
                 .map((id) => '${id}_accept').toList();
+            if (batchA.isEmpty) continue; // v887: idem — '#d': [] = sem filtro
             filters.add({
               'kinds': [kindBroAccept],
               '#d': batchA,
